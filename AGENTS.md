@@ -1,0 +1,1 @@
+avoid using cli commands to do something. prefer using platform apis or using a crate for that.

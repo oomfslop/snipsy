@@ -1,0 +1,17 @@
+[package]
+name = "snipsy"
+version = "0.1.0"
+edition = "2024"
+description = "macOS global shortcut for searching a screen selection with Google Lens"
+
+[dependencies]
+base64 = "0.22"
+global-hotkey = "0.8"
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGWindow"] }
+objc2-foundation = "0.3"
+
+[profile.release]
+lto = true
+codegen-units = 1
