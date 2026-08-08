@@ -1,16 +1,24 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::{Vec2, vec2};
+use nekoframe::catui::ui::components::components::stack::zstack_builder::ZStack;
 use nekoframe::prelude::*;
 
 use crate::{app::App, lens};
 
-const ACTION_BAR_WIDTH: f32 = 88.0;
-const ACTION_BAR_HEIGHT: f32 = 44.0;
+const ACTION_BUTTON_SIZE: f32 = 44.0;
+const ACTION_BAR_DIVIDER_WIDTH: f32 = 1.0;
+const ACTION_BAR_WIDTH: f32 = ACTION_BUTTON_SIZE * 2.0 + ACTION_BAR_DIVIDER_WIDTH;
+const ACTION_BAR_HEIGHT: f32 = ACTION_BUTTON_SIZE;
 const ACTION_BAR_GAP: f32 = 8.0;
 const SCREEN_MARGIN: f32 = 8.0;
 const HANDLE_RADIUS: f32 = 5.0;
 const HANDLE_HIT_RADIUS: f32 = 10.0;
+const ACCENT: Color = Color::from_rgb(47, 128, 237);
+
+/// lucide `search` and `x` (ISC, <https://lucide.dev>), 24-box stroke-2.
+const SEARCH_ICON: &str = "M11 3a8 8 0 1 0 0 16 8 8 0 0 0 0-16M21 21L16.65 16.65";
+const CANCEL_ICON: &str = "M18 6L6 18M6 6L18 18";
 
 #[derive(Clone, Copy, PartialEq)]
 enum DragMode {
@@ -73,15 +81,6 @@ impl SelectionState {
 
     fn begin_drag(&mut self) {
         if let Some(selection) = self.selection {
-            let action_bar = create_action_bar_rect(selection, self.size);
-            if create_search_button_rect(action_bar).intersects(self.pointer) {
-                self.pending_action = Some(SelectionAction::Search(selection));
-                return;
-            }
-            if create_cancel_button_rect(action_bar).intersects(self.pointer) {
-                self.pending_action = Some(SelectionAction::Cancel);
-                return;
-            }
             if let Some(handle) = get_resize_handle(self.pointer, selection) {
                 self.start = self.pointer;
                 self.drag_origin = Some(selection);
@@ -140,9 +139,6 @@ impl SelectionState {
         let Some(selection) = self.selection else {
             return CursorIcon::Crosshair;
         };
-        if create_action_bar_rect(selection, self.size).intersects(self.pointer) {
-            return CursorIcon::Pointer;
-        }
         if let Some(handle) = get_resize_handle(self.pointer, selection) {
             return get_resize_cursor(handle);
         }
@@ -211,6 +207,12 @@ impl WindowDelegate<SelectionState> for SelectionDelegate {
 }
 
 pub fn build_root(alloc: &'static IdAlloc) -> Box<dyn Component<SelectionState>> {
+    return ZStack::new()
+        .children((build_canvas(), build_action_bar()))
+        .into_component(alloc);
+}
+
+fn build_canvas() -> impl IntoComponent<SelectionState> {
     return PaintArea::new()
         .size_fn(|state: &SelectionState| state.size)
         .revision(|state: &SelectionState| state.revision)
@@ -227,8 +229,9 @@ pub fn build_root(alloc: &'static IdAlloc) -> Box<dyn Component<SelectionState>>
                 state.update_drag();
                 return true;
             }
-            // A standing selection draws pointer-dependent chrome (action-bar
-            // hover, handle cursors); without one, moves change nothing.
+            // A standing selection resolves its cursor from the pointer
+            // (handle vs move vs crosshair), and PaintArea resolves the
+            // cursor at render — a move without one changes nothing.
             return state.selection.is_some();
         })
         .on_pointer_up(|state, pointer| {
@@ -238,8 +241,84 @@ pub fn build_root(alloc: &'static IdAlloc) -> Box<dyn Component<SelectionState>>
             }
             state.finish_drag();
             return true;
+        });
+}
+
+fn build_action_bar() -> impl IntoComponent<SelectionState> {
+    return Container::new()
+        .position_fn(|state: &SelectionState| {
+            return state
+                .selection
+                .map_or(Vec2::ZERO, |selection| create_action_bar_rect(selection, state.size).pos);
         })
-        .into_component(alloc);
+        .child(
+            Show::new()
+                .when(|state: &SelectionState| state.selection.is_some() && state.drag_mode.is_none())
+                .child(build_action_bar_content),
+        );
+}
+
+fn build_action_bar_content() -> impl IntoComponent<SelectionState> {
+    return Container::new()
+        .size(vec2(ACTION_BAR_WIDTH, ACTION_BAR_HEIGHT))
+        .background(Color::from_rgba(31, 32, 35, 250))
+        .outline(1.0, Color::from_rgba(255, 255, 255, 24))
+        .corner_radius(12.0)
+        .captures(true)
+        .child(
+            HStack::new()
+                .align(FlexAlign::Center)
+                .children((
+                    build_action_button(
+                        SEARCH_ICON,
+                        "Search",
+                        Color::WHITE,
+                        Color::from_rgba(47, 128, 237, 220),
+                        |state| {
+                            if let Some(selection) = state.selection {
+                                state.pending_action = Some(SelectionAction::Search(selection));
+                            }
+                        },
+                    ),
+                    Container::new()
+                        .size(vec2(ACTION_BAR_DIVIDER_WIDTH, 22.0))
+                        .background(Color::from_rgba(255, 255, 255, 40))
+                        .child(Text::new().label("")),
+                    build_action_button(
+                        CANCEL_ICON,
+                        "Cancel",
+                        Color::from_rgb(238, 238, 238),
+                        Color::from_rgba(235, 87, 87, 72),
+                        |state| state.pending_action = Some(SelectionAction::Cancel),
+                    ),
+                )),
+        );
+}
+
+fn build_action_button(
+    icon: &'static str,
+    label: &'static str,
+    icon_color: Color,
+    hover: Color,
+    on_click: impl 'static + Fn(&mut SelectionState),
+) -> impl IntoComponent<SelectionState> {
+    return Container::new()
+        .size(Vec2::splat(ACTION_BUTTON_SIZE))
+        .justify(FlexAlign::Center)
+        .align(FlexAlign::Center)
+        .corner_radius(9.0)
+        .hover_background(hover)
+        .hover_background_inset(4.0)
+        .hover_cursor(CursorIcon::Pointer)
+        .captures(true)
+        .on_click(on_click)
+        .child(
+            SvgIcon::new(icon)
+                .size(20.0)
+                .stroke_width(2.0)
+                .color(icon_color)
+                .label(label),
+        );
 }
 
 fn paint_selection(state: &SelectionState, painter: &mut Painter, area: Rect) {
@@ -271,32 +350,26 @@ fn paint_selection(state: &SelectionState, painter: &mut Painter, area: Rect) {
         )),
         dim,
     );
-    painter.stroke_rect(at(selection), Color::from_rgb(47, 128, 237), 2.0);
+    painter.stroke_rect(at(selection), ACCENT, 2.0);
 
-    if state.drag_mode != Some(DragMode::New) {
-        for (_, center) in get_resize_handle_centers(selection) {
-            painter.queue().push_primitive(Primitive::Rect(RectanglePrimitive {
-                rect: at(create_rect(
-                    center - Vec2::splat(HANDLE_RADIUS),
-                    Vec2::splat(HANDLE_RADIUS * 2.0),
-                )),
-                color: Color::WHITE,
-                outline: Stroke {
-                    width: 2.0,
-                    color: Color::from_rgb(47, 128, 237),
-                    kind: StrokeKind::Inside,
-                    dash: None,
-                },
-                corners: Corners::same(HANDLE_RADIUS),
-            }));
-        }
+    if state.drag_mode == Some(DragMode::New) {
+        return;
     }
-    if state.drag_mode.is_none() {
-        draw_action_bar(
-            painter,
-            at(create_action_bar_rect(selection, state.size)),
-            origin + state.pointer,
-        );
+    for (_, center) in get_resize_handle_centers(selection) {
+        painter.queue().push_primitive(Primitive::Rect(RectanglePrimitive {
+            rect: at(create_rect(
+                center - Vec2::splat(HANDLE_RADIUS),
+                Vec2::splat(HANDLE_RADIUS * 2.0),
+            )),
+            color: Color::WHITE,
+            outline: Stroke {
+                width: 2.0,
+                color: ACCENT,
+                kind: StrokeKind::Inside,
+                dash: None,
+            },
+            corners: Corners::same(HANDLE_RADIUS),
+        }));
     }
 }
 
@@ -458,89 +531,25 @@ fn create_action_bar_rect(selection: Rect, bounds: Vec2) -> Rect {
     );
 }
 
-fn create_search_button_rect(action_bar: Rect) -> Rect {
-    return create_rect(action_bar.pos, vec2(ACTION_BAR_WIDTH / 2.0, ACTION_BAR_HEIGHT));
-}
-
-fn create_cancel_button_rect(action_bar: Rect) -> Rect {
-    return create_rect(
-        action_bar.pos + vec2(ACTION_BAR_WIDTH / 2.0, 0.0),
-        vec2(ACTION_BAR_WIDTH / 2.0, ACTION_BAR_HEIGHT),
-    );
-}
-
-fn draw_action_bar(painter: &mut Painter, action_bar: Rect, pointer: Vec2) {
-    painter.queue().push_primitive(Primitive::Rect(RectanglePrimitive {
-        rect: action_bar,
-        color: Color::from_rgba(31, 32, 35, 250),
-        outline: Stroke {
-            width: 1.0,
-            color: Color::from_rgba(255, 255, 255, 24),
-            kind: StrokeKind::Inside,
-            dash: None,
-        },
-        corners: Corners::same(12.0),
-    }));
-
-    let search = create_search_button_rect(action_bar);
-    let cancel = create_cancel_button_rect(action_bar);
-    if search.intersects(pointer) {
-        painter.queue().push_primitive(Primitive::Rect(RectanglePrimitive {
-            rect: create_rect(search.pos + Vec2::splat(4.0), search.size - Vec2::splat(8.0)),
-            color: Color::from_rgba(47, 128, 237, 220),
-            outline: Stroke::NONE,
-            corners: Corners::same(9.0),
-        }));
-    } else if cancel.intersects(pointer) {
-        painter.queue().push_primitive(Primitive::Rect(RectanglePrimitive {
-            rect: create_rect(cancel.pos + Vec2::splat(4.0), cancel.size - Vec2::splat(8.0)),
-            color: Color::from_rgba(235, 87, 87, 72),
-            outline: Stroke::NONE,
-            corners: Corners::same(9.0),
-        }));
-    }
-
-    painter.line(
-        action_bar.pos + vec2(ACTION_BAR_WIDTH / 2.0, 11.0),
-        action_bar.pos + vec2(ACTION_BAR_WIDTH / 2.0, ACTION_BAR_HEIGHT - 11.0),
-        Color::from_rgba(255, 255, 255, 40),
-        1.0,
-    );
-    painter.queue().push_primitive(Primitive::Rect(RectanglePrimitive {
-        rect: create_rect(search.pos + vec2(13.0, 12.0), Vec2::splat(14.0)),
-        color: Color::TRANSPARENT,
-        outline: Stroke {
-            width: 2.5,
-            color: Color::WHITE,
-            kind: StrokeKind::Inside,
-            dash: None,
-        },
-        corners: Corners::same(7.0),
-    }));
-    painter.line(
-        search.pos + vec2(25.0, 25.0),
-        search.pos + vec2(31.0, 31.0),
-        Color::WHITE,
-        2.5,
-    );
-    painter.line(
-        cancel.pos + vec2(15.0, 15.0),
-        cancel.pos + vec2(29.0, 29.0),
-        Color::from_rgb(238, 238, 238),
-        2.5,
-    );
-    painter.line(
-        cancel.pos + vec2(29.0, 15.0),
-        cancel.pos + vec2(15.0, 29.0),
-        Color::from_rgb(238, 238, 238),
-        2.5,
-    );
-}
-
 fn create_rect(pos: Vec2, size: Vec2) -> Rect {
     return Rect { pos, size };
 }
 
 fn clamp_point(point: Vec2, bounds: Vec2) -> Vec2 {
     return point.clamp(Vec2::ZERO, bounds);
+}
+
+#[cfg(test)]
+mod tests {
+    use nekoframe::catui::ui::core::primitive::parse_svg_path;
+
+    use super::{CANCEL_ICON, SEARCH_ICON};
+
+    #[test]
+    fn icon_paths_parse() {
+        // SvgIcon::new panics on bad path data, and the tree is built on the
+        // hotkey press — a typo would surface as a crash mid-capture.
+        assert!(parse_svg_path(SEARCH_ICON).is_ok());
+        assert!(parse_svg_path(CANCEL_ICON).is_ok());
+    }
 }
