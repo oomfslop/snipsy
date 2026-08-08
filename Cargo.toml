@@ -6,11 +6,15 @@ description = "macOS global shortcut for searching a screen selection with Googl
 
 [dependencies]
 base64 = "0.22"
+glam = "0.30"
 global-hotkey = "0.8"
+nekoframe = { path = "../../repo/catui/crates/nekoframe", default-features = false, features = ["catui", "wgpu", "winit"] }
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGWindow"] }
-objc2-foundation = "0.3"
+
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 lto = true
