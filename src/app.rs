@@ -1,159 +1,335 @@
-use std::sync::{Arc, Mutex};
+use crate::{icons::Icons, pin, platform, raster, selection::SelectionState};
+use global_hotkey::{
+    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
+    hotkey::{Code, HotKey, Modifiers},
+};
+use gpui::{prelude::*, *};
+use image::RgbaImage;
+use std::{
+    path::Path,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use global_hotkey::hotkey::{Code, HotKey, Modifiers};
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use nekoframe::catui::UiDelegate;
-use nekoframe::prelude::*;
-use objc2::MainThreadMarker;
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEvent};
-use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
-
-use crate::selection;
-
-pub struct SharedState {
-    /// The hotkey press's pointer position, in AppKit's bottom-left global
-    /// points — the ONE platform query left here, because the winit shell
-    /// has no eventless pointer lookup (`get_pointer_position` is None).
-    activation: Mutex<Option<LogicalPosition>>,
-    /// The monitor chosen for the pending activation, consumed by
-    /// `SelectionDelegate::before_frame`.
-    pub(crate) pending_overlay: Mutex<Option<Monitor>>,
-    event_waker: Mutex<Option<Box<dyn Fn() + Send>>>,
-    pub(crate) window_id: Mutex<Option<WindowId>>,
+pub struct AppState {
+    _hotkeys: GlobalHotKeyManager,
+    pub fonts: Arc<resvg::usvg::fontdb::Database>,
+    pub selection: Option<WindowHandle<SelectionState>>,
+    pub cached_selection: Option<WindowHandle<SelectionState>>,
+    pub history: Vec<(Arc<RgbaImage>, Arc<RenderImage>)>,
+    pub error: Option<String>,
+}
+impl Global for AppState {}
+#[derive(Clone, Copy, Debug)]
+enum Command {
+    Capture,
+    Paste,
 }
 
-pub struct App {
-    pub(crate) shared: Arc<SharedState>,
-    alloc: &'static IdAlloc,
-    _hotkey_manager: GlobalHotKeyManager,
-}
-
-impl Application for App {
-    fn init(&self, app: &dyn ApplicationController<AppCtx = Self>) {
-        let mtm = MainThreadMarker::new().expect("Snipsy must run on the macOS main thread");
-        NSApplication::sharedApplication(mtm)
-            .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-
-        let waker = app
-            .create_event_waker()
-            .expect("the shell must provide an application event waker");
-        let pending_activation = self.shared.activation.lock().unwrap().is_some();
-        *self.shared.event_waker.lock().unwrap() = Some(waker);
-        if pending_activation {
-            self.shared.event_waker.lock().unwrap().as_ref().unwrap()();
-        }
-    }
-
-    fn awakened(&self, app: &dyn ApplicationController<AppCtx = Self>) {
-        let Some(mouse) = self.shared.activation.lock().unwrap().take() else {
-            return;
-        };
-
-        let monitors = app.list_monitors();
-        let Some(primary_height) = monitors
-            .iter()
-            .find(|monitor| monitor.primary)
-            .map(|monitor| monitor.size.height)
-        else {
-            return;
-        };
-        let pointer = LogicalPosition::new(mouse.x, primary_height - mouse.y);
-        let Some(monitor) = monitors
-            .iter()
-            .find(|monitor| monitor.contains(pointer))
-            .or_else(|| monitors.iter().find(|monitor| monitor.primary))
-            .cloned()
-        else {
-            return;
-        };
-
-        let attrs_position = monitor.position;
-        let attrs_size = monitor.size;
-        *self.shared.pending_overlay.lock().unwrap() = Some(monitor);
-
-        if let Some(window_id) = *self.shared.window_id.lock().unwrap() {
-            app.request_redraw(window_id);
-            return;
-        }
-
-        let delegate = UiDelegate::with_delegate(
-            selection::SelectionState::new(),
-            selection::build_root(self.alloc),
-            self.alloc,
-            selection::SelectionDelegate,
-        )
-        .with_graphics_opts(GraphicsOpts {
-            transparent: true,
-            ..GraphicsOpts::default()
-        });
-        app.spawn_window(
-            // Visible from birth (nothing flashes: the surface is transparent
-            // until the first present) so the window server's orderFront
-            // round trip overlaps gpu init instead of gating the first
-            // drawable afterwards.
-            WindowAttrs::new()
-                .with_title("Snipsy")
-                .with_inner_size(attrs_size)
-                .with_position(attrs_position)
-                .with_resizable(false)
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_always_on_top(true)
-                .with_shadow(false),
-            Box::new(delegate),
-        );
-    }
-
-    fn should_exit_after_last_window_closes(&self) -> bool {
-        return false;
-    }
-}
+actions!(snipsy, [CaptureScreen, PinClipboard, QuitSnipsy]);
 
 pub fn run() {
-    init_logger(LoggerOpts {
-        directives: "snipsy=debug,nekoframe=debug,catui_core=debug,catui_components=debug,catui_backends=debug",
-        ..LoggerOpts::default()
-    });
-
-    std::thread::spawn(TextEngine::preload_system_fonts);
-
-    let manager = GlobalHotKeyManager::new().expect("could not create global hotkey manager");
-    let hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyL);
-    manager
-        .register(hotkey)
-        .expect("could not register Command+Shift+L");
-
-    let shared = Arc::new(SharedState {
-        activation: Mutex::new(None),
-        pending_overlay: Mutex::new(None),
-        event_waker: Mutex::new(None),
-        window_id: Mutex::new(None),
-    });
-    let handler_shared = Arc::clone(&shared);
-    GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-        if event.id != hotkey.id() || event.state != HotKeyState::Pressed {
-            return;
-        }
-        if !CGPreflightScreenCaptureAccess() {
-            if !CGRequestScreenCaptureAccess() {
-                eprintln!(
-                    "Screen Recording permission is required; enable the app running Snipsy in System Settings, then try again."
-                );
+    let application = Application::new().with_assets(Icons);
+    application.on_reopen(start_capture);
+    application.run(|cx| {
+        platform::initialize_app();
+        let mut fonts = resvg::usvg::fontdb::Database::new();
+        fonts.load_system_fonts();
+        let hotkeys = GlobalHotKeyManager::new().expect("could not create global shortcuts");
+        let mut hotkey_error = None;
+        let capture = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
+        let lens = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyL);
+        let paste = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyP);
+        for hotkey in [&capture, &lens, &paste] {
+            if let Err(error) = hotkeys.register(*hotkey) {
+                eprintln!("could not register shortcut: {error}");
+                hotkey_error = Some(format!("Could not register a shortcut: {error}"));
             }
+        }
+        let (sender, receiver) = async_channel::unbounded();
+        GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+            if event.state != HotKeyState::Pressed {
+                return;
+            }
+            let command = if event.id == capture.id() || event.id == lens.id() {
+                Command::Capture
+            } else if event.id == paste.id() {
+                Command::Paste
+            } else {
+                return;
+            };
+            #[cfg(debug_assertions)]
+            eprintln!("Snipsy hotkey: {command:?}");
+            if let Err(error) = sender.try_send(command) {
+                eprintln!("could not queue shortcut: {error}");
+            }
+        }));
+        cx.set_global(AppState {
+            _hotkeys: hotkeys,
+            fonts: Arc::new(fonts),
+            selection: None,
+            cached_selection: None,
+            history: Vec::new(),
+            error: hotkey_error,
+        });
+        cx.on_action(|_: &CaptureScreen, cx| start_capture(cx));
+        cx.on_action(|_: &PinClipboard, cx| paste_image(cx));
+        cx.on_action(|_: &QuitSnipsy, cx| cx.quit());
+        cx.bind_keys([KeyBinding::new("cmd-q", QuitSnipsy, None)]);
+        cx.set_menus(vec![Menu {
+            name: "Snipsy".into(),
+            items: vec![
+                MenuItem::action("New screenshot", CaptureScreen),
+                MenuItem::action("Pin clipboard image", PinClipboard),
+                MenuItem::separator(),
+                MenuItem::action("Quit Snipsy", QuitSnipsy),
+            ],
+        }]);
+        cx.spawn(async move |cx| {
+            while let Ok(command) = receiver.recv().await {
+                if let Err(error) = cx.update(|cx| match command {
+                    Command::Capture => start_capture(cx),
+                    Command::Paste => paste_image(cx),
+                }) {
+                    eprintln!("could not dispatch shortcut: {error}");
+                }
+            }
+        })
+        .detach();
+        if let Some(error) = cx.global::<AppState>().error.clone() {
+            cx.defer(move |cx| show_error(error, cx));
+        }
+    });
+}
+
+pub fn start_capture(cx: &mut App) {
+    if let Some(handle) = cx.global::<AppState>().selection {
+        if handle
+            .update(cx, |state, window, cx| state.activate(window, cx))
+            .is_ok()
+        {
             return;
         }
-        let mouse = NSEvent::mouseLocation();
-        *handler_shared.activation.lock().unwrap() =
-            Some(LogicalPosition::new(mouse.x, mouse.y));
-        if let Some(waker) = handler_shared.event_waker.lock().unwrap().as_ref() {
-            waker();
+        cx.global_mut::<AppState>().selection = None;
+    }
+    let bounds = match platform::get_capture_bounds() {
+        Ok(bounds) => bounds,
+        Err(error) => {
+            show_error(error, cx);
+            return;
         }
-    }));
-
-    println!("Snipsy is ready — press Command+Shift+L to select an area.");
-    nekoframe::app::run(App {
-        shared,
-        alloc: Box::leak(Box::new(IdAlloc::new())),
-        _hotkey_manager: manager,
+    };
+    let (sender, receiver) = async_channel::bounded(1);
+    platform::capture_screen(bounds, sender);
+    let capture = cx.background_executor().spawn(async move {
+        match receiver.recv().await {
+            Ok(Ok(screenshot)) => {
+                let background = raster::create_render_image(&screenshot.image);
+                Ok(Ok((screenshot, background)))
+            }
+            Ok(Err(error)) => Ok(Err(error)),
+            Err(error) => Err(error),
+        }
     });
+    let cached = cx.global::<AppState>().cached_selection.filter(|handle| {
+        handle
+            .update(cx, |state, window, cx| {
+                platform::configure_overlay(window, bounds, false);
+                state.reset_for_capture(bounds, window, cx);
+            })
+            .is_ok()
+    });
+    let handle = if let Some(handle) = cached {
+        handle
+    } else {
+        match cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    point(px(bounds.pos.x), px(bounds.pos.y)),
+                    size(px(bounds.size.x), px(bounds.size.y)),
+                ))),
+                titlebar: None,
+                kind: WindowKind::Normal,
+                show: false,
+                focus: false,
+                window_background: WindowBackgroundAppearance::Transparent,
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                ..Default::default()
+            },
+            |window, cx| {
+                platform::configure_overlay(window, bounds, false);
+                cx.new(|cx| SelectionState::new(bounds, window, cx))
+            },
+        ) {
+            Ok(handle) => handle,
+            Err(error) => {
+                show_error(error.to_string(), cx);
+                return;
+            }
+        }
+    };
+    cx.global_mut::<AppState>().selection = Some(handle);
+    cx.global_mut::<AppState>().cached_selection = Some(handle);
+    cx.spawn(async move |cx| {
+        let result = capture.await;
+        let _ = cx.update(|cx| match result {
+            Ok(Ok((screenshot, background))) => {
+                let _ = handle.update(cx, |state, window, cx| {
+                    state.complete_capture(screenshot, background, window, cx);
+                });
+            }
+            Ok(Err(error)) => {
+                if handle
+                    .update(cx, |state, window, cx| state.dismiss(window, cx))
+                    .is_ok()
+                {
+                    show_error(error, cx);
+                }
+            }
+            Err(error) => {
+                if handle
+                    .update(cx, |state, window, cx| state.dismiss(window, cx))
+                    .is_ok()
+                {
+                    show_error(error.to_string(), cx);
+                }
+            }
+        });
+    })
+    .detach();
+}
+
+pub fn paste_image(cx: &mut App) {
+    let image = cx.read_from_clipboard().and_then(|item| {
+        item.entries().iter().find_map(|entry| {
+            if let ClipboardEntry::Image(image) = entry {
+                Some(image.clone())
+            } else {
+                None
+            }
+        })
+    });
+    match image {
+        Some(image) => match image::load_from_memory(&image.bytes) {
+            Ok(image) => pin::open_pin(Arc::new(image.to_rgba8()), None, cx),
+            Err(error) => show_error(error.to_string(), cx),
+        },
+        None => show_error("Clipboard has no image".into(), cx),
+    }
+}
+
+pub fn copy_image(image: &RgbaImage, cx: &mut App) -> Result<(), String> {
+    cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+        ImageFormat::Png,
+        raster::encode_png(image)?,
+    )));
+    return Ok(());
+}
+
+pub fn remember_capture(image: Arc<RgbaImage>, cx: &mut App) {
+    let preview = raster::create_render_image(&image::imageops::thumbnail(&*image, 220, 140));
+    let state = cx.global_mut::<AppState>();
+    state.history.insert(0, (image, preview));
+    let removed = if state.history.len() > 10 {
+        state.history.pop()
+    } else {
+        None
+    };
+    if let Some((_, preview)) = removed {
+        cx.drop_image(preview, None);
+    }
+    cx.refresh_windows();
+}
+
+pub fn save_image(image: Arc<RgbaImage>, cx: &mut App) {
+    let suggested = format!(
+        "Snipsy-{}.png",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+    let receiver = platform::prompt_save_image(&suggested);
+    cx.spawn(async move |cx| match receiver.recv().await {
+        Ok(Ok(Some(path))) => {
+            let saved_image = image.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { write_image(&image, &path) })
+                .await;
+            if let Err(error) = result {
+                let _ = cx.update(|cx| show_error(error, cx));
+            } else {
+                let _ = cx.update(|cx| remember_capture(saved_image, cx));
+            }
+        }
+        Ok(Ok(None)) => {}
+        Ok(Err(error)) => {
+            let _ = cx.update(|cx| show_error(error.to_string(), cx));
+        }
+        Err(error) => {
+            let _ = cx.update(|cx| show_error(error.to_string(), cx));
+        }
+    })
+    .detach();
+}
+
+fn write_image(image: &RgbaImage, path: &Path) -> Result<(), String> {
+    let path = if path.extension().is_none() {
+        path.with_extension("png")
+    } else {
+        path.to_path_buf()
+    };
+    let format = image::ImageFormat::from_path(&path).map_err(|error| error.to_string())?;
+    if !matches!(format, image::ImageFormat::Png | image::ImageFormat::Jpeg) {
+        return Err("Choose a .png or .jpg filename".into());
+    }
+    let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))
+        .map_err(|error| error.to_string())?;
+    if format == image::ImageFormat::Jpeg {
+        image::DynamicImage::ImageRgba8(image.clone())
+            .to_rgb8()
+            .write_to(file.as_file_mut(), format)
+            .map_err(|error| error.to_string())?;
+    } else {
+        image
+            .write_to(file.as_file_mut(), format)
+            .map_err(|error| error.to_string())?;
+    }
+    file.as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    file.persist(path).map_err(|error| error.to_string())?;
+    return Ok(());
+}
+
+pub fn show_error(error: String, cx: &mut App) {
+    eprintln!("{error}");
+    cx.global_mut::<AppState>().error = Some(error.clone());
+    platform::show_error(&error);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_image;
+    use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn save_replaces_png_and_rejects_unsupported_formats_without_truncating() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("capture.png");
+        std::fs::write(&path, b"old file").unwrap();
+        let image = RgbaImage::from_pixel(3, 2, Rgba([255, 50, 80, 128]));
+        write_image(&image, &path).unwrap();
+        assert_eq!(image::open(&path).unwrap().to_rgba8(), image);
+        let unsupported = directory.path().join("capture.txt");
+        std::fs::write(&unsupported, b"keep this").unwrap();
+        assert!(write_image(&image, &unsupported).is_err());
+        assert_eq!(std::fs::read(&unsupported).unwrap(), b"keep this");
+        let jpeg = directory.path().join("capture.jpg");
+        write_image(&image, &jpeg).unwrap();
+        assert_eq!(image::open(jpeg).unwrap().width(), 3);
+    }
 }
