@@ -7,8 +7,8 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlert, NSApplication, NSApplicationActivationPolicy, NSEvent, NSModalResponseCancel,
-    NSModalResponseOK, NSPopUpMenuWindowLevel, NSSavePanel, NSScreen, NSView, NSWindow,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSModalResponseOK, NSPopUpMenuWindowLevel, NSSavePanel, NSScreen, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType};
 use objc2_core_graphics::{
@@ -62,14 +62,19 @@ pub fn get_capture_bounds() -> Result<Rect, String> {
         .ok_or_else(|| "No display under the pointer".into());
 }
 
-fn get_native_window(window: &gpui::Window) -> Retained<NSWindow> {
+fn get_native_view(window: &gpui::Window) -> &NSView {
     let handle = HasWindowHandle::window_handle(window).expect("GPUI window has a native handle");
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
         unreachable!("macOS uses AppKit windows");
     };
     // SAFETY: GPUI owns this NSView and keeps it alive for the borrowed window's lifetime.
-    let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
-    return view.window().expect("GPUI view is attached to its window");
+    return unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+}
+
+fn get_native_window(window: &gpui::Window) -> Retained<NSWindow> {
+    return get_native_view(window)
+        .window()
+        .expect("GPUI view is attached to its window");
 }
 
 pub fn hide_overlay(window: &gpui::Window) {
@@ -85,6 +90,32 @@ pub fn configure_overlay(window: &gpui::Window, bounds: Rect, resizable: bool) {
     } else {
         NSWindowStyleMask::Borderless
     });
+    let view = get_native_view(window);
+    native.setAcceptsMouseMovedEvents(true);
+    native.makeFirstResponder(Some(view));
+    let tracking_options = NSTrackingAreaOptions::MouseMoved
+        | NSTrackingAreaOptions::MouseEnteredAndExited
+        | NSTrackingAreaOptions::ActiveAlways
+        | NSTrackingAreaOptions::InVisibleRect
+        | NSTrackingAreaOptions::EnabledDuringMouseDrag;
+    if !view.trackingAreas().iter().any(|area| {
+        area.options().contains(tracking_options)
+            && area.owner().is_some_and(|owner| {
+                Retained::as_ptr(&owner).cast::<NSView>() == view as *const NSView
+            })
+    }) {
+        // SAFETY: GPUI's NSView handles mouse events and owns the area for its lifetime; no userInfo is needed.
+        let tracking = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
+                tracking_options,
+                Some(view),
+                None,
+            )
+        };
+        view.addTrackingArea(&tracking);
+    }
     native.setHasShadow(false);
     native.setHidesOnDeactivate(false);
     native.setLevel(NSPopUpMenuWindowLevel);
