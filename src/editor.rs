@@ -13,11 +13,50 @@ pub enum Tool {
     Rectangle,
     Ellipse,
     Arrow,
+    Line,
     Pen,
     Highlighter,
     Text,
     Mosaic,
     Eraser,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BlurMode {
+    #[default]
+    Pixelated,
+    Gaussian,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextFormat {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum TextAttribute {
+    Bold,
+    Italic,
+    Underline,
+}
+
+impl TextFormat {
+    pub fn get_attribute(self, attribute: TextAttribute) -> bool {
+        return match attribute {
+            TextAttribute::Bold => self.bold,
+            TextAttribute::Italic => self.italic,
+            TextAttribute::Underline => self.underline,
+        };
+    }
+    pub fn set_attribute(&mut self, attribute: TextAttribute, value: bool) {
+        match attribute {
+            TextAttribute::Bold => self.bold = value,
+            TextAttribute::Italic => self.italic = value,
+            TextAttribute::Underline => self.underline = value,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +66,45 @@ pub struct Annotation {
     pub color: Color,
     pub width: f32,
     pub text: String,
+    pub filled: bool,
+    pub blur_mode: BlurMode,
+    pub intensity: f32,
+    pub text_format: TextFormat,
+    pub formats: Vec<TextFormat>,
+}
+
+impl Default for Annotation {
+    fn default() -> Self {
+        return Self {
+            tool: Tool::Select,
+            points: vec![Vec2::ZERO],
+            color: Color::WHITE,
+            width: 3.0,
+            text: String::new(),
+            filled: false,
+            blur_mode: BlurMode::Pixelated,
+            intensity: 12.0,
+            text_format: TextFormat::default(),
+            formats: Vec::new(),
+        };
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Layer {
+    pub id: u64,
+    pub annotation: Annotation,
+}
+impl std::ops::Deref for Layer {
+    type Target = Annotation;
+    fn deref(&self) -> &Annotation {
+        return &self.annotation;
+    }
+}
+impl std::ops::DerefMut for Layer {
+    fn deref_mut(&mut self) -> &mut Annotation {
+        return &mut self.annotation;
+    }
 }
 
 impl Annotation {
@@ -57,8 +135,63 @@ impl Annotation {
         };
     }
 
+    pub fn get_format(&self, character: usize) -> TextFormat {
+        return self
+            .formats
+            .get(character)
+            .copied()
+            .unwrap_or(self.text_format);
+    }
+
+    pub fn replace_text(&mut self, range: std::ops::Range<usize>, text: &str, format: TextFormat) {
+        let start = self.text[..range.start].chars().count();
+        let end = self.text[..range.end].chars().count();
+        self.formats
+            .resize(self.text.chars().count(), self.text_format);
+        self.formats.splice(
+            start..end,
+            std::iter::repeat_n(format, text.chars().count()),
+        );
+        self.text.replace_range(range, text);
+    }
+
+    pub fn set_text_attribute(
+        &mut self,
+        range: std::ops::Range<usize>,
+        attribute: TextAttribute,
+        enabled: bool,
+    ) {
+        let start = self.text[..range.start].chars().count();
+        let end = self.text[..range.end].chars().count();
+        self.formats
+            .resize(self.text.chars().count(), self.text_format);
+        for format in &mut self.formats[start..end] {
+            format.set_attribute(attribute, enabled);
+        }
+        if start == 0 && end == self.formats.len() {
+            self.text_format.set_attribute(attribute, enabled);
+        }
+    }
+
+    pub fn get_format_runs(&self, range: std::ops::Range<usize>) -> Vec<(usize, TextFormat)> {
+        let offset = self.text[..range.start].chars().count();
+        let mut runs: Vec<(usize, TextFormat)> = Vec::new();
+        for (index, character) in self.text[range].chars().enumerate() {
+            let format = self.get_format(offset + index);
+            if let Some((length, _)) = runs.last_mut().filter(|(_, previous)| *previous == format) {
+                *length += character.len_utf8();
+            } else {
+                runs.push((character.len_utf8(), format));
+            }
+        }
+        return runs;
+    }
+
     pub fn contains_point(&self, point: Vec2) -> bool {
-        if self.tool == Tool::Text || self.tool == Tool::Mosaic {
+        if (self.tool == Tool::Rectangle && self.filled)
+            || self.tool == Tool::Text
+            || self.tool == Tool::Mosaic
+        {
             return self.get_bounds().intersects(point);
         }
         let start = self.points[0];
@@ -83,7 +216,11 @@ impl Annotation {
                     return get_segment_distance(point, start, end) <= tolerance;
                 }
                 let relative = (point - (start + end) / 2.0) / radii;
-                return (relative.length() - 1.0).abs() * radii.min_element() <= tolerance;
+                return if self.filled {
+                    relative.length() <= 1.0
+                } else {
+                    (relative.length() - 1.0).abs() * radii.min_element() <= tolerance
+                };
             }
             Tool::Arrow => {
                 let [left, right] = get_arrow_head(start, end, self.width);
@@ -106,12 +243,20 @@ pub struct Editor {
     pub tool: Tool,
     pub color: Color,
     pub width: f32,
-    pub annotations: Vec<Annotation>,
+    pub highlighter_width: f32,
+    pub layers: Vec<Layer>,
     pub draft: Option<Annotation>,
     pub editing_index: Option<usize>,
     pub selected: Option<usize>,
-    pub undo: Vec<Vec<Annotation>>,
-    pub redo: Vec<Vec<Annotation>>,
+    pub undo: Vec<Vec<Layer>>,
+    pub redo: Vec<Vec<Layer>>,
+    next_layer_id: u64,
+    settings_history: Option<(u64, &'static str)>,
+    pub filled: bool,
+    pub blur_mode: BlurMode,
+    pub intensity: f32,
+    pub text_size: f32,
+    pub text_format: TextFormat,
 }
 
 impl Editor {
@@ -120,17 +265,26 @@ impl Editor {
             tool: Tool::Select,
             color: Color::from_rgb(255, 75, 75),
             width: 3.0,
-            annotations: Vec::new(),
+            highlighter_width: 18.0,
+            layers: Vec::new(),
             draft: None,
             editing_index: None,
             selected: None,
             undo: Vec::new(),
             redo: Vec::new(),
+            next_layer_id: 1,
+            settings_history: None,
+            filled: false,
+            blur_mode: BlurMode::Pixelated,
+            intensity: 12.0,
+            text_size: 24.0,
+            text_format: TextFormat::default(),
         };
     }
 
     pub fn record_change(&mut self) {
-        self.undo.push(self.annotations.clone());
+        self.settings_history = None;
+        self.undo.push(self.layers.clone());
         if self.undo.len() > 100 {
             self.undo.remove(0);
         }
@@ -144,7 +298,8 @@ impl Editor {
         if draft.tool == Tool::Text && draft.text.trim().is_empty() {
             if let Some(index) = self.editing_index.take() {
                 self.record_change();
-                self.annotations.remove(index);
+                self.layers.remove(index);
+                self.selected = None;
             }
             return;
         }
@@ -156,38 +311,47 @@ impl Editor {
             return;
         }
         self.record_change();
-        if let Some(index) = self.editing_index.take() {
-            self.annotations[index] = draft;
+        let index = if let Some(index) = self.editing_index.take() {
+            self.layers[index].annotation = draft;
+            index
         } else {
-            self.annotations.push(draft);
-        }
-        self.selected = None;
+            let index = self.layers.len();
+            self.layers.push(Layer {
+                id: self.next_layer_id,
+                annotation: draft,
+            });
+            self.next_layer_id += 1;
+            index
+        };
+        self.selected = Some(index);
     }
 
     pub fn select_tool(&mut self, tool: Tool) {
+        self.settings_history = None;
         self.commit_draft();
         self.tool = tool;
         self.selected = None;
     }
 
     pub fn undo_change(&mut self) {
+        self.settings_history = None;
         if self.draft.take().is_some() {
             self.editing_index = None;
             return;
         }
         if let Some(previous) = self.undo.pop() {
             self.redo
-                .push(std::mem::replace(&mut self.annotations, previous));
+                .push(std::mem::replace(&mut self.layers, previous));
         }
         self.selected = None;
     }
 
     pub fn redo_change(&mut self) {
+        self.settings_history = None;
         self.draft = None;
         self.editing_index = None;
         if let Some(next) = self.redo.pop() {
-            self.undo
-                .push(std::mem::replace(&mut self.annotations, next));
+            self.undo.push(std::mem::replace(&mut self.layers, next));
         }
         self.selected = None;
     }
@@ -195,52 +359,148 @@ impl Editor {
     pub fn delete_selected(&mut self) {
         if let Some(index) = self.selected.take() {
             self.record_change();
-            self.annotations.remove(index);
+            self.layers.remove(index);
         }
     }
 
     pub fn get_annotation_at(&self, point: Vec2) -> Option<usize> {
         return self
-            .annotations
+            .layers
             .iter()
             .rposition(|annotation| annotation.contains_point(point));
     }
 
     pub fn start_editing_text(&mut self, index: usize) {
         self.commit_draft();
-        self.draft = Some(self.annotations[index].clone());
+        self.draft = Some(self.layers[index].annotation.clone());
         self.editing_index = Some(index);
         self.selected = None;
     }
 
     pub fn get_visible_annotations(&self) -> impl Iterator<Item = &Annotation> {
         return self
-            .annotations
+            .layers
             .iter()
             .enumerate()
-            .filter(|(index, _)| Some(*index) != self.editing_index)
-            .map(|(_, annotation)| annotation)
-            .chain(self.draft.iter());
+            .map(|(index, layer)| {
+                if Some(index) == self.editing_index {
+                    self.draft.as_ref().unwrap_or(&layer.annotation)
+                } else {
+                    &layer.annotation
+                }
+            })
+            .chain(self.draft.iter().filter(|_| self.editing_index.is_none()));
+    }
+
+    pub fn get_current_annotation(&self) -> Option<&Annotation> {
+        return self
+            .draft
+            .as_ref()
+            .or_else(|| self.selected.map(|index| &self.layers[index].annotation));
+    }
+
+    pub fn get_current_tool(&self) -> Tool {
+        return self
+            .get_current_annotation()
+            .map_or(self.tool, |annotation| annotation.tool);
+    }
+
+    pub fn update_current_annotation(
+        &mut self,
+        key: &'static str,
+        f: impl FnOnce(&mut Annotation),
+    ) {
+        if let Some(draft) = &mut self.draft {
+            f(draft);
+        } else if let Some(index) = self.selected {
+            let id = self.layers[index].id;
+            if self.settings_history != Some((id, key)) {
+                self.record_change();
+            }
+            self.settings_history = Some((id, key));
+            f(&mut self.layers[index].annotation);
+        }
+    }
+
+    pub fn set_color(&mut self, color: Color) {
+        self.color = color;
+        self.update_current_annotation("color", |annotation| annotation.color = color);
+    }
+
+    pub fn set_variant(&mut self, tool: Tool) {
+        if self.tool != Tool::Select {
+            self.tool = tool;
+        }
+        self.update_current_annotation("variant", |annotation| annotation.tool = tool);
+    }
+
+    pub fn set_filled(&mut self, filled: bool) {
+        self.filled = filled;
+        self.update_current_annotation("fill", |annotation| annotation.filled = filled);
+    }
+
+    pub fn set_blur_mode(&mut self, mode: BlurMode) {
+        self.blur_mode = mode;
+        self.update_current_annotation("blur", |annotation| annotation.blur_mode = mode);
+    }
+
+    pub fn set_intensity(&mut self, intensity: f32) {
+        self.intensity = intensity.clamp(1.0, 48.0);
+        let value = self.intensity;
+        self.update_current_annotation("intensity", |annotation| annotation.intensity = value);
+    }
+
+    pub fn set_text_size(&mut self, size: f32) {
+        self.text_size = size.clamp(8.0, 144.0);
+        let value = self.text_size;
+        self.update_current_annotation("text-size", |annotation| annotation.width = value);
+    }
+
+    pub fn move_selected_layer(&mut self, forward: bool) {
+        self.commit_draft();
+        let Some(index) = self.selected else {
+            return;
+        };
+        let next = if forward {
+            (index + 1).min(self.layers.len() - 1)
+        } else {
+            index.saturating_sub(1)
+        };
+        if index == next {
+            return;
+        }
+        self.record_change();
+        self.layers.swap(index, next);
+        self.selected = Some(next);
+    }
+
+    pub fn get_current_width(&self) -> f32 {
+        return self.get_current_annotation().map_or_else(
+            || match self.tool {
+                Tool::Text => self.text_size,
+                Tool::Highlighter => self.highlighter_width,
+                _ => self.width,
+            },
+            |annotation| annotation.width,
+        );
+    }
+
+    pub fn finish_settings_change(&mut self) {
+        self.settings_history = None;
     }
 
     pub fn set_width(&mut self, width: f32) {
-        self.width = width.clamp(1.0, 12.0);
-        if let Some(index) = self.selected {
-            self.record_change();
-            let annotation = &mut self.annotations[index];
-            annotation.width = match annotation.tool {
-                Tool::Text => self.width * 4.0 + 12.0,
-                Tool::Highlighter => self.width * 6.0,
-                _ => self.width,
-            };
+        let value = width.clamp(1.0, 64.0);
+        if self.get_current_tool() == Tool::Highlighter {
+            self.highlighter_width = value;
+        } else {
+            self.width = value;
         }
-        if let Some(draft) = &mut self.draft {
-            draft.width = match draft.tool {
-                Tool::Text => self.width * 4.0 + 12.0,
-                Tool::Highlighter => self.width * 6.0,
-                _ => self.width,
-            };
-        }
+        self.update_current_annotation("width", |annotation| {
+            if annotation.tool != Tool::Text {
+                annotation.width = value;
+            }
+        });
     }
 }
 
@@ -279,6 +539,108 @@ mod tests {
     use super::*;
 
     #[test]
+    fn settings_edit_latest_layer_and_keep_identity_with_undo() {
+        let mut editor = Editor::new();
+        editor.draft = Some(Annotation {
+            tool: Tool::Rectangle,
+            points: vec![Vec2::ZERO, vec2(50.0, 50.0)],
+            ..Default::default()
+        });
+        editor.commit_draft();
+        let id = editor.layers[0].id;
+        editor.set_color(Color(0xff0000));
+        editor.set_color(Color(0x00ff00));
+        assert_eq!(editor.undo.len(), 2);
+        assert_eq!(editor.layers[0].id, id);
+        editor.undo_change();
+        assert_eq!(editor.layers[0].color, Color::WHITE);
+        editor.selected = Some(0);
+        editor.set_variant(Tool::Ellipse);
+        editor.set_filled(true);
+        assert!(editor.layers[0].contains_point(vec2(25.0, 25.0)));
+        assert_eq!(editor.layers[0].id, id);
+    }
+
+    #[test]
+    fn layer_order_changes_keep_selection_on_the_same_layer() {
+        let mut editor = Editor::new();
+        for tool in [Tool::Rectangle, Tool::Arrow] {
+            editor.draft = Some(Annotation {
+                tool,
+                points: vec![Vec2::ZERO, vec2(50.0, 50.0)],
+                ..Default::default()
+            });
+            editor.commit_draft();
+        }
+        let id = editor.layers[1].id;
+        editor.move_selected_layer(false);
+        assert_eq!(editor.selected, Some(0));
+        assert_eq!(editor.layers[0].id, id);
+        editor.undo_change();
+        assert_eq!(editor.layers[1].id, id);
+    }
+
+    #[test]
+    fn editing_text_preserves_layer_order_in_preview() {
+        let mut editor = Editor::new();
+        for tool in [Tool::Text, Tool::Rectangle] {
+            editor.draft = Some(Annotation {
+                tool,
+                text: "Text".into(),
+                points: vec![Vec2::ZERO, vec2(50.0, 50.0)],
+                ..Default::default()
+            });
+            editor.commit_draft();
+        }
+        editor.start_editing_text(0);
+        assert_eq!(
+            editor
+                .get_visible_annotations()
+                .map(|annotation| annotation.tool)
+                .collect::<Vec<_>>(),
+            vec![Tool::Text, Tool::Rectangle]
+        );
+    }
+
+    #[test]
+    fn rich_text_formats_unicode_ranges_and_preserves_them_when_typing() {
+        let mut annotation = Annotation {
+            tool: Tool::Text,
+            text: "a😀bc".into(),
+            ..Default::default()
+        };
+        annotation.set_text_attribute(1..5, TextAttribute::Bold, true);
+        assert!(annotation.get_format(1).bold);
+        assert!(!annotation.get_format(2).bold);
+        annotation.replace_text(
+            5..6,
+            "é",
+            TextFormat {
+                italic: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(annotation.text, "a😀éc");
+        assert!(annotation.get_format(1).bold);
+        assert!(annotation.get_format(2).italic);
+        assert_eq!(
+            annotation
+                .get_format_runs(0..annotation.text.len())
+                .iter()
+                .map(|(size, _)| *size)
+                .sum::<usize>(),
+            annotation.text.len()
+        );
+        annotation.set_text_attribute(0..annotation.text.len(), TextAttribute::Underline, true);
+        assert!(
+            annotation
+                .get_format_runs(0..annotation.text.len())
+                .iter()
+                .all(|(_, format)| format.underline)
+        );
+    }
+
+    #[test]
     fn undo_redo_and_new_edits_preserve_history() {
         let mut editor = Editor::new();
         editor.draft = Some(Annotation {
@@ -287,12 +649,13 @@ mod tests {
             color: Color::WHITE,
             width: 3.0,
             text: String::new(),
+            ..Default::default()
         });
         editor.commit_draft();
         editor.undo_change();
-        assert!(editor.annotations.is_empty());
+        assert!(editor.layers.is_empty());
         editor.redo_change();
-        assert_eq!(editor.annotations.len(), 1);
+        assert_eq!(editor.layers.len(), 1);
         editor.undo_change();
         editor.draft = Some(Annotation {
             tool: Tool::Text,
@@ -300,10 +663,11 @@ mod tests {
             color: Color::WHITE,
             width: 24.0,
             text: "Hello".into(),
+            ..Default::default()
         });
         editor.commit_draft();
         assert!(editor.redo.is_empty());
-        assert_eq!(editor.annotations[0].tool, Tool::Text);
+        assert_eq!(editor.layers[0].tool, Tool::Text);
     }
 
     #[test]
@@ -314,6 +678,7 @@ mod tests {
             color: Color::WHITE,
             width: 3.0,
             text: String::new(),
+            ..Default::default()
         };
         assert!(rectangle.contains_point(vec2(50.0, 10.0)));
         assert!(!rectangle.contains_point(vec2(50.0, 50.0)));
@@ -328,6 +693,7 @@ mod tests {
             color: Color::WHITE,
             width: 24.0,
             text: "  ".into(),
+            ..Default::default()
         });
         editor.commit_draft();
         assert!(editor.undo.is_empty());
@@ -342,18 +708,19 @@ mod tests {
             color: Color::WHITE,
             width: 24.0,
             text: "First".into(),
+            ..Default::default()
         });
         editor.commit_draft();
         editor.start_editing_text(0);
         editor.draft.as_mut().unwrap().text = "Second".into();
         assert_eq!(editor.get_visible_annotations().count(), 1);
         editor.undo_change();
-        assert_eq!(editor.annotations[0].text, "First");
+        assert_eq!(editor.layers[0].text, "First");
         editor.start_editing_text(0);
         editor.draft.as_mut().unwrap().text = "Second".into();
         editor.commit_draft();
         editor.undo_change();
-        assert_eq!(editor.annotations[0].text, "First");
+        assert_eq!(editor.layers[0].text, "First");
         assert_eq!(get_byte_offset("a😀b", 2), 1);
         assert_eq!(get_byte_offset("a😀b", 3), 5);
     }

@@ -6,6 +6,20 @@ pub struct Icons;
 impl AssetSource for Icons {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
         let path = match path {
+            "line" => "M3 12h18",
+            "outline" => "M4 4h16v16H4Z",
+            "filled" => "M4 4h16v16H4ZM4 8h16M4 12h16M4 16h16",
+            "blur" => "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M8 12h8M12 8v8",
+            "bold" => "M6 3h7a4.5 4.5 0 0 1 0 9H6ZM6 12h8a4.5 4.5 0 0 1 0 9H6Z",
+            "italic" => "M10 3h10M4 21h10M15 3 9 21",
+            "underline" => "M5 3v7a7 7 0 0 0 14 0V3M4 21h16",
+            "palette" => {
+                "M12 3a9 9 0 1 0 0 18h2a2 2 0 0 0 0-4h-1a2 2 0 0 1 0-4h4a4 4 0 0 0 4-4c0-3-4-6-9-6ZM7 8h.1M12 6h.1M17 8h.1M6 13h.1"
+            }
+            "layers" => "M12 3 2 8l10 5 10-5ZM2 12l10 5 10-5M2 16l10 5 10-5",
+            "forward" => "M6 15l6-6 6 6",
+            "backward" => "M6 9l6 6 6-6",
+            "delete" => "M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7",
             "select" => "M4 3l7 17 2-7 7-2Z",
             "rectangle" => "M4 4h16v16H4Z",
             "ellipse" => "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18",
@@ -41,6 +55,18 @@ mod tests {
     #[test]
     fn toolbar_icons_have_visible_strokes() {
         for name in [
+            "line",
+            "outline",
+            "filled",
+            "blur",
+            "bold",
+            "italic",
+            "underline",
+            "palette",
+            "layers",
+            "forward",
+            "backward",
+            "delete",
             "select",
             "rectangle",
             "ellipse",

@@ -5,7 +5,7 @@ use image::{Frame, Rgba, RgbaImage};
 use resvg::{tiny_skia, usvg};
 
 use crate::{
-    editor::{Annotation, Tool, get_arrow_head},
+    editor::{Annotation, BlurMode, Tool, get_arrow_head},
     geometry::Rect,
 };
 
@@ -119,7 +119,20 @@ pub fn render_selection(
             let top = (start.y * scale_y).max(0.0) as u32;
             let right = (end.x * scale_x).ceil().clamp(0.0, output.width() as f32) as u32;
             let bottom = (end.y * scale_y).ceil().clamp(0.0, output.height() as f32) as u32;
-            let block = (annotation.width * 4.0 * scale_x).max(8.0) as u32;
+            if annotation.blur_mode == BlurMode::Gaussian {
+                if right > left && bottom > top {
+                    let region =
+                        image::imageops::crop_imm(&output, left, top, right - left, bottom - top)
+                            .to_image();
+                    let blurred = image::imageops::blur(
+                        &region,
+                        (annotation.intensity * scale_x / 3.0).max(0.5),
+                    );
+                    image::imageops::replace(&mut output, &blurred, left as i64, top as i64);
+                }
+                continue;
+            }
+            let block = (annotation.intensity * scale_x).max(1.0) as u32;
             for y in (top..bottom).step_by(block as usize) {
                 for x in (left..right).step_by(block as usize) {
                     let mut sum = [0u64; 4];
@@ -205,9 +218,14 @@ fn append_annotation_svg(svg: &mut String, annotation: &Annotation) {
     let size = (end - start).abs();
     let _ = write!(
         svg,
-        "<g fill='none' stroke='#{:06x}' stroke-width='{}' stroke-linecap='round' stroke-linejoin='round'",
-        annotation.color.0, annotation.width
+        "<g stroke-width='{}' stroke-linecap='round' stroke-linejoin='round'",
+        annotation.width
     );
+    if annotation.filled && matches!(annotation.tool, Tool::Rectangle | Tool::Ellipse) {
+        let _ = write!(svg, " fill='#{:06x}' stroke='none'", annotation.color.0);
+    } else {
+        let _ = write!(svg, " fill='none' stroke='#{:06x}'", annotation.color.0);
+    }
     if annotation.tool == Tool::Highlighter {
         svg.push_str(" opacity='0.35'");
     }
@@ -230,13 +248,20 @@ fn append_annotation_svg(svg: &mut String, annotation: &Annotation) {
                 size.y / 2.0
             );
         }
-        Tool::Arrow => {
+        Tool::Arrow | Tool::Line => {
             let [left, right] = get_arrow_head(start, end, annotation.width);
             let _ = write!(
                 svg,
-                "<path d='M{} {}L{} {}M{} {}L{} {}L{} {}'/>",
-                start.x, start.y, end.x, end.y, left.x, left.y, end.x, end.y, right.x, right.y
+                "<path d='M{} {}L{} {}'/>",
+                start.x, start.y, end.x, end.y
             );
+            if annotation.tool == Tool::Arrow {
+                let _ = write!(
+                    svg,
+                    "<path d='M{} {}L{} {}L{} {}'/>",
+                    left.x, left.y, end.x, end.y, right.x, right.y
+                );
+            }
         }
         Tool::Pen | Tool::Highlighter => {
             if annotation.points.len() == 1 {
@@ -262,18 +287,37 @@ fn append_annotation_svg(svg: &mut String, annotation: &Annotation) {
                 "<text fill='#{:06x}' stroke='none' font-family='Arial' font-size='{}'>",
                 annotation.color.0, annotation.width
             );
+            let mut offset = 0;
             for (index, line) in annotation.text.split('\n').enumerate() {
                 let _ = write!(
                     svg,
-                    "<tspan x='{}' y='{}'>{}</tspan>",
+                    "<tspan x='{}' y='{}'>",
                     start.x,
-                    start.y + annotation.width * (1.0 + index as f32 * 1.3),
-                    line.replace('&', "&amp;")
-                        .replace('<', "&lt;")
-                        .replace('>', "&gt;")
-                        .replace('\"', "&quot;")
-                        .replace('\'', "&apos;")
+                    start.y + annotation.width * (1.0 + index as f32 * 1.3)
                 );
+                let mut byte = 0;
+                for (length, format) in annotation.get_format_runs(offset..offset + line.len()) {
+                    let text = &line[byte..byte + length];
+                    let _ = write!(
+                        svg,
+                        "<tspan font-weight='{}' font-style='{}' text-decoration='{}'>{}</tspan>",
+                        if format.bold { "bold" } else { "normal" },
+                        if format.italic { "italic" } else { "normal" },
+                        if format.underline {
+                            "underline"
+                        } else {
+                            "none"
+                        },
+                        text.replace('&', "&amp;")
+                            .replace('<', "&lt;")
+                            .replace('>', "&gt;")
+                            .replace('\"', "&quot;")
+                            .replace('\'', "&apos;")
+                    );
+                    byte += length;
+                }
+                svg.push_str("</tspan>");
+                offset += line.len() + 1;
             }
             svg.push_str("</text>");
         }
@@ -287,6 +331,74 @@ mod tests {
     use super::*;
     use crate::geometry::Color;
     use glam::{Vec2, vec2};
+
+    #[test]
+    fn rich_text_exports_independent_styles_and_escaped_content() {
+        let mut annotation = Annotation {
+            tool: Tool::Text,
+            text: "a<&\né".into(),
+            width: 24.0,
+            ..Default::default()
+        };
+        annotation.set_text_attribute(1..3, crate::editor::TextAttribute::Bold, true);
+        annotation.set_text_attribute(4..6, crate::editor::TextAttribute::Italic, true);
+        annotation.set_text_attribute(4..6, crate::editor::TextAttribute::Underline, true);
+        let mut svg = String::new();
+        append_annotation_svg(&mut svg, &annotation);
+        assert!(svg.contains(
+            "font-weight='bold' font-style='normal' text-decoration='none'>&lt;&amp;</tspan>"
+        ));
+        assert!(svg.contains(
+            "font-weight='normal' font-style='italic' text-decoration='underline'>é</tspan>"
+        ));
+        let bounds = Rect {
+            pos: Vec2::ZERO,
+            size: vec2(120.0, 80.0),
+        };
+        let mut fonts = usvg::fontdb::Database::new();
+        fonts.load_system_fonts();
+        let output = render_selection(
+            &RgbaImage::from_pixel(120, 80, Rgba([0, 0, 0, 255])),
+            bounds,
+            bounds,
+            std::iter::once(&annotation),
+            &Arc::new(fonts),
+        )
+        .unwrap();
+        assert!(output.pixels().any(|pixel| pixel[0] > 0));
+    }
+
+    #[test]
+    fn filled_shapes_and_gaussian_strength_render_in_exports() {
+        let bounds = Rect {
+            pos: Vec2::ZERO,
+            size: vec2(40.0, 20.0),
+        };
+        let image = RgbaImage::from_fn(40, 20, |x, _| {
+            Rgba([if x < 20 { 255 } else { 0 }, 0, 0, 255])
+        });
+        let fonts = Arc::new(usvg::fontdb::Database::new());
+        let mut annotation = Annotation {
+            tool: Tool::Rectangle,
+            points: vec![vec2(10.0, 2.0), vec2(30.0, 18.0)],
+            filled: true,
+            color: Color(0x00ff00),
+            ..Default::default()
+        };
+        let filled =
+            render_selection(&image, bounds, bounds, [&annotation].into_iter(), &fonts).unwrap();
+        assert_eq!(filled.get_pixel(20, 10).0, [0, 255, 0, 255]);
+        annotation.tool = Tool::Mosaic;
+        annotation.blur_mode = BlurMode::Gaussian;
+        annotation.intensity = 3.0;
+        let mild =
+            render_selection(&image, bounds, bounds, [&annotation].into_iter(), &fonts).unwrap();
+        annotation.intensity = 24.0;
+        let strong =
+            render_selection(&image, bounds, bounds, [&annotation].into_iter(), &fonts).unwrap();
+        assert!(strong.get_pixel(13, 10)[0] < mild.get_pixel(13, 10)[0]);
+        assert_eq!(strong.get_pixel(0, 0), image.get_pixel(0, 0));
+    }
 
     #[test]
     fn capture_pixels_preserve_rows_padding_and_alpha() {
@@ -335,6 +447,7 @@ mod tests {
             color: Color(0xff0000),
             width: 2.0,
             text: String::new(),
+            ..Default::default()
         };
         let fonts = Arc::new(usvg::fontdb::Database::new());
         let output =
@@ -370,6 +483,7 @@ mod tests {
             color: Color::WHITE,
             width: 3.0,
             text: String::new(),
+            ..Default::default()
         };
         let output = render_selection(
             &image,

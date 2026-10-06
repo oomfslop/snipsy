@@ -2,7 +2,7 @@
 
 GPUI screenshot editor for macOS 14+. Capture a frozen screen region or click a window, annotate it, copy/save it, or pin it above other apps.
 
-Tools: rectangle, ellipse, arrow, pen, highlighter, text, mosaic, and annotation eraser. Annotations can be moved, recolored, resized in stroke width, deleted, and undone/redone. Double-click text to edit; Unicode input and IME composition use GPUI's input handler. Ordinary annotations preview through GPUI GPU paths. Mosaic composites render on a background worker; exports use the same annotation coordinates and styles.
+Tools: outlined/filled rectangles and ovals, lines/arrows, pen, highlighter, rich text, pixelated/Gaussian blur, and annotation eraser. Secondary controls update the selected or latest annotation. Scroll the size control to adjust stroke width or text size; blur has an intensity slider. Color circles accompany the native color picker. Layers can be selected, moved, reordered, deleted, and undone/redone. Double-click text to edit; select text ranges for bold/italic/underline. Unicode input and IME composition use GPUI's input handler. Ordinary annotations preview through GPUI GPU paths. Blur composites render on a background worker; exports use the same annotation coordinates and styles.
 
 ## Build
 
@@ -28,6 +28,7 @@ Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When
 | Capture | `⌘⇧A` or `⌘⇧L` |
 | Pin clipboard image | `⌘⇧P` |
 | Select / rectangle / ellipse / arrow | `V` / `R` / `O` / `A` |
+| Straight line | `L` |
 | Pen / highlighter / text / mosaic / eraser | `B` / `H` / `T` / `M` / `E` |
 | Copy / save / pin selection | `Enter` or `⌘C` / `⌘S` / `⌘P` |
 | Undo / redo | `⌘Z` / `⌘⇧Z` |
@@ -36,6 +37,7 @@ Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When
 | Constrain square, circle, or arrow angle | Hold `Shift` while drawing |
 | Stroke width | `[` / `]` |
 | Commit text / new line | `Enter` / `Shift+Enter` |
+| Bold / italic / underline text | `⌘B` / `⌘I` / `⌘U` |
 | Cancel text or capture | `Escape` |
 
 Pins: drag to move; scroll or `+`/`-` to resize; `⌘`+scroll or `[`/`]` for opacity; `1` restores the initial size; `⌘C` copies; `⌘S` saves; `Escape` closes. Hover a pin for its controls.

@@ -1,6 +1,6 @@
 use crate::{
     app::{self, AppState},
-    editor::{Annotation, Editor, Screenshot, Tool, get_byte_offset},
+    editor::{Annotation, BlurMode, Editor, Screenshot, TextAttribute, Tool, get_byte_offset},
     geometry::{Color, Rect},
     lens, pin, raster,
 };
@@ -12,8 +12,9 @@ use unicode_segmentation::UnicodeSegmentation;
 
 const HANDLE_RADIUS: f32 = 5.0;
 const HANDLE_HIT_RADIUS: f32 = 10.0;
-const BAR_WIDTH: f32 = 632.0;
-const BAR_HEIGHT: f32 = 48.0;
+const BAR_WIDTH: f32 = 16.0 * 28.0 + 16.0 + 7.0 + 2.0 * (4.0 + 1.0);
+const BAR_HEIGHT: f32 = 36.0;
+const PALETTE_HEIGHT: f32 = 38.0;
 const ACCENT: u32 = 0x327fff;
 const COLORS: [u32; 8] = [
     0xff4b4b,
@@ -33,6 +34,7 @@ enum DragMode {
     Resize(ResizeHandle),
     Draw,
     MoveAnnotation(usize),
+    SelectText(usize, usize),
     Erase,
 }
 #[derive(Clone, Copy, PartialEq)]
@@ -56,6 +58,15 @@ enum Action {
     Pin,
     Save,
     Copy,
+    Variant(Tool),
+    Filled(bool),
+    BlurMode(BlurMode),
+    TextStyle(TextAttribute),
+    ColorPicker,
+    Layers,
+    Forward,
+    Backward,
+    Delete,
 }
 
 pub struct SelectionState {
@@ -78,8 +89,12 @@ pub struct SelectionState {
     error: Option<String>,
     text_range: Range<usize>,
     text_reversed: bool,
+    insertion_format: Option<crate::editor::TextFormat>,
     marked_range: Option<Range<usize>>,
     pending_action: Option<Action>,
+    color_task: Option<Task<()>>,
+    show_layers: bool,
+    intensity_drag: bool,
 }
 
 impl SelectionState {
@@ -106,8 +121,12 @@ impl SelectionState {
             error: None,
             text_range: 0..0,
             text_reversed: false,
+            insertion_format: None,
             marked_range: None,
             pending_action: None,
+            color_task: None,
+            show_layers: false,
+            intensity_drag: false,
         };
     }
 
@@ -163,11 +182,19 @@ impl SelectionState {
     }
 
     fn begin_drag(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.finish_settings_change();
+        self.insertion_format = None;
         window.focus(&self.focus);
         self.pointer = vec2(event.position.x.into(), event.position.y.into())
             .clamp(Vec2::ZERO, self.bounds.size);
         self.start = self.pointer;
         self.drag_recorded = false;
+        if self.editor.draft.as_ref().is_some_and(|draft| {
+            draft.tool == Tool::Text && draft.get_bounds().intersects(self.pointer)
+        }) {
+            self.begin_text_selection(event, window, cx);
+            return;
+        }
         self.editor.commit_draft();
         if let Some(selection) = self.selection {
             if let Some(handle) = get_resize_handle(self.pointer, selection) {
@@ -177,41 +204,49 @@ impl SelectionState {
                 return;
             }
             if selection.intersects(self.pointer) {
+                if self.editor.tool != Tool::Eraser
+                    && (self.editor.tool == Tool::Text || event.click_count >= 2)
+                {
+                    if let Some(index) = self
+                        .editor
+                        .get_annotation_at(self.pointer)
+                        .filter(|index| self.editor.layers[*index].tool == Tool::Text)
+                    {
+                        self.editor.start_editing_text(index);
+                        self.begin_text_selection(event, window, cx);
+                        return;
+                    }
+                }
+                if self.editor.tool != Tool::Select
+                    && self.editor.tool != Tool::Text
+                    && self.editor.tool != Tool::Eraser
+                {
+                    if let Some(index) = self.editor.get_annotation_at(self.pointer) {
+                        if get_tool_family(self.editor.layers[index].tool)
+                            == get_tool_family(self.editor.tool)
+                        {
+                            self.editor.selected = Some(index);
+                            self.annotation_origin = self.editor.layers[index].points.clone();
+                            self.drag_mode = Some(DragMode::MoveAnnotation(index));
+                            cx.notify();
+                            return;
+                        }
+                    }
+                }
                 match self.editor.tool {
                     Tool::Select => {
                         if let Some(index) = self.editor.get_annotation_at(self.pointer) {
-                            if event.click_count >= 2
-                                && self.editor.annotations[index].tool == Tool::Text
-                            {
-                                self.editor.start_editing_text(index);
-                                let end = self
-                                    .editor
-                                    .draft
-                                    .as_ref()
-                                    .unwrap()
-                                    .text
-                                    .encode_utf16()
-                                    .count();
-                                self.text_range = end..end;
-                                self.text_reversed = false;
-                                self.marked_range = None;
-                                if let Some(offset) =
-                                    self.character_index_for_point(event.position, window, cx)
-                                {
-                                    self.text_range = offset..offset;
-                                }
-                                cx.notify();
-                                return;
-                            }
                             self.editor.selected = Some(index);
-                            let annotation = &self.editor.annotations[index];
+                            let annotation = &self.editor.layers[index];
                             self.editor.color = annotation.color;
-                            self.editor.width = match annotation.tool {
-                                Tool::Text => ((annotation.width - 12.0) / 4.0).clamp(1.0, 12.0),
-                                Tool::Highlighter => annotation.width / 6.0,
-                                _ => annotation.width,
-                            };
-                            self.annotation_origin = self.editor.annotations[index].points.clone();
+                            match annotation.tool {
+                                Tool::Text => self.editor.text_size = annotation.width,
+                                Tool::Highlighter => {
+                                    self.editor.highlighter_width = annotation.width
+                                }
+                                _ => self.editor.width = annotation.width,
+                            }
+                            self.annotation_origin = self.editor.layers[index].points.clone();
                             self.drag_mode = Some(DragMode::MoveAnnotation(index));
                         } else {
                             self.editor.selected = None;
@@ -226,31 +261,6 @@ impl SelectionState {
                     tool => {
                         self.editor.selected = None;
                         if tool == Tool::Text {
-                            if let Some(index) = self
-                                .editor
-                                .get_annotation_at(self.pointer)
-                                .filter(|index| self.editor.annotations[*index].tool == Tool::Text)
-                            {
-                                self.editor.start_editing_text(index);
-                                let end = self
-                                    .editor
-                                    .draft
-                                    .as_ref()
-                                    .unwrap()
-                                    .text
-                                    .encode_utf16()
-                                    .count();
-                                self.text_range = end..end;
-                                self.text_reversed = false;
-                                self.marked_range = None;
-                                if let Some(offset) =
-                                    self.character_index_for_point(event.position, window, cx)
-                                {
-                                    self.text_range = offset..offset;
-                                }
-                                cx.notify();
-                                return;
-                            }
                             self.text_range = 0..0;
                             self.text_reversed = false;
                             self.marked_range = None;
@@ -260,13 +270,18 @@ impl SelectionState {
                             points: vec![self.pointer],
                             color: self.editor.color,
                             width: if tool == Tool::Text {
-                                self.editor.width * 4.0 + 12.0
+                                self.editor.text_size
                             } else if tool == Tool::Highlighter {
-                                self.editor.width * 6.0
+                                self.editor.highlighter_width
                             } else {
                                 self.editor.width
                             },
                             text: String::new(),
+                            filled: self.editor.filled,
+                            blur_mode: self.editor.blur_mode,
+                            intensity: self.editor.intensity,
+                            text_format: self.editor.text_format,
+                            ..Default::default()
                         });
                         if tool != Tool::Text {
                             self.drag_mode = Some(DragMode::Draw);
@@ -284,7 +299,26 @@ impl SelectionState {
         cx.notify();
     }
 
-    fn update_drag(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn begin_text_selection(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(offset) = self.character_index_for_point(event.position, window, cx) {
+            let text = &self.editor.draft.as_ref().unwrap().text;
+            self.text_range = create_clicked_text_range(text, offset, event.click_count);
+            self.text_reversed = false;
+            self.marked_range = None;
+            self.drag_mode = Some(DragMode::SelectText(
+                self.text_range.start,
+                self.text_range.end,
+            ));
+        }
+        cx.notify();
+    }
+
+    fn update_drag(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         let cursor = self.get_cursor();
         let hovered = self.get_hovered_window();
         self.pointer = vec2(event.position.x.into(), event.position.y.into())
@@ -307,7 +341,7 @@ impl SelectionState {
                 Tool::Rectangle | Tool::Ellipse => {
                     point = self.start + delta.signum() * delta.abs().min_element();
                 }
-                Tool::Arrow => {
+                Tool::Arrow | Tool::Line => {
                     let angle = (delta.y.atan2(delta.x) / std::f32::consts::FRAC_PI_4).round()
                         * std::f32::consts::FRAC_PI_4;
                     point = self.start + vec2(angle.cos(), angle.sin()) * delta.length();
@@ -342,7 +376,7 @@ impl SelectionState {
                         self.editor.record_change();
                         self.drag_recorded = true;
                     }
-                    self.editor.annotations[index].points = self
+                    self.editor.layers[index].points = self
                         .annotation_origin
                         .iter()
                         .map(|point| *point + delta)
@@ -360,6 +394,13 @@ impl SelectionState {
                     } else {
                         draft.points[1] = point;
                     }
+                }
+            }
+            Some(DragMode::SelectText(start, end)) => {
+                self.insertion_format = None;
+                if let Some(offset) = self.character_index_for_point(event.position, window, cx) {
+                    self.text_range = start.min(offset)..end.max(offset);
+                    self.text_reversed = offset < start;
                 }
             }
             Some(DragMode::Erase) => self.erase_at_pointer(),
@@ -411,7 +452,7 @@ impl SelectionState {
                 self.editor.record_change();
                 self.drag_recorded = true;
             }
-            self.editor.annotations.remove(index);
+            self.editor.layers.remove(index);
             self.editor.selected = None;
         }
     }
@@ -424,7 +465,7 @@ impl SelectionState {
             &screenshot.image,
             self.bounds,
             selection,
-            self.editor.annotations.iter(),
+            self.editor.get_visible_annotations(),
             &cx.global::<AppState>().fonts,
         );
     }
@@ -441,6 +482,36 @@ impl SelectionState {
             return;
         }
         match action {
+            Action::Variant(tool) => self.editor.set_variant(tool),
+            Action::Filled(filled) => self.editor.set_filled(filled),
+            Action::BlurMode(mode) => self.editor.set_blur_mode(mode),
+            Action::TextStyle(attribute) => self.toggle_text_attribute(attribute),
+            Action::ColorPicker => {
+                self.color_task = None;
+                let color = self
+                    .editor
+                    .get_current_annotation()
+                    .map_or(self.editor.color, |annotation| annotation.color);
+                let (picker, receiver) = crate::platform::pick_color(color);
+                self.color_task = Some(cx.spawn(async move |this, cx| {
+                    let _picker = picker;
+                    while let Ok(color) = receiver.recv().await {
+                        if this
+                            .update(cx, |state, cx| {
+                                state.editor.set_color(color);
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }));
+            }
+            Action::Layers => self.show_layers = !self.show_layers,
+            Action::Forward => self.editor.move_selected_layer(true),
+            Action::Backward => self.editor.move_selected_layer(false),
+            Action::Delete => self.editor.delete_selected(),
             Action::Tool(tool) => {
                 self.editor.select_tool(tool);
                 if tool == Tool::Highlighter {
@@ -559,6 +630,7 @@ impl SelectionState {
             "r" => Some(Tool::Rectangle),
             "o" => Some(Tool::Ellipse),
             "a" => Some(Tool::Arrow),
+            "l" => Some(Tool::Line),
             "b" => Some(Tool::Pen),
             "h" => Some(Tool::Highlighter),
             "t" => Some(Tool::Text),
@@ -577,11 +649,11 @@ impl SelectionState {
                 cx.notify();
             }
             "[" => {
-                self.editor.set_width(self.editor.width - 1.0);
+                self.editor.set_width(self.editor.get_current_width() - 1.0);
                 cx.notify();
             }
             "]" => {
-                self.editor.set_width(self.editor.width + 1.0);
+                self.editor.set_width(self.editor.get_current_width() + 1.0);
                 cx.notify();
             }
             "space" if self.selection.is_none() => {
@@ -602,7 +674,7 @@ impl SelectionState {
                     };
                     if let Some(index) = self.editor.selected {
                         self.editor.record_change();
-                        for point in &mut self.editor.annotations[index].points {
+                        for point in &mut self.editor.layers[index].points {
                             *point += delta;
                         }
                     } else {
@@ -634,9 +706,9 @@ impl SelectionState {
             .flex()
             .items_center()
             .justify_center()
-            .size(px(36.0))
+            .size(px(28.0))
             .flex_shrink_0()
-            .rounded_md()
+            .rounded_sm()
             .cursor_pointer()
             .bg(if selected { rgb(ACCENT) } else { rgba(0) })
             .text_color(if enabled {
@@ -645,7 +717,7 @@ impl SelectionState {
                 rgb(0x66666d)
             })
             .hover(move |s| s.bg(rgb(if selected { 0x448cff } else { 0x414148 })))
-            .child(svg().path(icon).size(px(21.0)).text_color(if enabled {
+            .child(svg().path(icon).size(px(18.0)).text_color(if enabled {
                 rgb(0xf2f2f2)
             } else {
                 rgb(0x66666d)
@@ -671,7 +743,11 @@ impl SelectionState {
         let text = self.editor.draft.as_ref().unwrap().text.clone();
         if modifiers.platform {
             match key {
+                "b" => self.toggle_text_attribute(TextAttribute::Bold),
+                "i" => self.toggle_text_attribute(TextAttribute::Italic),
+                "u" => self.toggle_text_attribute(TextAttribute::Underline),
                 "a" => {
+                    self.insertion_format = None;
                     self.text_range = 0..text.encode_utf16().count();
                     self.text_reversed = false;
                 }
@@ -724,6 +800,7 @@ impl SelectionState {
                     self.replace_text_in_range(Some(range), "", window, cx);
                 }
                 "left" | "right" => {
+                    self.insertion_format = None;
                     let offset = if self.text_reversed {
                         self.text_range.start
                     } else {
@@ -762,10 +839,12 @@ impl SelectionState {
                     }
                 }
                 "home" => {
+                    self.insertion_format = None;
                     self.text_range = 0..0;
                     self.text_reversed = false;
                 }
                 "end" => {
+                    self.insertion_format = None;
                     let end = text.encode_utf16().count();
                     self.text_range = end..end;
                     self.text_reversed = false;
@@ -789,14 +868,7 @@ impl SelectionState {
         let shaped = window.text_system().shape_line(
             line.to_string().into(),
             px(draft.width),
-            &[TextRun {
-                len: line.len(),
-                font: font("Arial"),
-                color: rgb(draft.color.0).into(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }],
+            &create_text_runs(draft, byte - line.len()..byte),
             None,
         );
         return Some(Bounds::new(
@@ -809,6 +881,154 @@ impl SelectionState {
             ),
             size(px(1.0), px(draft.width * 1.3)),
         ));
+    }
+
+    fn get_current_text_format(&self) -> crate::editor::TextFormat {
+        let Some(annotation) = self.editor.get_current_annotation() else {
+            return self.editor.text_format;
+        };
+        if self.editor.draft.is_some() && self.text_range.is_empty() {
+            if let Some(format) = self.insertion_format {
+                return format;
+            }
+            let byte = get_byte_offset(&annotation.text, self.text_range.start);
+            return annotation
+                .get_format(annotation.text[..byte].chars().count().saturating_sub(1));
+        }
+        let range = if self.editor.draft.is_some() {
+            get_byte_offset(&annotation.text, self.text_range.start)
+                ..get_byte_offset(&annotation.text, self.text_range.end)
+        } else {
+            0..annotation.text.len()
+        };
+        let runs = annotation.get_format_runs(range);
+        if runs.is_empty() {
+            return annotation.text_format;
+        }
+        return crate::editor::TextFormat {
+            bold: runs.iter().all(|(_, format)| format.bold),
+            italic: runs.iter().all(|(_, format)| format.italic),
+            underline: runs.iter().all(|(_, format)| format.underline),
+        };
+    }
+
+    fn toggle_text_attribute(&mut self, attribute: TextAttribute) {
+        let mut format = self.get_current_text_format();
+        let enabled = !format.get_attribute(attribute);
+        format.set_attribute(attribute, enabled);
+        self.editor.text_format = format;
+        if let Some(draft) = self
+            .editor
+            .draft
+            .as_mut()
+            .filter(|draft| draft.tool == Tool::Text)
+        {
+            if self.text_range.is_empty() {
+                self.insertion_format = Some(format);
+                if draft.text.is_empty() {
+                    draft.text_format = format;
+                }
+                return;
+            }
+            let start = get_byte_offset(&draft.text, self.text_range.start);
+            let end = get_byte_offset(&draft.text, self.text_range.end);
+            draft.set_text_attribute(start..end, attribute, enabled);
+            self.insertion_format = None;
+        } else {
+            self.editor
+                .update_current_annotation("text-format", |annotation| {
+                    if annotation.tool == Tool::Text {
+                        annotation.set_text_attribute(0..annotation.text.len(), attribute, enabled);
+                    }
+                });
+        }
+    }
+
+    fn build_intensity_slider(&self, cx: &Context<Self>) -> impl IntoElement {
+        let value = self
+            .editor
+            .get_current_annotation()
+            .map_or(self.editor.intensity, |annotation| annotation.intensity);
+        let bounds = std::rc::Rc::new(std::cell::Cell::new(None::<Bounds<Pixels>>));
+        let paint_bounds = bounds.clone();
+        let down_bounds = bounds.clone();
+        let move_bounds = bounds.clone();
+        div()
+            .id("intensity")
+            .w(px(146.0))
+            .h(px(28.0))
+            .flex_shrink_0()
+            .cursor(CursorStyle::Arrow)
+            .child(
+                canvas(
+                    move |area, _, _| {
+                        paint_bounds.set(Some(area));
+                    },
+                    move |area, _, window, _| {
+                        let left = area.origin.x + px(8.0);
+                        let y = area.origin.y + px(14.0);
+                        let width = px(96.0);
+                        let x = left + width * ((value - 1.0) / 47.0);
+                        window.paint_quad(fill(
+                            Bounds::new(point(left, y - px(2.0)), size(width, px(4.0))),
+                            rgb(0x55555d),
+                        ));
+                        window.paint_quad(fill(
+                            Bounds::new(point(left, y - px(2.0)), size(x - left, px(4.0))),
+                            rgb(ACCENT),
+                        ));
+                        window.paint_quad(fill(
+                            Bounds::new(point(x - px(4.0), y - px(6.0)), size(px(8.0), px(12.0))),
+                            rgb(0xffffff),
+                        ));
+                    },
+                )
+                .size_full(),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .right_1()
+                    .top_1()
+                    .text_sm()
+                    .text_color(rgb(0xffffff))
+                    .child(format!("{}", value.round() as u32)),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |state, event: &MouseDownEvent, _, cx| {
+                    state.intensity_drag = true;
+                    if let Some(area) = down_bounds.get() {
+                        let x: f32 = (event.position.x - area.origin.x).into();
+                        state.editor.set_intensity(1.0 + (x - 8.0) / 96.0 * 47.0);
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(cx.listener(move |state, event: &MouseMoveEvent, _, cx| {
+                if state.intensity_drag {
+                    if let Some(area) = move_bounds.get() {
+                        let x: f32 = (event.position.x - area.origin.x).into();
+                        state.editor.set_intensity(1.0 + (x - 8.0) / 96.0 * 47.0);
+                    }
+                    cx.notify();
+                }
+                cx.stop_propagation();
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|state, _, _, cx| {
+                    state.intensity_drag = false;
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|state, _, _, _| {
+                    state.intensity_drag = false;
+                }),
+            )
     }
 
     fn get_cursor(&self) -> CursorStyle {
@@ -887,6 +1107,7 @@ impl EntityInputHandler for SelectionState {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let insertion_format = self.get_current_text_format();
         let Some(draft) = self
             .editor
             .draft
@@ -901,7 +1122,8 @@ impl EntityInputHandler for SelectionState {
         let start = get_byte_offset(&draft.text, range.start);
         let end = get_byte_offset(&draft.text, range.end).max(start);
         let cursor = draft.text[..start].encode_utf16().count() + text.encode_utf16().count();
-        draft.text.replace_range(start..end, text);
+        draft.replace_text(start..end, text, insertion_format);
+        self.insertion_format = Some(insertion_format);
         self.text_range = cursor..cursor;
         self.text_reversed = false;
         self.marked_range = None;
@@ -953,25 +1175,20 @@ impl EntityInputHandler for SelectionState {
             .max(0.0) as usize)
             .min(draft.text.split('\n').count() - 1);
         let mut offset = 0;
+        let mut byte_offset = 0;
         for (index, line) in draft.text.split('\n').enumerate() {
             if index == row {
                 let shaped = window.text_system().shape_line(
                     line.to_string().into(),
                     px(draft.width),
-                    &[TextRun {
-                        len: line.len(),
-                        font: font("Arial"),
-                        color: rgb(draft.color.0).into(),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }],
+                    &create_text_runs(draft, byte_offset..byte_offset + line.len()),
                     None,
                 );
                 let byte = shaped.closest_index_for_x(point.x - px(draft.points[0].x));
                 return Some(offset + line[..byte].encode_utf16().count());
             }
             offset += line.encode_utf16().count() + 1;
+            byte_offset += line.len() + 1;
         }
         return Some(offset);
     }
@@ -1205,10 +1422,10 @@ impl Render for SelectionState {
                 div()
                     .absolute()
                     .left(px(rect.pos.x.clamp(8.0, (screen_size.x - 150.0).max(8.0))))
-                    .top(px((rect.pos.y - 34.0).max(8.0)))
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
+                    .top(px((rect.pos.y - 30.0).max(8.0)))
+                    .px(px(6.0))
+                    .py(px(2.0))
+                    .rounded_sm()
                     .bg(rgb(0x242428))
                     .border_1()
                     .border_color(rgb(0x55555d))
@@ -1223,7 +1440,7 @@ impl Render for SelectionState {
         }
         if let Some(selection) = selection {
             if let Some(index) = self.editor.selected {
-                let rect = self.editor.annotations[index].get_bounds();
+                let rect = self.editor.layers[index].get_bounds();
                 root = root.child(
                     div()
                         .absolute()
@@ -1247,12 +1464,11 @@ impl Render for SelectionState {
                         .border_color(rgb(self.editor.color.0)),
                 );
             }
-            if self.drag_mode.is_none() {
+            if get_should_show_toolbar(self.drag_mode) {
                 let bar = create_action_bar_rect(selection, screen_size);
                 let tools = [
                     ("select", "Select / move (V)", Tool::Select),
                     ("rectangle", "Rectangle (R)", Tool::Rectangle),
-                    ("ellipse", "Ellipse (O)", Tool::Ellipse),
                     ("arrow", "Arrow (A)", Tool::Arrow),
                     ("pen", "Pen (B)", Tool::Pen),
                     ("highlight", "Highlighter (H)", Tool::Highlighter),
@@ -1271,9 +1487,9 @@ impl Render for SelectionState {
                         .h(px(BAR_HEIGHT))
                         .flex()
                         .items_center()
-                        .gap(px(2.0))
-                        .px(px(6.0))
-                        .rounded_lg()
+                        .gap(px(1.0))
+                        .px(px(4.0))
+                        .rounded_md()
                         .bg(rgb(0x28282d))
                         .border_1()
                         .border_color(rgb(0x44444c))
@@ -1284,7 +1500,7 @@ impl Render for SelectionState {
                                 icon,
                                 label,
                                 Action::Tool(tool),
-                                self.editor.tool == tool,
+                                get_tool_family(self.editor.tool) == get_tool_family(tool),
                                 true,
                                 cx,
                             )
@@ -1292,8 +1508,8 @@ impl Render for SelectionState {
                         .child(
                             div()
                                 .w(px(1.0))
-                                .h(px(22.0))
-                                .mx(px(4.0))
+                                .h(px(18.0))
+                                .mx(px(3.0))
                                 .bg(rgb(0x55555d))
                                 .flex_shrink_0(),
                         )
@@ -1339,90 +1555,315 @@ impl Render for SelectionState {
                             cx,
                         ))
                         .child(self.build_button(
+                            "layers",
+                            "Layers",
+                            Action::Layers,
+                            self.show_layers,
+                            true,
+                            cx,
+                        ))
+                        .child(self.build_button(
                             "copy",
                             "Copy (Enter / ⌘C)",
                             Action::Copy,
-                            true,
+                            false,
                             true,
                             cx,
                         )),
                 );
-                if (self.editor.tool != Tool::Select && self.editor.tool != Tool::Eraser)
-                    || self.editor.selected.is_some()
-                {
-                    let palette_y = if bar.pos.y + BAR_HEIGHT + 44.0 <= screen_size.y - 8.0 {
-                        bar.pos.y + BAR_HEIGHT + 6.0
+                let tool = self.editor.get_current_tool();
+                if tool != Tool::Select && tool != Tool::Eraser {
+                    let y = if bar.pos.y + BAR_HEIGHT + PALETTE_HEIGHT + 4.0 <= screen_size.y - 8.0
+                    {
+                        bar.pos.y + BAR_HEIGHT + 4.0
                     } else {
-                        (bar.pos.y - 44.0).max(8.0)
+                        (bar.pos.y - PALETTE_HEIGHT - 4.0).max(8.0)
                     };
-                    root = root.child(
-                        div()
-                            .cursor(CursorStyle::Arrow)
-                            .absolute()
-                            .left(px(bar.pos.x))
-                            .top(px(palette_y))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .p_2()
-                            .rounded_lg()
-                            .bg(rgb(0x28282d))
-                            .border_1()
-                            .border_color(rgb(0x44444c))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .children(COLORS.into_iter().map(|color| {
+                    let current = self.editor.get_current_annotation();
+                    let filled = current.map_or(self.editor.filled, |annotation| annotation.filled);
+                    let mode =
+                        current.map_or(self.editor.blur_mode, |annotation| annotation.blur_mode);
+                    let color = current.map_or(self.editor.color, |annotation| annotation.color);
+                    let width = self.editor.get_current_width();
+                    let format = self.get_current_text_format();
+                    let mut options = div()
+                        .id("tool-options")
+                        .absolute()
+                        .left(px(bar.pos.x))
+                        .top(px(y))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .p_1()
+                        .rounded_md()
+                        .bg(rgb(0x28282d))
+                        .border_1()
+                        .border_color(rgb(0x44444c))
+                        .cursor(CursorStyle::Arrow)
+                        .max_w(px((screen_size.x - bar.pos.x - 8.0).max(32.0)))
+                        .overflow_x_scroll()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+                    match tool {
+                        Tool::Rectangle | Tool::Ellipse => {
+                            options = options
+                                .child(self.build_button(
+                                    "outline",
+                                    "Outline",
+                                    Action::Filled(false),
+                                    !filled,
+                                    true,
+                                    cx,
+                                ))
+                                .child(self.build_button(
+                                    "filled",
+                                    "Filled",
+                                    Action::Filled(true),
+                                    filled,
+                                    true,
+                                    cx,
+                                ))
+                                .child(self.build_button(
+                                    "rectangle",
+                                    "Rectangle",
+                                    Action::Variant(Tool::Rectangle),
+                                    tool == Tool::Rectangle,
+                                    true,
+                                    cx,
+                                ))
+                                .child(self.build_button(
+                                    "ellipse",
+                                    "Oval",
+                                    Action::Variant(Tool::Ellipse),
+                                    tool == Tool::Ellipse,
+                                    true,
+                                    cx,
+                                ));
+                        }
+                        Tool::Arrow | Tool::Line => {
+                            options = options
+                                .child(self.build_button(
+                                    "arrow",
+                                    "Arrow",
+                                    Action::Variant(Tool::Arrow),
+                                    tool == Tool::Arrow,
+                                    true,
+                                    cx,
+                                ))
+                                .child(self.build_button(
+                                    "line",
+                                    "Straight line",
+                                    Action::Variant(Tool::Line),
+                                    tool == Tool::Line,
+                                    true,
+                                    cx,
+                                ));
+                        }
+                        Tool::Mosaic => {
+                            options = options
+                                .child(self.build_button(
+                                    "mosaic",
+                                    "Pixelated",
+                                    Action::BlurMode(BlurMode::Pixelated),
+                                    mode == BlurMode::Pixelated,
+                                    true,
+                                    cx,
+                                ))
+                                .child(self.build_button(
+                                    "blur",
+                                    "Gaussian blur",
+                                    Action::BlurMode(BlurMode::Gaussian),
+                                    mode == BlurMode::Gaussian,
+                                    true,
+                                    cx,
+                                ))
+                                .child(self.build_intensity_slider(cx));
+                        }
+                        Tool::Text => {
+                            options = options
+                                .child(self.build_button(
+                                    "bold",
+                                    "Bold (⌘B)",
+                                    Action::TextStyle(TextAttribute::Bold),
+                                    format.bold,
+                                    true,
+                                    cx,
+                                ))
+                                .child(self.build_button(
+                                    "italic",
+                                    "Italic (⌘I)",
+                                    Action::TextStyle(TextAttribute::Italic),
+                                    format.italic,
+                                    true,
+                                    cx,
+                                ))
+                                .child(self.build_button(
+                                    "underline",
+                                    "Underline (⌘U)",
+                                    Action::TextStyle(TextAttribute::Underline),
+                                    format.underline,
+                                    true,
+                                    cx,
+                                ));
+                        }
+                        _ => {}
+                    }
+                    if tool != Tool::Mosaic {
+                        options = options
+                            .child(
                                 div()
-                                    .id(("color", color as usize))
-                                    .size(px(20.0))
+                                    .id("size")
+                                    .h(px(28.0))
+                                    .min_w(px(44.0))
+                                    .px_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_sm()
+                                    .text_color(rgb(0xeeeeee))
+                                    .rounded_sm()
+                                    .bg(rgb(0x38383f))
+                                    .child(format!(
+                                        "{}{}",
+                                        width.round() as u32,
+                                        if tool == Tool::Text { "" } else { "px" }
+                                    ))
+                                    .tooltip(move |_, cx| {
+                                        cx.new(|_| TooltipLabel("Scroll to adjust size".into()))
+                                            .into()
+                                    })
+                                    .on_scroll_wheel(cx.listener(
+                                        move |state, event: &ScrollWheelEvent, _, cx| {
+                                            let delta: f32 =
+                                                event.delta.pixel_delta(px(16.0)).y.into();
+                                            if delta == 0.0 {
+                                                return;
+                                            }
+                                            let width = state.editor.get_current_width();
+                                            if tool == Tool::Text {
+                                                state
+                                                    .editor
+                                                    .set_text_size(width + delta.signum() * 2.0);
+                                            } else {
+                                                state.editor.set_width(width + delta.signum());
+                                            }
+                                            cx.stop_propagation();
+                                            cx.notify();
+                                        },
+                                    )),
+                            )
+                            .child(self.build_button(
+                                "palette",
+                                "Color picker",
+                                Action::ColorPicker,
+                                false,
+                                true,
+                                cx,
+                            ))
+                            .children(COLORS.into_iter().map(|swatch| {
+                                div()
+                                    .id(("color", swatch as usize))
+                                    .size(px(18.0))
+                                    .flex_shrink_0()
                                     .rounded_full()
-                                    .bg(rgb(color))
+                                    .bg(rgb(swatch))
                                     .border_2()
-                                    .border_color(if self.editor.color.0 == color {
+                                    .border_color(if color.0 == swatch {
                                         rgb(0xffffff)
                                     } else {
                                         rgb(0x55555d)
                                     })
                                     .cursor_pointer()
                                     .on_click(cx.listener(move |state, _, _, cx| {
-                                        state.editor.color = Color(color);
-                                        if let Some(index) = state.editor.selected {
-                                            state.editor.record_change();
-                                            state.editor.annotations[index].color = Color(color);
-                                        }
-                                        if let Some(draft) = &mut state.editor.draft {
-                                            draft.color = Color(color);
-                                        }
+                                        state.editor.set_color(Color(swatch));
                                         cx.notify();
                                     }))
-                            }))
-                            .child(div().w(px(1.0)).h(px(18.0)).bg(rgb(0x55555d)))
-                            .children([2.0, 4.0, 8.0].into_iter().enumerate().map(
-                                |(index, width)| {
-                                    div()
-                                        .id(("width", index))
-                                        .size(px(22.0))
-                                        .rounded_md()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .bg(if self.editor.width == width {
-                                            rgb(0x484850)
-                                        } else {
-                                            rgba(0)
-                                        })
-                                        .child(
-                                            div()
-                                                .size(px(width + 2.0))
-                                                .rounded_full()
-                                                .bg(rgb(0xeeeeee)),
-                                        )
-                                        .on_click(cx.listener(move |state, _, _, cx| {
-                                            state.editor.set_width(width);
-                                            cx.notify();
-                                        }))
-                                },
-                            )),
+                            }));
+                    }
+                    if self.editor.selected.is_some() {
+                        options = options
+                            .child(self.build_button(
+                                "backward",
+                                "Send backward",
+                                Action::Backward,
+                                false,
+                                true,
+                                cx,
+                            ))
+                            .child(self.build_button(
+                                "forward",
+                                "Bring forward",
+                                Action::Forward,
+                                false,
+                                true,
+                                cx,
+                            ))
+                            .child(self.build_button(
+                                "delete",
+                                "Delete layer",
+                                Action::Delete,
+                                false,
+                                true,
+                                cx,
+                            ));
+                    }
+                    root = root.child(options);
+                }
+                if self.show_layers {
+                    let layers =
+                        self.editor
+                            .layers
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .map(|(index, layer)| {
+                                let id = layer.id;
+                                div()
+                                    .id(("layer", id as usize))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .bg(if self.editor.selected == Some(index) {
+                                        rgb(0x327fff)
+                                    } else {
+                                        rgba(0)
+                                    })
+                                    .hover(|style| style.bg(rgb(0x414148)))
+                                    .text_sm()
+                                    .text_color(rgb(0xffffff))
+                                    .child(format!("{} {}", get_layer_label(layer.tool), id))
+                                    .on_click(cx.listener(move |state, _, window, cx| {
+                                        state.editor.commit_draft();
+                                        state.editor.selected = state
+                                            .editor
+                                            .layers
+                                            .iter()
+                                            .position(|layer| layer.id == id);
+                                        state.editor.tool = Tool::Select;
+                                        window.focus(&state.focus);
+                                        cx.notify();
+                                    }))
+                            });
+                    root = root.child(
+                        div()
+                            .id("layers-panel")
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .absolute()
+                            .left(px(bar.pos.x))
+                            .top(px((get_layers_y(bar, screen_size)).max(8.0)))
+                            .w(px(160.0))
+                            .max_h(px(220.0))
+                            .overflow_y_scroll()
+                            .p_1()
+                            .rounded_md()
+                            .bg(rgb(0x28282d))
+                            .border_1()
+                            .border_color(rgb(0x44444c))
+                            .cursor(CursorStyle::Arrow)
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .children(layers),
                     );
                 }
             }
@@ -1447,9 +1888,9 @@ struct TooltipLabel(SharedString);
 impl Render for TooltipLabel {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
-            .px_2()
-            .py_1()
-            .rounded_md()
+            .px(px(6.0))
+            .py(px(3.0))
+            .rounded_sm()
             .bg(rgb(0x19191c))
             .text_color(rgb(0xffffff))
             .text_sm()
@@ -1483,6 +1924,85 @@ fn get_dim_rects(selection: Option<Rect>, size: Vec2) -> Vec<Rect> {
     ];
 }
 
+fn get_should_show_toolbar(drag: Option<DragMode>) -> bool {
+    return matches!(drag, None | Some(DragMode::SelectText(_, _)));
+}
+
+fn create_clicked_text_range(text: &str, offset: usize, click_count: usize) -> Range<usize> {
+    if click_count < 2 {
+        return offset..offset;
+    }
+    let byte = get_byte_offset(text, offset);
+    let range = text
+        .split_word_bound_indices()
+        .find(|(start, word)| *start <= byte && byte < start + word.len())
+        .or_else(|| text.split_word_bound_indices().last());
+    let Some((start, word)) = range else {
+        return 0..0;
+    };
+    let start = text[..start].encode_utf16().count();
+    return start..start + word.encode_utf16().count();
+}
+
+fn get_tool_family(tool: Tool) -> Tool {
+    return match tool {
+        Tool::Rectangle | Tool::Ellipse => Tool::Rectangle,
+        Tool::Arrow | Tool::Line => Tool::Arrow,
+        other => other,
+    };
+}
+
+fn get_layer_label(tool: Tool) -> &'static str {
+    return match tool {
+        Tool::Rectangle => "Rectangle",
+        Tool::Ellipse => "Oval",
+        Tool::Arrow => "Arrow",
+        Tool::Line => "Line",
+        Tool::Pen => "Pen",
+        Tool::Highlighter => "Highlighter",
+        Tool::Text => "Text",
+        Tool::Mosaic => "Blur",
+        Tool::Select => "Selection",
+        Tool::Eraser => "Eraser",
+    };
+}
+
+fn get_layers_y(bar: Rect, size: Vec2) -> f32 {
+    return if bar.pos.y >= 232.0 {
+        bar.pos.y - 224.0
+    } else {
+        (bar.pos.y + BAR_HEIGHT + PALETTE_HEIGHT + 8.0).min((size.y - 220.0).max(8.0))
+    };
+}
+
+fn create_text_runs(annotation: &Annotation, range: Range<usize>) -> Vec<TextRun> {
+    return annotation
+        .get_format_runs(range)
+        .into_iter()
+        .map(|(length, format)| {
+            let mut face = font("Arial");
+            if format.bold {
+                face = face.bold();
+            }
+            if format.italic {
+                face = face.italic();
+            }
+            TextRun {
+                len: length,
+                font: face,
+                color: rgb(annotation.color.0).into(),
+                background_color: None,
+                underline: format.underline.then_some(UnderlineStyle {
+                    color: Some(rgb(annotation.color.0).into()),
+                    thickness: px((annotation.width / 16.0).max(1.0)),
+                    wavy: false,
+                }),
+                strikethrough: None,
+            }
+        })
+        .collect();
+}
+
 fn get_selection_cursor(
     drag: Option<DragMode>,
     tool: Tool,
@@ -1492,6 +2012,7 @@ fn get_selection_cursor(
     match drag {
         Some(DragMode::New | DragMode::Draw | DragMode::Erase) => return CursorStyle::Crosshair,
         Some(DragMode::Move | DragMode::MoveAnnotation(_)) => return CursorStyle::ClosedHand,
+        Some(DragMode::SelectText(_, _)) => return CursorStyle::IBeam,
         _ => {}
     }
     let handle = match drag {
@@ -1528,6 +2049,9 @@ fn build_annotation_path(annotation: &Annotation) -> Result<Option<Path<Pixels>>
             .with_line_cap(lyon::path::LineCap::Round)
             .with_line_join(lyon::path::LineJoin::Round),
     ));
+    if annotation.filled && matches!(annotation.tool, Tool::Rectangle | Tool::Ellipse) {
+        path = path.with_style(PathStyle::Fill(FillOptions::default()));
+    }
     match annotation.tool {
         Tool::Rectangle => {
             if (max - min).min_element() <= 0.0 {
@@ -1562,16 +2086,18 @@ fn build_annotation_path(annotation: &Annotation) -> Result<Option<Path<Pixels>>
             );
             path.close();
         }
-        Tool::Arrow => {
+        Tool::Arrow | Tool::Line => {
             if start == end {
                 return Ok(None);
             }
             let [left, right] = crate::editor::get_arrow_head(start, end, annotation.width);
             path.move_to(at(start));
             path.line_to(at(end));
-            path.move_to(at(left));
-            path.line_to(at(end));
-            path.line_to(at(right));
+            if annotation.tool == Tool::Arrow {
+                path.move_to(at(left));
+                path.line_to(at(end));
+                path.line_to(at(right));
+            }
         }
         Tool::Pen | Tool::Highlighter => {
             if annotation.points.len() < 2 {
@@ -1612,18 +2138,12 @@ fn paint_annotation(
         window.paint_quad(dot);
     }
     if annotation.tool == Tool::Text {
+        let mut offset = 0;
         for (index, text) in annotation.text.split('\n').enumerate() {
             let line = window.text_system().shape_line(
                 text.to_string().into(),
                 px(annotation.width),
-                &[TextRun {
-                    len: text.len(),
-                    font: font("Arial"),
-                    color: color.into(),
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
+                &create_text_runs(annotation, offset..offset + text.len()),
                 None,
             );
             let height = px(annotation.width * 1.3);
@@ -1632,6 +2152,7 @@ fn paint_annotation(
             let y = baseline - line.ascent - (height - line.ascent - line.descent) / 2.0;
             line.paint(point(px(annotation.points[0].x), y), height, window, cx)
                 .map_err(|error| error.to_string())?;
+            offset += text.len() + 1;
         }
     }
     return Ok(());
@@ -1713,14 +2234,14 @@ fn create_action_bar_rect(selection: Rect, bounds: Vec2) -> Rect {
     let width = BAR_WIDTH.min((bounds.x - 16.0).max(1.0));
     let x =
         (selection.pos.x + selection.size.x - width).clamp(8.0, (bounds.x - width - 8.0).max(8.0));
-    let below = selection.pos.y + selection.size.y + 10.0;
-    let above = selection.pos.y - BAR_HEIGHT - 10.0;
+    let below = selection.pos.y + selection.size.y + 6.0;
+    let above = selection.pos.y - BAR_HEIGHT - 6.0;
     let y = if below + BAR_HEIGHT <= bounds.y - 8.0 {
         below
     } else if above >= 8.0 {
         above
     } else {
-        (selection.pos.y + selection.size.y - BAR_HEIGHT - 10.0)
+        (selection.pos.y + selection.size.y - BAR_HEIGHT - 6.0)
             .clamp(8.0, (bounds.y - BAR_HEIGHT - 8.0).max(8.0))
     };
     return Rect {
@@ -1731,6 +2252,25 @@ fn create_action_bar_rect(selection: Rect, bounds: Vec2) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn text_selection_keeps_toolbar_and_double_click_selects_unicode_words() {
+        assert!(super::get_should_show_toolbar(Some(
+            super::DragMode::SelectText(0, 5)
+        )));
+        assert!(super::get_should_show_toolbar(None));
+        assert!(!super::get_should_show_toolbar(Some(super::DragMode::Draw)));
+        assert_eq!(
+            super::create_clicked_text_range("😀 café world", 5, 2),
+            3..7
+        );
+        assert_eq!(
+            super::create_clicked_text_range("😀 café world", 5, 1),
+            5..5
+        );
+        assert_eq!(super::create_clicked_text_range("", 0, 2), 0..0);
+        assert_eq!(super::create_clicked_text_range("word", 4, 2), 0..4);
+    }
+
     use super::{
         Annotation, CursorStyle, DragMode, ResizeHandle, Tool, build_annotation_path,
         create_action_bar_rect, create_resized_selection, get_dim_rects, get_selection_cursor,
@@ -1776,6 +2316,7 @@ mod tests {
             Tool::Rectangle,
             Tool::Ellipse,
             Tool::Arrow,
+            Tool::Line,
             Tool::Pen,
             Tool::Highlighter,
         ] {
@@ -1785,6 +2326,7 @@ mod tests {
                 color: crate::geometry::Color::WHITE,
                 width: 3.0,
                 text: String::new(),
+                ..Default::default()
             };
             assert!(build_annotation_path(&annotation).unwrap().is_some());
         }

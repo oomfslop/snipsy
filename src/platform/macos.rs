@@ -2,20 +2,25 @@ use async_channel::{Receiver, Sender};
 use block2::RcBlock;
 use glam::vec2;
 use objc2::{
-    AnyThread, MainThreadMarker,
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
     rc::{Retained, autoreleasepool},
+    sel,
 };
 use objc2_app_kit::{
-    NSAlert, NSApplication, NSApplicationActivationPolicy, NSEvent, NSModalResponseCancel,
-    NSModalResponseOK, NSPopUpMenuWindowLevel, NSSavePanel, NSScreen, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSAlert, NSApplication, NSApplicationActivationPolicy, NSColor, NSColorPanel, NSColorSpace,
+    NSEvent, NSModalResponseCancel, NSModalResponseOK, NSPopUpMenuWindowLevel, NSSavePanel,
+    NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType};
 use objc2_core_graphics::{
     CGImage, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
     CGWindowListCopyWindowInfo, CGWindowListOption, kCGColorSpaceSRGB, kCGWindowNumber,
 };
-use objc2_foundation::{NSArray, NSError, NSOperationQueue, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSArray, NSError, NSObject, NSObjectProtocol, NSOperationQueue, NSPoint, NSRect, NSSize,
+    NSString,
+};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
 };
@@ -25,9 +30,78 @@ use std::{collections::HashMap, path::PathBuf};
 
 use crate::{
     editor::Screenshot,
-    geometry::Rect,
+    geometry::{Color, Rect},
     raster::{self, PixelAlpha},
 };
+
+struct ColorPickerIvars {
+    sender: Sender<Color>,
+}
+define_class!(
+    #[unsafe(super = NSObject)]
+    #[name = "SnipsyColorPickerTarget"]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ColorPickerIvars]
+    struct ColorPickerTarget;
+    // SAFETY: NSObjectProtocol has no additional requirements.
+    unsafe impl NSObjectProtocol for ColorPickerTarget {}
+    impl ColorPickerTarget {
+        #[unsafe(method(changeColor:))]
+        fn change_color(&self, panel: &NSColorPanel) {
+            if let Some(color) = panel.color().colorUsingColorSpace(&NSColorSpace::sRGBColorSpace()) {
+                let _ = self.ivars().sender.try_send(Color::from_rgb(
+                    (color.redComponent() * 255.0).round() as u8,
+                    (color.greenComponent() * 255.0).round() as u8,
+                    (color.blueComponent() * 255.0).round() as u8));
+            }
+        }
+    }
+);
+
+pub struct ColorPicker {
+    panel: Retained<NSColorPanel>,
+    _target: Retained<ColorPickerTarget>,
+}
+impl Drop for ColorPicker {
+    fn drop(&mut self) {
+        // SAFETY: Clear the non-retained target before releasing it.
+        unsafe {
+            self.panel.setTarget(None);
+        }
+        self.panel.orderOut(None);
+    }
+}
+
+pub fn pick_color(color: Color) -> (ColorPicker, Receiver<Color>) {
+    let mtm = MainThreadMarker::new().expect("color picker opens on the main thread");
+    let (sender, receiver) = async_channel::unbounded();
+    let allocated = ColorPickerTarget::alloc(mtm).set_ivars(ColorPickerIvars { sender });
+    // SAFETY: NSObject init initializes this allocated subclass with its ivars already installed.
+    let target: Retained<ColorPickerTarget> = unsafe { msg_send![super(allocated), init] };
+    let panel = NSColorPanel::sharedColorPanel(mtm);
+    panel.setColor(&NSColor::colorWithSRGBRed_green_blue_alpha(
+        ((color.0 >> 16) & 255) as f64 / 255.0,
+        ((color.0 >> 8) & 255) as f64 / 255.0,
+        (color.0 & 255) as f64 / 255.0,
+        1.0,
+    ));
+    panel.setShowsAlpha(false);
+    panel.setContinuous(true);
+    panel.setLevel(NSPopUpMenuWindowLevel + 1);
+    // SAFETY: Target implements changeColor:, and ColorPicker retains it until the target is cleared.
+    unsafe {
+        panel.setTarget(Some(&target));
+        panel.setAction(Some(sel!(changeColor:)));
+    }
+    panel.makeKeyAndOrderFront(None);
+    return (
+        ColorPicker {
+            panel,
+            _target: target,
+        },
+        receiver,
+    );
+}
 
 pub fn initialize_app() {
     let mtm = MainThreadMarker::new().expect("app initializes on the main thread");

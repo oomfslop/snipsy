@@ -3,7 +3,7 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{
     capture_screen, configure_overlay, get_capture_bounds, hide_overlay, initialize_app,
-    prompt_save_image, show_error,
+    pick_color, prompt_save_image, show_error,
 };
 
 #[cfg(not(target_os = "macos"))]
