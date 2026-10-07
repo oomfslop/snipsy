@@ -456,21 +456,25 @@ impl Editor {
         self.update_current_annotation("text-size", |annotation| annotation.width = value);
     }
 
-    pub fn move_selected_layer(&mut self, forward: bool) {
+    pub fn move_layer(&mut self, id: u64, target_id: u64, above: bool) {
         self.commit_draft();
-        let Some(index) = self.selected else {
+        let Some(index) = self.layers.iter().position(|layer| layer.id == id) else {
             return;
         };
-        let next = if forward {
-            (index + 1).min(self.layers.len() - 1)
-        } else {
-            index.saturating_sub(1)
+        let Some(target) = self.layers.iter().position(|layer| layer.id == target_id) else {
+            return;
         };
+        if index == target {
+            return;
+        }
+        let slot = target + usize::from(above);
+        let next = slot - usize::from(index < slot);
         if index == next {
             return;
         }
         self.record_change();
-        self.layers.swap(index, next);
+        let layer = self.layers.remove(index);
+        self.layers.insert(next, layer);
         self.selected = Some(next);
     }
 
@@ -573,11 +577,54 @@ mod tests {
             editor.commit_draft();
         }
         let id = editor.layers[1].id;
-        editor.move_selected_layer(false);
+        editor.move_layer(id, editor.layers[0].id, false);
         assert_eq!(editor.selected, Some(0));
         assert_eq!(editor.layers[0].id, id);
         editor.undo_change();
         assert_eq!(editor.layers[1].id, id);
+    }
+
+    #[test]
+    fn dropping_layers_before_and_after_targets_preserves_order_and_undo() {
+        let mut editor = Editor::new();
+        for _ in 0..4 {
+            editor.draft = Some(Annotation {
+                tool: Tool::Rectangle,
+                points: vec![Vec2::ZERO, vec2(50.0, 50.0)],
+                ..Default::default()
+            });
+            editor.commit_draft();
+        }
+        let ids: Vec<_> = editor.layers.iter().map(|layer| layer.id).collect();
+        editor.move_layer(ids[0], ids[2], true);
+        assert_eq!(
+            editor
+                .layers
+                .iter()
+                .map(|layer| layer.id)
+                .collect::<Vec<_>>(),
+            vec![ids[1], ids[2], ids[0], ids[3]]
+        );
+        assert_eq!(editor.selected, Some(2));
+        editor.move_layer(ids[3], ids[1], false);
+        assert_eq!(
+            editor
+                .layers
+                .iter()
+                .map(|layer| layer.id)
+                .collect::<Vec<_>>(),
+            vec![ids[3], ids[1], ids[2], ids[0]]
+        );
+        assert_eq!(editor.selected, Some(0));
+        let history = editor.undo.len();
+        editor.move_layer(ids[3], ids[1], false);
+        editor.move_layer(ids[3], ids[3], true);
+        editor.move_layer(999, ids[3], true);
+        assert_eq!(editor.undo.len(), history);
+        editor.undo_change();
+        assert_eq!(editor.layers[3].id, ids[3]);
+        editor.redo_change();
+        assert_eq!(editor.layers[0].id, ids[3]);
     }
 
     #[test]

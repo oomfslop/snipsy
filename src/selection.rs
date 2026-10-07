@@ -67,8 +67,6 @@ enum Action {
     TextStyle(TextAttribute),
     ColorPicker,
     Layers,
-    Forward,
-    Backward,
     Delete,
 }
 
@@ -97,6 +95,7 @@ pub struct SelectionState {
     pending_action: Option<Action>,
     color_task: Option<Task<()>>,
     show_layers: bool,
+    layer_drop_target: Option<(u64, bool)>,
     intensity_drag: bool,
 }
 
@@ -133,6 +132,7 @@ impl SelectionState {
             pending_action: None,
             color_task: None,
             show_layers: false,
+            layer_drop_target: None,
             intensity_drag: false,
         };
     }
@@ -525,8 +525,6 @@ impl SelectionState {
                 }));
             }
             Action::Layers => self.show_layers = !self.show_layers,
-            Action::Forward => self.editor.move_selected_layer(true),
-            Action::Backward => self.editor.move_selected_layer(false),
             Action::Delete => self.editor.delete_selected(),
             Action::Tool(tool) => {
                 self.editor.select_tool(tool);
@@ -1507,6 +1505,9 @@ impl Render for SelectionState {
             }
 
             let bar = create_action_bar_rect(selection, screen_size);
+            let layers_panel = self.show_layers.then(|| {
+                create_layers_panel_rect(selection, bar, screen_size, self.editor.layers.len())
+            });
             let tools = [
                 ("select", "Select / move (V)", Tool::Select),
                 ("rectangle", "Rectangle (R)", Tool::Rectangle),
@@ -1618,6 +1619,16 @@ impl Render for SelectionState {
                 let color = current.map_or(self.editor.color, |annotation| annotation.color);
                 let width = self.editor.get_current_width();
                 let format = self.get_current_text_format();
+                let mut options_width = (screen_size.x - bar.pos.x - 8.0).max(32.0);
+                if let Some(panel) = layers_panel {
+                    if panel.pos.x > bar.pos.x
+                        && y < panel.pos.y + panel.size.y
+                        && y + PALETTE_HEIGHT > panel.pos.y
+                    {
+                        options_width =
+                            options_width.min((panel.pos.x - bar.pos.x - 8.0).max(32.0));
+                    }
+                }
                 let mut options = div()
                     .id("tool-options")
                     .absolute()
@@ -1632,7 +1643,7 @@ impl Render for SelectionState {
                     .border_1()
                     .border_color(rgb(0x44444c))
                     .cursor(CursorStyle::Arrow)
-                    .max_w(px((screen_size.x - bar.pos.x - 8.0).max(32.0)))
+                    .max_w(px(options_width))
                     .overflow_x_scroll()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
                 match tool {
@@ -1811,35 +1822,18 @@ impl Render for SelectionState {
                         }));
                 }
                 if self.editor.selected.is_some() {
-                    options = options
-                        .child(self.build_button(
-                            "backward",
-                            "Send backward",
-                            Action::Backward,
-                            false,
-                            true,
-                            cx,
-                        ))
-                        .child(self.build_button(
-                            "forward",
-                            "Bring forward",
-                            Action::Forward,
-                            false,
-                            true,
-                            cx,
-                        ))
-                        .child(self.build_button(
-                            "delete",
-                            "Delete layer",
-                            Action::Delete,
-                            false,
-                            true,
-                            cx,
-                        ));
+                    options = options.child(self.build_button(
+                        "delete",
+                        "Delete layer",
+                        Action::Delete,
+                        false,
+                        true,
+                        cx,
+                    ));
                 }
                 root = root.child(options);
             }
-            if self.show_layers {
+            if let Some(panel) = layers_panel {
                 let layers = self
                     .editor
                     .layers
@@ -1848,12 +1842,21 @@ impl Render for SelectionState {
                     .rev()
                     .map(|(index, layer)| {
                         let id = layer.id;
+                        let label: SharedString =
+                            format!("{} {}", get_layer_label(layer.tool), id).into();
+                        let drag_label = label.clone();
+                        let drop_target = self.layer_drop_target;
+                        let drag_entity = cx.entity();
                         div()
                             .id(("layer", id as usize))
+                            .relative()
+                            .flex()
+                            .items_center()
+                            .h(px(28.0))
+                            .flex_shrink_0()
                             .px_2()
-                            .py_1()
                             .rounded_sm()
-                            .cursor_pointer()
+                            .cursor_move()
                             .bg(if self.editor.selected == Some(index) {
                                 rgb(0x327fff)
                             } else {
@@ -1862,7 +1865,66 @@ impl Render for SelectionState {
                             .hover(|style| style.bg(rgb(0x414148)))
                             .text_sm()
                             .text_color(rgb(0xffffff))
-                            .child(format!("{} {}", get_layer_label(layer.tool), id))
+                            .child(label)
+                            .on_drag(id, move |dragged: &u64, _, window, cx| {
+                                drag_entity.update(cx, |state, cx| {
+                                    state.layer_drop_target = None;
+                                    state.editor.commit_draft();
+                                    state.editor.selected = state
+                                        .editor
+                                        .layers
+                                        .iter()
+                                        .position(|layer| layer.id == *dragged);
+                                    state.editor.tool = Tool::Select;
+                                    window.focus(&state.focus);
+                                    cx.notify();
+                                });
+                                cx.new(|_| TooltipLabel(drag_label.clone()))
+                            })
+                            .on_drag_move(cx.listener(
+                                move |state, event: &DragMoveEvent<u64>, _, cx| {
+                                    if event.bounds.contains(&event.event.position) {
+                                        let above = event.event.position.y
+                                            < event.bounds.origin.y
+                                                + event.bounds.size.height / 2.0;
+                                        let target = Some((id, above));
+                                        if state.layer_drop_target != target {
+                                            state.layer_drop_target = target;
+                                            cx.notify();
+                                        }
+                                    }
+                                },
+                            ))
+                            .drag_over::<u64>(move |style, dragged, _, _| {
+                                if *dragged == id {
+                                    return style;
+                                }
+                                match drop_target {
+                                    Some((target, true)) if target == id => {
+                                        style.border_t_2().border_color(rgb(ACCENT))
+                                    }
+                                    Some((target, false)) if target == id => {
+                                        style.border_b_2().border_color(rgb(ACCENT))
+                                    }
+                                    _ => style,
+                                }
+                            })
+                            .on_drop(cx.listener(move |state, dragged: &u64, window, cx| {
+                                let above = state
+                                    .layer_drop_target
+                                    .filter(|(target, _)| *target == id)
+                                    .is_none_or(|(_, above)| above);
+                                state.layer_drop_target = None;
+                                state.editor.move_layer(*dragged, id, above);
+                                state.editor.selected = state
+                                    .editor
+                                    .layers
+                                    .iter()
+                                    .position(|layer| layer.id == *dragged);
+                                state.editor.tool = Tool::Select;
+                                window.focus(&state.focus);
+                                cx.notify();
+                            }))
                             .on_click(cx.listener(move |state, _, window, cx| {
                                 state.editor.commit_draft();
                                 state.editor.selected =
@@ -1877,24 +1939,60 @@ impl Render for SelectionState {
                         .id("layers-panel")
                         .flex()
                         .flex_col()
-                        .gap(px(2.0))
                         .absolute()
-                        .left(px(bar.pos.x))
-                        .top(px((get_layers_y(bar, screen_size)).max(8.0)))
-                        .w(px(160.0))
-                        .max_h(px(220.0))
-                        .overflow_y_scroll()
-                        .p_1()
+                        .left(px(panel.pos.x))
+                        .top(px(panel.pos.y))
+                        .w(px(panel.size.x))
+                        .h(px(panel.size.y))
                         .rounded_md()
                         .bg(rgb(0x28282d))
                         .border_1()
                         .border_color(rgb(0x44444c))
                         .cursor(CursorStyle::Arrow)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .children(layers),
+                        .on_drag_move(cx.listener(|state, event: &DragMoveEvent<u64>, _, cx| {
+                            if !event.bounds.contains(&event.event.position)
+                                && state.layer_drop_target.take().is_some()
+                            {
+                                cx.notify();
+                            }
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .px_1()
+                                .h(px(30.0))
+                                .flex_shrink_0()
+                                .text_sm()
+                                .text_color(rgb(0xffffff))
+                                .child("Layers")
+                                .child(self.build_button(
+                                    "cancel",
+                                    "Close layers",
+                                    Action::Layers,
+                                    false,
+                                    true,
+                                    cx,
+                                )),
+                        )
+                        .child(
+                            div()
+                                .id("layer-list")
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .flex_1()
+                                .min_h(px(0.0))
+                                .overflow_y_scroll()
+                                .p_1()
+                                .children(layers),
+                        ),
                 );
             }
         }
+
         if self.get_should_show_magnifier() {
             if let Some(screenshot) = self.screenshot.as_ref() {
                 if let Some((x, y, color)) =
@@ -2190,11 +2288,34 @@ fn get_layer_label(tool: Tool) -> &'static str {
     };
 }
 
-fn get_layers_y(bar: Rect, size: Vec2) -> f32 {
-    return if bar.pos.y >= 232.0 {
-        bar.pos.y - 224.0
+fn create_layers_panel_rect(selection: Rect, bar: Rect, screen: Vec2, layers: usize) -> Rect {
+    let size = vec2(188.0, (40.0 + layers.max(1) as f32 * 30.0).min(320.0))
+        .min((screen - Vec2::splat(16.0)).max(Vec2::ZERO));
+    let right = (selection.pos.x + selection.size.x).max(bar.pos.x + bar.size.x) + 8.0;
+    let left = selection.pos.x.min(bar.pos.x) - size.x - 8.0;
+    let below = selection.pos.y + selection.size.y + 8.0;
+    let above = selection.pos.y.min(bar.pos.y - PALETTE_HEIGHT - 4.0) - size.y - 8.0;
+    let pos = if right + size.x <= screen.x - 8.0 {
+        vec2(right, selection.pos.y)
+    } else if left >= 8.0 {
+        vec2(left, selection.pos.y)
+    } else if below + size.y <= screen.y - 8.0 && bar.pos.x >= size.x + 16.0 {
+        vec2(bar.pos.x - size.x - 8.0, below)
+    } else if above >= 8.0 {
+        vec2(selection.pos.x, above)
+    } else if bar.pos.x >= size.x + 16.0 {
+        vec2(bar.pos.x - size.x - 8.0, bar.pos.y)
+    } else if bar.pos.x + bar.size.x + size.x + 16.0 <= screen.x {
+        vec2(bar.pos.x + bar.size.x + 8.0, bar.pos.y)
     } else {
-        (bar.pos.y + BAR_HEIGHT + PALETTE_HEIGHT + 8.0).min((size.y - 220.0).max(8.0))
+        vec2(selection.pos.x, bar.pos.y - size.y - 8.0)
+    };
+    return Rect {
+        pos: pos.clamp(
+            Vec2::splat(8.0),
+            (screen - size - Vec2::splat(8.0)).max(Vec2::splat(8.0)),
+        ),
+        size,
     };
 }
 
@@ -2495,6 +2616,59 @@ fn create_action_bar_rect(selection: Rect, bounds: Vec2) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn layers_panel_prefers_sides_and_stays_on_screen() {
+        let screen = vec2(1440.0, 900.0);
+        for (selection, right) in [
+            (
+                Rect {
+                    pos: vec2(200.0, 150.0),
+                    size: vec2(500.0, 400.0),
+                },
+                true,
+            ),
+            (
+                Rect {
+                    pos: vec2(850.0, 150.0),
+                    size: vec2(550.0, 400.0),
+                },
+                false,
+            ),
+        ] {
+            let bar = create_action_bar_rect(selection, screen);
+            let panel = super::create_layers_panel_rect(selection, bar, screen, 20);
+            if right {
+                assert!(panel.pos.x >= selection.pos.x + selection.size.x + 8.0);
+            } else {
+                assert!(panel.pos.x + panel.size.x <= selection.pos.x - 8.0);
+            }
+            assert!(panel.pos.cmpge(vec2(8.0, 8.0)).all());
+            assert!(
+                (panel.pos + panel.size)
+                    .cmple(screen - vec2(8.0, 8.0))
+                    .all()
+            );
+        }
+        for screen in [screen, vec2(200.0, 150.0)] {
+            let selection = Rect {
+                pos: glam::Vec2::ZERO,
+                size: screen,
+            };
+            let panel = super::create_layers_panel_rect(
+                selection,
+                create_action_bar_rect(selection, screen),
+                screen,
+                100,
+            );
+            assert!(panel.pos.cmpge(vec2(8.0, 8.0)).all());
+            assert!(
+                (panel.pos + panel.size)
+                    .cmple(screen - vec2(8.0, 8.0))
+                    .all()
+            );
+        }
+    }
+
     #[test]
     fn resize_hit_areas_cover_edges_with_slop_and_choose_nearest_corners() {
         let rect = Rect {
