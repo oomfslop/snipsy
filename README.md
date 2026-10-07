@@ -33,6 +33,7 @@ Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When
 | Copy / save / pin selection | `Enter` or `⌘C` / `⌘S` / `⌘P` |
 | Undo / redo | `⌘Z` / `⌘⇧Z` |
 | Select full display | `⌘A` or `Space` before selecting |
+| Copy magnifier color / show RGB | `C` / hold `Shift` while selecting a capture region |
 | Move selection or selected annotation | Arrow keys; `Shift` for 10 points |
 | Constrain square, circle, or arrow angle | Hold `Shift` while drawing |
 | Stroke width | `[` / `]` |

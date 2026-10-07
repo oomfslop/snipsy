@@ -15,6 +15,9 @@ const HANDLE_HIT_RADIUS: f32 = 10.0;
 const BAR_WIDTH: f32 = 16.0 * 28.0 + 16.0 + 7.0 + 2.0 * (4.0 + 1.0);
 const BAR_HEIGHT: f32 = 36.0;
 const PALETTE_HEIGHT: f32 = 38.0;
+const MAGNIFIER_CELL: f32 = 8.0;
+const MAGNIFIER_COLUMNS: i32 = 17;
+const MAGNIFIER_ROWS: i32 = 13;
 const ACCENT: u32 = 0x327fff;
 const COLORS: [u32; 8] = [
     0xff4b4b,
@@ -111,7 +114,11 @@ impl SelectionState {
             preview_task: None,
             selection: None,
             editor: Editor::new(),
-            pointer: Vec2::ZERO,
+            pointer: vec2(
+                window.mouse_position().x.into(),
+                window.mouse_position().y.into(),
+            )
+            .clamp(Vec2::ZERO, bounds.size),
             start: Vec2::ZERO,
             drag_origin: None,
             annotation_origin: Vec::new(),
@@ -321,10 +328,14 @@ impl SelectionState {
     fn update_drag(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         let cursor = self.get_cursor();
         let hovered = self.get_hovered_window();
+        let previous_pointer = self.pointer;
         self.pointer = vec2(event.position.x.into(), event.position.y.into())
             .clamp(Vec2::ZERO, self.bounds.size);
         if self.drag_mode.is_none() {
-            if cursor != self.get_cursor() || hovered != self.get_hovered_window() {
+            if cursor != self.get_cursor()
+                || hovered != self.get_hovered_window()
+                || (self.get_should_show_magnifier() && previous_pointer != self.pointer)
+            {
                 cx.notify();
             }
             return;
@@ -622,6 +633,18 @@ impl SelectionState {
                     cx.notify();
                 }
                 _ => {}
+            }
+            return;
+        }
+        if key == "c" && self.get_should_show_magnifier() {
+            if let Some((_, _, color)) = self.screenshot.as_ref().and_then(|screenshot| {
+                get_sampled_pixel(&screenshot.image, self.bounds.size, self.pointer)
+            }) {
+                cx.write_to_clipboard(ClipboardItem::new_string(create_color_label(
+                    color,
+                    modifiers.shift,
+                )));
+                cx.stop_propagation();
             }
             return;
         }
@@ -1057,6 +1080,12 @@ impl SelectionState {
             .find(|rect| rect.intersects(self.pointer))
             .copied();
     }
+
+    fn get_should_show_magnifier(&self) -> bool {
+        return self.screenshot.is_some()
+            && (self.selection.is_none() || self.drag_mode == Some(DragMode::New))
+            && self.get_cursor() == CursorStyle::Crosshair;
+    }
 }
 
 impl EntityInputHandler for SelectionState {
@@ -1324,6 +1353,11 @@ impl Render for SelectionState {
                 }),
             )
             .on_key_down(cx.listener(Self::handle_key))
+            .on_modifiers_changed(cx.listener(|state, _, _, cx| {
+                if state.get_should_show_magnifier() {
+                    cx.notify();
+                }
+            }))
             .when_some(self.background.clone(), |el, background| {
                 el.child(img(background).absolute().size_full())
             })
@@ -1868,6 +1902,137 @@ impl Render for SelectionState {
                 }
             }
         }
+        if self.get_should_show_magnifier() {
+            if let Some(screenshot) = self.screenshot.as_ref() {
+                if let Some((x, y, color)) =
+                    get_sampled_pixel(&screenshot.image, screen_size, self.pointer)
+                {
+                    let rect = create_magnifier_rect(self.pointer, screen_size);
+                    let source = screenshot.image.clone();
+                    let color_label = create_color_label(color, window.modifiers().shift);
+                    root = root.child(
+                        div()
+                            .absolute()
+                            .left(px(rect.pos.x))
+                            .top(px(rect.pos.y))
+                            .w(px(rect.size.x))
+                            .h(px(rect.size.y))
+                            .overflow_hidden()
+                            .bg(rgb(0x17171b))
+                            .border_1()
+                            .border_color(rgb(0x55555d))
+                            .child(
+                                canvas(
+                                    |_, _, _| (),
+                                    move |bounds, _, window, _| {
+                                        for row in 0..MAGNIFIER_ROWS {
+                                            for column in 0..MAGNIFIER_COLUMNS {
+                                                let sx = x as i64
+                                                    + (column - MAGNIFIER_COLUMNS / 2) as i64;
+                                                let sy =
+                                                    y as i64 + (row - MAGNIFIER_ROWS / 2) as i64;
+                                                if sx < 0
+                                                    || sy < 0
+                                                    || sx >= source.width() as i64
+                                                    || sy >= source.height() as i64
+                                                {
+                                                    continue;
+                                                }
+                                                let pixel = source.get_pixel(sx as u32, sy as u32);
+                                                window.paint_quad(fill(
+                                                    Bounds::new(
+                                                        bounds.origin
+                                                            + point(
+                                                                px(column as f32 * MAGNIFIER_CELL),
+                                                                px(row as f32 * MAGNIFIER_CELL),
+                                                            ),
+                                                        size(
+                                                            px(MAGNIFIER_CELL),
+                                                            px(MAGNIFIER_CELL),
+                                                        ),
+                                                    ),
+                                                    rgb(crate::geometry::Color::from_rgb(
+                                                        pixel[0], pixel[1], pixel[2],
+                                                    )
+                                                    .0),
+                                                ));
+                                            }
+                                        }
+                                        let center = bounds.origin
+                                            + point(
+                                                px((MAGNIFIER_COLUMNS / 2) as f32 * MAGNIFIER_CELL),
+                                                px((MAGNIFIER_ROWS / 2) as f32 * MAGNIFIER_CELL),
+                                            );
+                                        window.paint_quad(fill(
+                                            Bounds::new(
+                                                point(center.x, bounds.origin.y),
+                                                size(px(MAGNIFIER_CELL), bounds.size.height),
+                                            ),
+                                            rgba(0x327fff44),
+                                        ));
+                                        window.paint_quad(fill(
+                                            Bounds::new(
+                                                point(bounds.origin.x, center.y),
+                                                size(bounds.size.width, px(MAGNIFIER_CELL)),
+                                            ),
+                                            rgba(0x327fff44),
+                                        ));
+                                        let center_bounds = Bounds::new(
+                                            center,
+                                            size(px(MAGNIFIER_CELL), px(MAGNIFIER_CELL)),
+                                        );
+                                        window.paint_quad(fill(center_bounds, rgb(color.0)));
+                                        window.paint_quad(outline(
+                                            center_bounds,
+                                            rgb(0x000000),
+                                            BorderStyle::Solid,
+                                        ));
+                                        window.paint_quad(outline(
+                                            Bounds::new(
+                                                center + point(px(1.0), px(1.0)),
+                                                size(
+                                                    px(MAGNIFIER_CELL - 2.0),
+                                                    px(MAGNIFIER_CELL - 2.0),
+                                                ),
+                                            ),
+                                            rgb(0xffffff),
+                                            BorderStyle::Solid,
+                                        ));
+                                    },
+                                )
+                                .w(px(MAGNIFIER_COLUMNS as f32 * MAGNIFIER_CELL))
+                                .h(px(MAGNIFIER_ROWS as f32 * MAGNIFIER_CELL)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .gap(px(2.0))
+                                    .py(px(4.0))
+                                    .text_color(rgb(0xffffff))
+                                    .text_size(px(11.0))
+                                    .font_family("Menlo")
+                                    .child(format!("({x}, {y})"))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .child(
+                                                div()
+                                                    .size(px(12.0))
+                                                    .bg(rgb(color.0))
+                                                    .border_1()
+                                                    .border_color(rgb(0xcccccc)),
+                                            )
+                                            .child(color_label),
+                                    ),
+                            ),
+                    );
+                }
+            }
+        }
         root.when_some(self.error.clone(), |el, error| {
             el.child(
                 div()
@@ -1926,6 +2091,60 @@ fn get_dim_rects(selection: Option<Rect>, size: Vec2) -> Vec<Rect> {
 
 fn get_should_show_toolbar(drag: Option<DragMode>) -> bool {
     return matches!(drag, None | Some(DragMode::SelectText(_, _)));
+}
+
+fn get_sampled_pixel(
+    image: &RgbaImage,
+    screen_size: Vec2,
+    pointer: Vec2,
+) -> Option<(u32, u32, crate::geometry::Color)> {
+    if image.width() == 0 || image.height() == 0 || screen_size.min_element() <= 0.0 {
+        return None;
+    }
+    let x = (pointer.x * image.width() as f32 / screen_size.x)
+        .floor()
+        .clamp(0.0, (image.width() - 1) as f32) as u32;
+    let y = (pointer.y * image.height() as f32 / screen_size.y)
+        .floor()
+        .clamp(0.0, (image.height() - 1) as f32) as u32;
+    let pixel = image.get_pixel(x, y);
+    return Some((
+        x,
+        y,
+        crate::geometry::Color::from_rgb(pixel[0], pixel[1], pixel[2]),
+    ));
+}
+
+fn create_color_label(color: crate::geometry::Color, rgb_format: bool) -> String {
+    return if rgb_format {
+        format!(
+            "{}, {}, {}",
+            color.0 >> 16 & 255,
+            color.0 >> 8 & 255,
+            color.0 & 255
+        )
+    } else {
+        format!("#{:06x}", color.0)
+    };
+}
+
+fn create_magnifier_rect(pointer: Vec2, screen_size: Vec2) -> Rect {
+    let size = vec2(
+        MAGNIFIER_COLUMNS as f32 * MAGNIFIER_CELL + 2.0,
+        MAGNIFIER_ROWS as f32 * MAGNIFIER_CELL + 50.0,
+    )
+    .min((screen_size - Vec2::splat(16.0)).max(Vec2::ZERO));
+    let mut pos = pointer + Vec2::splat(24.0);
+    if pos.x + size.x > screen_size.x - 8.0 {
+        pos.x = pointer.x - size.x - 24.0;
+    }
+    if pos.y + size.y > screen_size.y - 8.0 {
+        pos.y = pointer.y - size.y - 24.0;
+    }
+    return Rect {
+        pos: pos.clamp(Vec2::ZERO, (screen_size - size).max(Vec2::ZERO)),
+        size,
+    };
 }
 
 fn create_clicked_text_range(text: &str, offset: usize, click_count: usize) -> Range<usize> {
@@ -2252,6 +2471,49 @@ fn create_action_bar_rect(selection: Rect, bounds: Vec2) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn magnifier_samples_retina_pixels_and_stays_inside_screen_edges() {
+        let image =
+            image::RgbaImage::from_fn(8, 6, |x, y| image::Rgba([x as u8, y as u8, 40, 255]));
+        assert_eq!(
+            super::get_sampled_pixel(&image, vec2(4.0, 3.0), vec2(1.5, 2.0)),
+            Some((3, 4, crate::geometry::Color::from_rgb(3, 4, 40)))
+        );
+        assert_eq!(
+            super::get_sampled_pixel(&image, vec2(4.0, 3.0), vec2(4.0, 3.0))
+                .unwrap()
+                .0,
+            7
+        );
+        assert_eq!(
+            super::get_sampled_pixel(&image, vec2(4.0, 3.0), vec2(-1.0, -1.0))
+                .unwrap()
+                .1,
+            0
+        );
+        assert!(super::get_sampled_pixel(&image, glam::Vec2::ZERO, glam::Vec2::ZERO).is_none());
+        assert_eq!(
+            super::create_color_label(crate::geometry::Color(0x0102ff), false),
+            "#0102ff"
+        );
+        assert_eq!(
+            super::create_color_label(crate::geometry::Color(0x0102ff), true),
+            "1, 2, 255"
+        );
+        for screen in [vec2(1440.0, 900.0), vec2(80.0, 70.0)] {
+            for pointer in [
+                glam::Vec2::ZERO,
+                screen,
+                vec2(10.0, screen.y),
+                vec2(screen.x, 10.0),
+            ] {
+                let rect = super::create_magnifier_rect(pointer, screen);
+                assert!(rect.pos.cmpge(glam::Vec2::ZERO).all());
+                assert!((rect.pos + rect.size).cmple(screen).all());
+            }
+        }
+    }
+
     #[test]
     fn text_selection_keeps_toolbar_and_double_click_selects_unicode_words() {
         assert!(super::get_should_show_toolbar(Some(
