@@ -1496,408 +1496,394 @@ impl Render for SelectionState {
                         .border_color(rgb(self.editor.color.0)),
                 );
             }
-            if get_should_show_toolbar(self.drag_mode) {
-                let bar = create_action_bar_rect(selection, screen_size);
-                let tools = [
-                    ("select", "Select / move (V)", Tool::Select),
-                    ("rectangle", "Rectangle (R)", Tool::Rectangle),
-                    ("arrow", "Arrow (A)", Tool::Arrow),
-                    ("pen", "Pen (B)", Tool::Pen),
-                    ("highlight", "Highlighter (H)", Tool::Highlighter),
-                    ("text", "Text (T)", Tool::Text),
-                    ("mosaic", "Mosaic (M)", Tool::Mosaic),
-                    ("eraser", "Eraser (E)", Tool::Eraser),
-                ];
-                root = root.child(
-                    div()
-                        .id("action-bar")
-                        .cursor(CursorStyle::Arrow)
-                        .absolute()
-                        .left(px(bar.pos.x))
-                        .top(px(bar.pos.y))
-                        .w(px(bar.size.x))
-                        .h(px(BAR_HEIGHT))
-                        .flex()
-                        .items_center()
-                        .gap(px(1.0))
-                        .px(px(4.0))
-                        .rounded_md()
-                        .bg(rgb(0x28282d))
-                        .border_1()
-                        .border_color(rgb(0x44444c))
-                        .overflow_x_scroll()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .children(tools.into_iter().map(|(icon, label, tool)| {
-                            self.build_button(
-                                icon,
-                                label,
-                                Action::Tool(tool),
-                                get_tool_family(self.editor.tool) == get_tool_family(tool),
+
+            let bar = create_action_bar_rect(selection, screen_size);
+            let tools = [
+                ("select", "Select / move (V)", Tool::Select),
+                ("rectangle", "Rectangle (R)", Tool::Rectangle),
+                ("arrow", "Arrow (A)", Tool::Arrow),
+                ("pen", "Pen (B)", Tool::Pen),
+                ("highlight", "Highlighter (H)", Tool::Highlighter),
+                ("text", "Text (T)", Tool::Text),
+                ("mosaic", "Mosaic (M)", Tool::Mosaic),
+                ("eraser", "Eraser (E)", Tool::Eraser),
+            ];
+            root = root.child(
+                div()
+                    .id("action-bar")
+                    .cursor(CursorStyle::Arrow)
+                    .absolute()
+                    .left(px(bar.pos.x))
+                    .top(px(bar.pos.y))
+                    .w(px(bar.size.x))
+                    .h(px(BAR_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .gap(px(1.0))
+                    .px(px(4.0))
+                    .rounded_md()
+                    .bg(rgb(0x28282d))
+                    .border_1()
+                    .border_color(rgb(0x44444c))
+                    .overflow_x_scroll()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .children(tools.into_iter().map(|(icon, label, tool)| {
+                        self.build_button(
+                            icon,
+                            label,
+                            Action::Tool(tool),
+                            get_tool_family(self.editor.tool) == get_tool_family(tool),
+                            true,
+                            cx,
+                        )
+                    }))
+                    .child(
+                        div()
+                            .w(px(1.0))
+                            .h(px(18.0))
+                            .mx(px(3.0))
+                            .bg(rgb(0x55555d))
+                            .flex_shrink_0(),
+                    )
+                    .child(self.build_button(
+                        "undo",
+                        "Undo (⌘Z)",
+                        Action::Undo,
+                        false,
+                        !self.editor.undo.is_empty() || self.editor.draft.is_some(),
+                        cx,
+                    ))
+                    .child(self.build_button(
+                        "redo",
+                        "Redo (⌘⇧Z)",
+                        Action::Redo,
+                        false,
+                        !self.editor.redo.is_empty(),
+                        cx,
+                    ))
+                    .child(self.build_button(
+                        "search",
+                        "Google Lens",
+                        Action::Search,
+                        false,
+                        true,
+                        cx,
+                    ))
+                    .child(self.build_button(
+                        "cancel",
+                        "Cancel (Esc)",
+                        Action::Cancel,
+                        false,
+                        true,
+                        cx,
+                    ))
+                    .child(self.build_button("pin", "Pin (⌘P)", Action::Pin, false, true, cx))
+                    .child(self.build_button("save", "Save (⌘S)", Action::Save, false, true, cx))
+                    .child(self.build_button(
+                        "layers",
+                        "Layers",
+                        Action::Layers,
+                        self.show_layers,
+                        true,
+                        cx,
+                    ))
+                    .child(self.build_button(
+                        "copy",
+                        "Copy (Enter / ⌘C)",
+                        Action::Copy,
+                        false,
+                        true,
+                        cx,
+                    )),
+            );
+            let tool = self.editor.get_current_tool();
+            if tool != Tool::Select && tool != Tool::Eraser {
+                let y = if bar.pos.y + BAR_HEIGHT + PALETTE_HEIGHT + 4.0 <= screen_size.y - 8.0 {
+                    bar.pos.y + BAR_HEIGHT + 4.0
+                } else {
+                    (bar.pos.y - PALETTE_HEIGHT - 4.0).max(8.0)
+                };
+                let current = self.editor.get_current_annotation();
+                let filled = current.map_or(self.editor.filled, |annotation| annotation.filled);
+                let mode = current.map_or(self.editor.blur_mode, |annotation| annotation.blur_mode);
+                let color = current.map_or(self.editor.color, |annotation| annotation.color);
+                let width = self.editor.get_current_width();
+                let format = self.get_current_text_format();
+                let mut options = div()
+                    .id("tool-options")
+                    .absolute()
+                    .left(px(bar.pos.x))
+                    .top(px(y))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .p_1()
+                    .rounded_md()
+                    .bg(rgb(0x28282d))
+                    .border_1()
+                    .border_color(rgb(0x44444c))
+                    .cursor(CursorStyle::Arrow)
+                    .max_w(px((screen_size.x - bar.pos.x - 8.0).max(32.0)))
+                    .overflow_x_scroll()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+                match tool {
+                    Tool::Rectangle | Tool::Ellipse => {
+                        options = options
+                            .child(self.build_button(
+                                "outline",
+                                "Outline",
+                                Action::Filled(false),
+                                !filled,
                                 true,
                                 cx,
-                            )
-                        }))
+                            ))
+                            .child(self.build_button(
+                                "filled",
+                                "Filled",
+                                Action::Filled(true),
+                                filled,
+                                true,
+                                cx,
+                            ))
+                            .child(self.build_button(
+                                "rectangle",
+                                "Rectangle",
+                                Action::Variant(Tool::Rectangle),
+                                tool == Tool::Rectangle,
+                                true,
+                                cx,
+                            ))
+                            .child(self.build_button(
+                                "ellipse",
+                                "Oval",
+                                Action::Variant(Tool::Ellipse),
+                                tool == Tool::Ellipse,
+                                true,
+                                cx,
+                            ));
+                    }
+                    Tool::Arrow | Tool::Line => {
+                        options = options
+                            .child(self.build_button(
+                                "arrow",
+                                "Arrow",
+                                Action::Variant(Tool::Arrow),
+                                tool == Tool::Arrow,
+                                true,
+                                cx,
+                            ))
+                            .child(self.build_button(
+                                "line",
+                                "Straight line",
+                                Action::Variant(Tool::Line),
+                                tool == Tool::Line,
+                                true,
+                                cx,
+                            ));
+                    }
+                    Tool::Mosaic => {
+                        options = options
+                            .child(self.build_button(
+                                "mosaic",
+                                "Pixelated",
+                                Action::BlurMode(BlurMode::Pixelated),
+                                mode == BlurMode::Pixelated,
+                                true,
+                                cx,
+                            ))
+                            .child(self.build_button(
+                                "blur",
+                                "Gaussian blur",
+                                Action::BlurMode(BlurMode::Gaussian),
+                                mode == BlurMode::Gaussian,
+                                true,
+                                cx,
+                            ))
+                            .child(self.build_intensity_slider(cx));
+                    }
+                    Tool::Text => {
+                        options = options
+                            .child(self.build_button(
+                                "bold",
+                                "Bold (⌘B)",
+                                Action::TextStyle(TextAttribute::Bold),
+                                format.bold,
+                                true,
+                                cx,
+                            ))
+                            .child(self.build_button(
+                                "italic",
+                                "Italic (⌘I)",
+                                Action::TextStyle(TextAttribute::Italic),
+                                format.italic,
+                                true,
+                                cx,
+                            ))
+                            .child(self.build_button(
+                                "underline",
+                                "Underline (⌘U)",
+                                Action::TextStyle(TextAttribute::Underline),
+                                format.underline,
+                                true,
+                                cx,
+                            ));
+                    }
+                    _ => {}
+                }
+                if tool != Tool::Mosaic {
+                    options = options
                         .child(
                             div()
-                                .w(px(1.0))
-                                .h(px(18.0))
-                                .mx(px(3.0))
-                                .bg(rgb(0x55555d))
-                                .flex_shrink_0(),
+                                .id("size")
+                                .h(px(28.0))
+                                .min_w(px(44.0))
+                                .px_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_sm()
+                                .text_color(rgb(0xeeeeee))
+                                .rounded_sm()
+                                .bg(rgb(0x38383f))
+                                .child(format!(
+                                    "{}{}",
+                                    width.round() as u32,
+                                    if tool == Tool::Text { "" } else { "px" }
+                                ))
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| TooltipLabel("Scroll to adjust size".into()))
+                                        .into()
+                                })
+                                .on_scroll_wheel(cx.listener(
+                                    move |state, event: &ScrollWheelEvent, _, cx| {
+                                        let delta: f32 = event.delta.pixel_delta(px(16.0)).y.into();
+                                        if delta == 0.0 {
+                                            return;
+                                        }
+                                        let width = state.editor.get_current_width();
+                                        if tool == Tool::Text {
+                                            state
+                                                .editor
+                                                .set_text_size(width + delta.signum() * 2.0);
+                                        } else {
+                                            state.editor.set_width(width + delta.signum());
+                                        }
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    },
+                                )),
                         )
                         .child(self.build_button(
-                            "undo",
-                            "Undo (⌘Z)",
-                            Action::Undo,
+                            "palette",
+                            "Color picker",
+                            Action::ColorPicker,
                             false,
-                            !self.editor.undo.is_empty() || self.editor.draft.is_some(),
+                            true,
                             cx,
                         ))
+                        .children(COLORS.into_iter().map(|swatch| {
+                            div()
+                                .id(("color", swatch as usize))
+                                .size(px(18.0))
+                                .flex_shrink_0()
+                                .rounded_full()
+                                .bg(rgb(swatch))
+                                .border_2()
+                                .border_color(if color.0 == swatch {
+                                    rgb(0xffffff)
+                                } else {
+                                    rgb(0x55555d)
+                                })
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |state, _, _, cx| {
+                                    state.editor.set_color(Color(swatch));
+                                    cx.notify();
+                                }))
+                        }));
+                }
+                if self.editor.selected.is_some() {
+                    options = options
                         .child(self.build_button(
-                            "redo",
-                            "Redo (⌘⇧Z)",
-                            Action::Redo,
-                            false,
-                            !self.editor.redo.is_empty(),
-                            cx,
-                        ))
-                        .child(self.build_button(
-                            "search",
-                            "Google Lens",
-                            Action::Search,
+                            "backward",
+                            "Send backward",
+                            Action::Backward,
                             false,
                             true,
                             cx,
                         ))
                         .child(self.build_button(
-                            "cancel",
-                            "Cancel (Esc)",
-                            Action::Cancel,
-                            false,
-                            true,
-                            cx,
-                        ))
-                        .child(self.build_button("pin", "Pin (⌘P)", Action::Pin, false, true, cx))
-                        .child(self.build_button(
-                            "save",
-                            "Save (⌘S)",
-                            Action::Save,
+                            "forward",
+                            "Bring forward",
+                            Action::Forward,
                             false,
                             true,
                             cx,
                         ))
                         .child(self.build_button(
-                            "layers",
-                            "Layers",
-                            Action::Layers,
-                            self.show_layers,
-                            true,
-                            cx,
-                        ))
-                        .child(self.build_button(
-                            "copy",
-                            "Copy (Enter / ⌘C)",
-                            Action::Copy,
+                            "delete",
+                            "Delete layer",
+                            Action::Delete,
                             false,
                             true,
                             cx,
-                        )),
-                );
-                let tool = self.editor.get_current_tool();
-                if tool != Tool::Select && tool != Tool::Eraser {
-                    let y = if bar.pos.y + BAR_HEIGHT + PALETTE_HEIGHT + 4.0 <= screen_size.y - 8.0
-                    {
-                        bar.pos.y + BAR_HEIGHT + 4.0
-                    } else {
-                        (bar.pos.y - PALETTE_HEIGHT - 4.0).max(8.0)
-                    };
-                    let current = self.editor.get_current_annotation();
-                    let filled = current.map_or(self.editor.filled, |annotation| annotation.filled);
-                    let mode =
-                        current.map_or(self.editor.blur_mode, |annotation| annotation.blur_mode);
-                    let color = current.map_or(self.editor.color, |annotation| annotation.color);
-                    let width = self.editor.get_current_width();
-                    let format = self.get_current_text_format();
-                    let mut options = div()
-                        .id("tool-options")
+                        ));
+                }
+                root = root.child(options);
+            }
+            if self.show_layers {
+                let layers = self
+                    .editor
+                    .layers
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .map(|(index, layer)| {
+                        let id = layer.id;
+                        div()
+                            .id(("layer", id as usize))
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .bg(if self.editor.selected == Some(index) {
+                                rgb(0x327fff)
+                            } else {
+                                rgba(0)
+                            })
+                            .hover(|style| style.bg(rgb(0x414148)))
+                            .text_sm()
+                            .text_color(rgb(0xffffff))
+                            .child(format!("{} {}", get_layer_label(layer.tool), id))
+                            .on_click(cx.listener(move |state, _, window, cx| {
+                                state.editor.commit_draft();
+                                state.editor.selected =
+                                    state.editor.layers.iter().position(|layer| layer.id == id);
+                                state.editor.tool = Tool::Select;
+                                window.focus(&state.focus);
+                                cx.notify();
+                            }))
+                    });
+                root = root.child(
+                    div()
+                        .id("layers-panel")
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
                         .absolute()
                         .left(px(bar.pos.x))
-                        .top(px(y))
-                        .flex()
-                        .items_center()
-                        .gap_1()
+                        .top(px((get_layers_y(bar, screen_size)).max(8.0)))
+                        .w(px(160.0))
+                        .max_h(px(220.0))
+                        .overflow_y_scroll()
                         .p_1()
                         .rounded_md()
                         .bg(rgb(0x28282d))
                         .border_1()
                         .border_color(rgb(0x44444c))
                         .cursor(CursorStyle::Arrow)
-                        .max_w(px((screen_size.x - bar.pos.x - 8.0).max(32.0)))
-                        .overflow_x_scroll()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-                    match tool {
-                        Tool::Rectangle | Tool::Ellipse => {
-                            options = options
-                                .child(self.build_button(
-                                    "outline",
-                                    "Outline",
-                                    Action::Filled(false),
-                                    !filled,
-                                    true,
-                                    cx,
-                                ))
-                                .child(self.build_button(
-                                    "filled",
-                                    "Filled",
-                                    Action::Filled(true),
-                                    filled,
-                                    true,
-                                    cx,
-                                ))
-                                .child(self.build_button(
-                                    "rectangle",
-                                    "Rectangle",
-                                    Action::Variant(Tool::Rectangle),
-                                    tool == Tool::Rectangle,
-                                    true,
-                                    cx,
-                                ))
-                                .child(self.build_button(
-                                    "ellipse",
-                                    "Oval",
-                                    Action::Variant(Tool::Ellipse),
-                                    tool == Tool::Ellipse,
-                                    true,
-                                    cx,
-                                ));
-                        }
-                        Tool::Arrow | Tool::Line => {
-                            options = options
-                                .child(self.build_button(
-                                    "arrow",
-                                    "Arrow",
-                                    Action::Variant(Tool::Arrow),
-                                    tool == Tool::Arrow,
-                                    true,
-                                    cx,
-                                ))
-                                .child(self.build_button(
-                                    "line",
-                                    "Straight line",
-                                    Action::Variant(Tool::Line),
-                                    tool == Tool::Line,
-                                    true,
-                                    cx,
-                                ));
-                        }
-                        Tool::Mosaic => {
-                            options = options
-                                .child(self.build_button(
-                                    "mosaic",
-                                    "Pixelated",
-                                    Action::BlurMode(BlurMode::Pixelated),
-                                    mode == BlurMode::Pixelated,
-                                    true,
-                                    cx,
-                                ))
-                                .child(self.build_button(
-                                    "blur",
-                                    "Gaussian blur",
-                                    Action::BlurMode(BlurMode::Gaussian),
-                                    mode == BlurMode::Gaussian,
-                                    true,
-                                    cx,
-                                ))
-                                .child(self.build_intensity_slider(cx));
-                        }
-                        Tool::Text => {
-                            options = options
-                                .child(self.build_button(
-                                    "bold",
-                                    "Bold (⌘B)",
-                                    Action::TextStyle(TextAttribute::Bold),
-                                    format.bold,
-                                    true,
-                                    cx,
-                                ))
-                                .child(self.build_button(
-                                    "italic",
-                                    "Italic (⌘I)",
-                                    Action::TextStyle(TextAttribute::Italic),
-                                    format.italic,
-                                    true,
-                                    cx,
-                                ))
-                                .child(self.build_button(
-                                    "underline",
-                                    "Underline (⌘U)",
-                                    Action::TextStyle(TextAttribute::Underline),
-                                    format.underline,
-                                    true,
-                                    cx,
-                                ));
-                        }
-                        _ => {}
-                    }
-                    if tool != Tool::Mosaic {
-                        options = options
-                            .child(
-                                div()
-                                    .id("size")
-                                    .h(px(28.0))
-                                    .min_w(px(44.0))
-                                    .px_1()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_sm()
-                                    .text_color(rgb(0xeeeeee))
-                                    .rounded_sm()
-                                    .bg(rgb(0x38383f))
-                                    .child(format!(
-                                        "{}{}",
-                                        width.round() as u32,
-                                        if tool == Tool::Text { "" } else { "px" }
-                                    ))
-                                    .tooltip(move |_, cx| {
-                                        cx.new(|_| TooltipLabel("Scroll to adjust size".into()))
-                                            .into()
-                                    })
-                                    .on_scroll_wheel(cx.listener(
-                                        move |state, event: &ScrollWheelEvent, _, cx| {
-                                            let delta: f32 =
-                                                event.delta.pixel_delta(px(16.0)).y.into();
-                                            if delta == 0.0 {
-                                                return;
-                                            }
-                                            let width = state.editor.get_current_width();
-                                            if tool == Tool::Text {
-                                                state
-                                                    .editor
-                                                    .set_text_size(width + delta.signum() * 2.0);
-                                            } else {
-                                                state.editor.set_width(width + delta.signum());
-                                            }
-                                            cx.stop_propagation();
-                                            cx.notify();
-                                        },
-                                    )),
-                            )
-                            .child(self.build_button(
-                                "palette",
-                                "Color picker",
-                                Action::ColorPicker,
-                                false,
-                                true,
-                                cx,
-                            ))
-                            .children(COLORS.into_iter().map(|swatch| {
-                                div()
-                                    .id(("color", swatch as usize))
-                                    .size(px(18.0))
-                                    .flex_shrink_0()
-                                    .rounded_full()
-                                    .bg(rgb(swatch))
-                                    .border_2()
-                                    .border_color(if color.0 == swatch {
-                                        rgb(0xffffff)
-                                    } else {
-                                        rgb(0x55555d)
-                                    })
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |state, _, _, cx| {
-                                        state.editor.set_color(Color(swatch));
-                                        cx.notify();
-                                    }))
-                            }));
-                    }
-                    if self.editor.selected.is_some() {
-                        options = options
-                            .child(self.build_button(
-                                "backward",
-                                "Send backward",
-                                Action::Backward,
-                                false,
-                                true,
-                                cx,
-                            ))
-                            .child(self.build_button(
-                                "forward",
-                                "Bring forward",
-                                Action::Forward,
-                                false,
-                                true,
-                                cx,
-                            ))
-                            .child(self.build_button(
-                                "delete",
-                                "Delete layer",
-                                Action::Delete,
-                                false,
-                                true,
-                                cx,
-                            ));
-                    }
-                    root = root.child(options);
-                }
-                if self.show_layers {
-                    let layers =
-                        self.editor
-                            .layers
-                            .iter()
-                            .enumerate()
-                            .rev()
-                            .map(|(index, layer)| {
-                                let id = layer.id;
-                                div()
-                                    .id(("layer", id as usize))
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_sm()
-                                    .cursor_pointer()
-                                    .bg(if self.editor.selected == Some(index) {
-                                        rgb(0x327fff)
-                                    } else {
-                                        rgba(0)
-                                    })
-                                    .hover(|style| style.bg(rgb(0x414148)))
-                                    .text_sm()
-                                    .text_color(rgb(0xffffff))
-                                    .child(format!("{} {}", get_layer_label(layer.tool), id))
-                                    .on_click(cx.listener(move |state, _, window, cx| {
-                                        state.editor.commit_draft();
-                                        state.editor.selected = state
-                                            .editor
-                                            .layers
-                                            .iter()
-                                            .position(|layer| layer.id == id);
-                                        state.editor.tool = Tool::Select;
-                                        window.focus(&state.focus);
-                                        cx.notify();
-                                    }))
-                            });
-                    root = root.child(
-                        div()
-                            .id("layers-panel")
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .absolute()
-                            .left(px(bar.pos.x))
-                            .top(px((get_layers_y(bar, screen_size)).max(8.0)))
-                            .w(px(160.0))
-                            .max_h(px(220.0))
-                            .overflow_y_scroll()
-                            .p_1()
-                            .rounded_md()
-                            .bg(rgb(0x28282d))
-                            .border_1()
-                            .border_color(rgb(0x44444c))
-                            .cursor(CursorStyle::Arrow)
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .children(layers),
-                    );
-                }
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .children(layers),
+                );
             }
         }
         if self.get_should_show_magnifier() {
@@ -2100,10 +2086,6 @@ fn get_dim_rects(selection: Option<Rect>, size: Vec2) -> Vec<Rect> {
             size: vec2((size.x - rect.pos.x - rect.size.x).max(0.0), rect.size.y),
         },
     ];
-}
-
-fn get_should_show_toolbar(drag: Option<DragMode>) -> bool {
-    return matches!(drag, None | Some(DragMode::SelectText(_, _)));
 }
 
 fn get_sampled_pixel(
@@ -2561,12 +2543,7 @@ mod tests {
     }
 
     #[test]
-    fn text_selection_keeps_toolbar_and_double_click_selects_unicode_words() {
-        assert!(super::get_should_show_toolbar(Some(
-            super::DragMode::SelectText(0, 5)
-        )));
-        assert!(super::get_should_show_toolbar(None));
-        assert!(!super::get_should_show_toolbar(Some(super::DragMode::Draw)));
+    fn double_click_selects_unicode_words() {
         assert_eq!(
             super::create_clicked_text_range("😀 café world", 5, 2),
             3..7
