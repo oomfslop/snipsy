@@ -299,8 +299,8 @@ impl SelectionState {
                 return;
             }
         }
+        self.drag_origin = self.get_hovered_window();
         self.drag_mode = Some(DragMode::New);
-        self.drag_origin = None;
         self.selection = None;
         self.editor.selected = None;
         cx.notify();
@@ -361,7 +361,10 @@ impl SelectionState {
             }
         }
         match self.drag_mode {
-            Some(DragMode::New) => self.selection = Some(create_selection_rect(self.start, point)),
+            Some(DragMode::New) => {
+                self.selection = Some(create_selection_rect(self.start, point))
+                    .filter(|rect| rect.size.min_element() >= 2.0);
+            }
             Some(DragMode::Move) => {
                 if let Some(origin) = self.drag_origin {
                     self.selection = Some(create_moved_selection(
@@ -437,14 +440,7 @@ impl SelectionState {
                 .selection
                 .is_none_or(|selection| selection.size.min_element() < 2.0)
         {
-            self.selection = self
-                .screenshot
-                .as_ref()
-                .map(|screenshot| screenshot.windows.as_slice())
-                .unwrap_or_default()
-                .iter()
-                .find(|rect| rect.intersects(self.pointer))
-                .copied();
+            self.selection = self.drag_origin;
         }
         self.selection = self
             .selection
@@ -1069,16 +1065,14 @@ impl SelectionState {
     }
 
     fn get_hovered_window(&self) -> Option<Rect> {
-        if self.selection.is_some() {
-            return None;
-        }
-        return self
-            .screenshot
-            .as_ref()?
-            .windows
-            .iter()
-            .find(|rect| rect.intersects(self.pointer))
-            .copied();
+        return get_hovered_capture_window(
+            self.selection,
+            self.drag_mode,
+            self.screenshot
+                .as_ref()
+                .map_or(&[], |screenshot| screenshot.windows.as_slice()),
+            self.pointer,
+        );
     }
 
     fn get_should_show_magnifier(&self) -> bool {
@@ -1294,7 +1288,11 @@ impl Render for SelectionState {
         let ready = self.background.is_some();
         let screen_size = self.bounds.size;
         let hovered = self.get_hovered_window();
-        let border = selection.or(hovered);
+        let border = selection.or(hovered).or_else(|| {
+            (self.drag_mode == Some(DragMode::New))
+                .then_some(self.drag_origin)
+                .flatten()
+        });
         let input = self
             .editor
             .draft
@@ -1413,7 +1411,7 @@ impl Render for SelectionState {
                             );
                         }
                         if ready {
-                            for rect in get_dim_rects(selection, screen_size) {
+                            for rect in get_dim_rects(border, screen_size) {
                                 window.paint_quad(fill(get_bounds(rect), rgba(0x00000060)));
                             }
                         }
@@ -2062,6 +2060,21 @@ impl Render for TooltipLabel {
             .child(self.0.clone())
     }
 }
+fn get_hovered_capture_window(
+    selection: Option<Rect>,
+    drag: Option<DragMode>,
+    windows: &[Rect],
+    pointer: Vec2,
+) -> Option<Rect> {
+    if selection.is_some() || drag.is_some() {
+        return None;
+    }
+    return windows
+        .iter()
+        .find(|rect| rect.intersects(pointer))
+        .copied();
+}
+
 fn get_dim_rects(selection: Option<Rect>, size: Vec2) -> Vec<Rect> {
     let Some(rect) = selection else {
         return vec![Rect {
@@ -2471,6 +2484,39 @@ fn create_action_bar_rect(selection: Rect, bounds: Vec2) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn window_hover_snaps_only_before_selection_and_leaves_target_undimmed() {
+        let front = Rect {
+            pos: vec2(100.0, 100.0),
+            size: vec2(300.0, 200.0),
+        };
+        let back = Rect {
+            pos: vec2(50.0, 50.0),
+            size: vec2(500.0, 400.0),
+        };
+        let windows = [front, back];
+        let pointer = vec2(150.0, 150.0);
+        let hovered = super::get_hovered_capture_window(None, None, &windows, pointer);
+        assert_eq!(hovered, Some(front));
+        assert!(
+            !get_dim_rects(hovered, vec2(1440.0, 900.0))
+                .iter()
+                .any(|rect| rect.intersects(pointer))
+        );
+        assert_eq!(
+            super::get_hovered_capture_window(Some(front), None, &windows, pointer),
+            None
+        );
+        assert_eq!(
+            super::get_hovered_capture_window(None, Some(DragMode::New), &windows, pointer),
+            None
+        );
+        assert_eq!(
+            super::get_hovered_capture_window(None, None, &windows, vec2(1000.0, 800.0)),
+            None
+        );
+    }
+
     #[test]
     fn magnifier_samples_retina_pixels_and_stays_inside_screen_edges() {
         let image =
