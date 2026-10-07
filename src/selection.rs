@@ -11,7 +11,7 @@ use std::{ops::Range, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 
 const HANDLE_RADIUS: f32 = 5.0;
-const HANDLE_HIT_RADIUS: f32 = 10.0;
+const HANDLE_HIT_RADIUS: f32 = 4.0;
 const BAR_WIDTH: f32 = 16.0 * 28.0 + 16.0 + 7.0 + 2.0 * (4.0 + 1.0);
 const BAR_HEIGHT: f32 = 36.0;
 const PALETTE_HEIGHT: f32 = 38.0;
@@ -40,7 +40,7 @@ enum DragMode {
     SelectText(usize, usize),
     Erase,
 }
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum ResizeHandle {
     TopLeft,
     Top,
@@ -377,7 +377,16 @@ impl SelectionState {
             }
             Some(DragMode::Resize(handle)) => {
                 if let Some(origin) = self.drag_origin {
-                    self.selection = Some(create_resized_selection(origin, handle, point));
+                    let center = get_resize_handle_centers(origin)
+                        .into_iter()
+                        .find(|(candidate, _)| *candidate == handle)
+                        .unwrap()
+                        .1;
+                    self.selection = Some(create_resized_selection(
+                        origin,
+                        handle,
+                        (center + point - self.start).clamp(Vec2::ZERO, self.bounds.size),
+                    ));
                 }
             }
             Some(DragMode::MoveAnnotation(index)) => {
@@ -2438,11 +2447,31 @@ fn get_resize_handle_centers(selection: Rect) -> [(ResizeHandle, Vec2); 8] {
     ];
 }
 fn get_resize_handle(point: Vec2, selection: Rect) -> Option<ResizeHandle> {
-    return get_resize_handle_centers(selection)
-        .into_iter()
-        .find_map(|(handle, center)| {
-            ((point - center).abs().max_element() <= HANDLE_HIT_RADIUS).then_some(handle)
-        });
+    let end = selection.pos + selection.size;
+    if !point
+        .cmpge(selection.pos - Vec2::splat(HANDLE_HIT_RADIUS))
+        .all()
+        || !point.cmple(end + Vec2::splat(HANDLE_HIT_RADIUS)).all()
+    {
+        return None;
+    }
+    let start_distance = (point - selection.pos).abs();
+    let end_distance = (point - end).abs();
+    let horizontal = (start_distance.x.min(end_distance.x) <= HANDLE_HIT_RADIUS)
+        .then_some(start_distance.x <= end_distance.x);
+    let vertical = (start_distance.y.min(end_distance.y) <= HANDLE_HIT_RADIUS)
+        .then_some(start_distance.y <= end_distance.y);
+    return match (horizontal, vertical) {
+        (Some(true), Some(true)) => Some(ResizeHandle::TopLeft),
+        (Some(false), Some(true)) => Some(ResizeHandle::TopRight),
+        (Some(true), Some(false)) => Some(ResizeHandle::BottomLeft),
+        (Some(false), Some(false)) => Some(ResizeHandle::BottomRight),
+        (Some(true), None) => Some(ResizeHandle::Left),
+        (Some(false), None) => Some(ResizeHandle::Right),
+        (None, Some(true)) => Some(ResizeHandle::Top),
+        (None, Some(false)) => Some(ResizeHandle::Bottom),
+        (None, None) => None,
+    };
 }
 fn create_action_bar_rect(selection: Rect, bounds: Vec2) -> Rect {
     let width = BAR_WIDTH.min((bounds.x - 16.0).max(1.0));
@@ -2466,6 +2495,40 @@ fn create_action_bar_rect(selection: Rect, bounds: Vec2) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resize_hit_areas_cover_edges_with_slop_and_choose_nearest_corners() {
+        let rect = Rect {
+            pos: vec2(100.0, 100.0),
+            size: vec2(300.0, 200.0),
+        };
+        for (point, expected) in [
+            (vec2(170.0, 96.0), Some(ResizeHandle::Top)),
+            (vec2(170.0, 104.0), Some(ResizeHandle::Top)),
+            (vec2(170.0, 304.0), Some(ResizeHandle::Bottom)),
+            (vec2(96.0, 170.0), Some(ResizeHandle::Left)),
+            (vec2(404.0, 170.0), Some(ResizeHandle::Right)),
+            (vec2(96.0, 96.0), Some(ResizeHandle::TopLeft)),
+            (vec2(404.0, 304.0), Some(ResizeHandle::BottomRight)),
+            (vec2(170.0, 95.0), None),
+            (vec2(170.0, 105.0), None),
+            (vec2(200.0, 200.0), None),
+        ] {
+            assert_eq!(super::get_resize_handle(point, rect), expected);
+        }
+        let tiny = Rect {
+            pos: vec2(100.0, 100.0),
+            size: vec2(8.0, 8.0),
+        };
+        assert_eq!(
+            super::get_resize_handle(vec2(108.0, 100.0), tiny),
+            Some(ResizeHandle::TopRight)
+        );
+        assert_eq!(
+            super::get_resize_handle(vec2(108.0, 108.0), tiny),
+            Some(ResizeHandle::BottomRight)
+        );
+    }
+
     #[test]
     fn window_hover_snaps_only_before_selection_and_leaves_target_undimmed() {
         let front = Rect {

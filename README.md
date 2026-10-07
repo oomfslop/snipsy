@@ -13,11 +13,14 @@ xcodebuild -downloadComponent MetalToolchain
 ```
 
 ```sh
+python3 scripts/prepare_vendor.py
 cargo build
 python3 scripts/bundle_macos.py
 ```
 
 Open `target/debug/Snipsy.app` in Finder. For a release bundle, use `cargo build --release` and `python3 scripts/bundle_macos.py release`. `cargo run` also works for development.
+
+Run `scripts/prepare_vendor.py` once per checkout, or again after changing the patch. It verifies the GPUI 0.2.2 archive and applies `patches/gpui-frame-resize.patch` to an ignored copy under `vendor/gpui`. Normal Cargo commands then work; `cargo clean` preserves the prepared dependency. Python 3 and the system `patch` utility are required.
 
 Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When launched through a terminal, macOS may attribute permission to that terminal instead. Snipsy starts in the background with no default window. Capture overlaps graphics setup, and the editor stays hidden between captures to reuse its GPU resources. Use a global shortcut to capture or pin an image. Reopening the app starts a capture. Quit with `⌘Q` while an editor or pin is focused.
 
