@@ -133,6 +133,7 @@ fn open_pin_window(
                     id,
                     backup_task: None,
                     replace_task: None,
+                    menu_position: None,
                 }
             })
         },
@@ -245,6 +246,7 @@ pub struct Pin {
     id: u128,
     backup_task: Option<Task<()>>,
     replace_task: Option<Task<()>>,
+    menu_position: Option<Point<Pixels>>,
 }
 
 impl Pin {
@@ -403,6 +405,28 @@ impl Pin {
         return self.group;
     }
 
+    fn move_to_group(&mut self, group: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.group = group;
+        self.schedule_backup(window, cx);
+        if group != cx.global::<app::AppState>().active_group {
+            platform::set_window_visible(window, false);
+        }
+        cx.notify();
+    }
+
+    fn open_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(target) = window.window_handle().downcast::<Pin>() {
+            if selection::open_pin_editor(
+                self.image.clone(),
+                get_image_bounds(&self.image, window.bounds()),
+                target,
+                cx,
+            ) {
+                platform::set_window_visible(window, false);
+            }
+        }
+    }
+
     fn show_animation_frame(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(frames) = &self.frames else {
             return;
@@ -468,16 +492,7 @@ impl Pin {
                 }
             }
             "space" => {
-                if let Some(target) = window.window_handle().downcast::<Pin>() {
-                    if selection::open_pin_editor(
-                        self.image.clone(),
-                        get_image_bounds(&self.image, window.bounds()),
-                        target,
-                        cx,
-                    ) {
-                        platform::set_window_visible(window, false);
-                    }
-                }
+                self.open_editor(window, cx);
             }
             "c" if event.keystroke.modifiers.alt => {
                 if let Some((_, _, color)) =
@@ -712,6 +727,8 @@ impl Render for Pin {
             .alt
             .then(|| sample_pin_pixel(&self.image, viewport, pointer))
             .flatten();
+        let groups = app::get_groups(cx).0;
+        let current_group = self.group;
         div()
             .id("pin")
             .group("pin")
@@ -730,7 +747,9 @@ impl Render for Pin {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|state, event: &MouseDownEvent, window, cx| {
-                    if event.click_count >= 2 {
+                    if state.menu_position.take().is_some() {
+                        cx.notify();
+                    } else if event.click_count >= 2 {
                         if event.modifiers.shift {
                             state.toggle_thumbnail(window);
                         } else {
@@ -739,6 +758,14 @@ impl Render for Pin {
                     } else {
                         window.start_window_move();
                     }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|state, event: &MouseDownEvent, _, cx| {
+                    state.menu_position = Some(event.position);
+                    cx.stop_propagation();
+                    cx.notify();
                 }),
             )
             .on_drop(cx.listener(|state, paths: &ExternalPaths, window, cx| {
@@ -902,6 +929,96 @@ impl Render for Pin {
                         },
                     )),
             )
+            .when_some(self.menu_position, |root, position| {
+                let actions = [
+                    ("Copy", 0),
+                    ("Save…", 1),
+                    ("Quick save", 2),
+                    ("Print…", 3),
+                    ("Edit", 4),
+                    ("Thumbnail", 5),
+                    ("Close", 6),
+                    ("Destroy", 7),
+                ];
+                let width = 190.0;
+                let height = ((actions.len() + groups.len()) as f32 * 28.0 + 8.0)
+                    .min((f32::from(viewport.height) - 8.0).max(40.0));
+                let left = f32::from(position.x)
+                    .clamp(4.0, (f32::from(viewport.width) - width - 4.0).max(4.0));
+                let top = f32::from(position.y)
+                    .clamp(4.0, (f32::from(viewport.height) - height - 4.0).max(4.0));
+                root.child(
+                    div()
+                        .id("pin-menu")
+                        .absolute()
+                        .left(px(left))
+                        .top(px(top))
+                        .w(px(width))
+                        .max_h(px(height))
+                        .overflow_y_scroll()
+                        .p_1()
+                        .rounded_md()
+                        .bg(rgba(0x202024f5))
+                        .border_1()
+                        .border_color(rgb(0x55555d))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .children(actions.into_iter().map(|(label, action)| {
+                            div()
+                                .id(("pin-action", action as usize))
+                                .h(px(28.0))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x414148)))
+                                .child(label)
+                                .on_click(cx.listener(move |state, _, window, cx| {
+                                    state.menu_position = None;
+                                    match action {
+                                        0 => {
+                                            if let Err(error) = app::copy_image(&state.image, cx) {
+                                                app::show_error(error, cx);
+                                            }
+                                        }
+                                        1 => app::save_image(state.image.clone(), None, cx),
+                                        2 => app::quick_save_image(state.image.clone(), None, cx),
+                                        3 => {
+                                            if let Err(error) = app::print_image(&state.image) {
+                                                app::show_error(error, cx);
+                                            }
+                                        }
+                                        4 => state.open_editor(window, cx),
+                                        5 => state.toggle_thumbnail(window),
+                                        6 => state.close(window, cx),
+                                        _ => state.destroy(window, cx),
+                                    }
+                                    cx.notify();
+                                }))
+                        }))
+                        .children(groups.into_iter().enumerate().map(|(index, group)| {
+                            div()
+                                .id(("move-group", index))
+                                .h(px(28.0))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .bg(if index == current_group {
+                                    rgb(0x327fff)
+                                } else {
+                                    rgba(0)
+                                })
+                                .hover(|style| style.bg(rgb(0x414148)))
+                                .child(format!("Move to {group}"))
+                                .on_click(cx.listener(move |state, _, window, cx| {
+                                    state.menu_position = None;
+                                    state.move_to_group(index, window, cx);
+                                }))
+                        })),
+                )
+            })
             .child(
                 div()
                     .absolute()
