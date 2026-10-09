@@ -1,6 +1,7 @@
 use crate::geometry::{Color, Rect};
 use glam::{Vec2, vec2};
 
+#[derive(Clone)]
 pub struct Screenshot {
     pub image: std::sync::Arc<image::RgbaImage>,
     pub bounds: Rect,

@@ -97,6 +97,7 @@ pub struct SelectionState {
     show_layers: bool,
     layer_drop_target: Option<(u64, bool)>,
     intensity_drag: bool,
+    capture_history_index: usize,
 }
 
 impl SelectionState {
@@ -134,6 +135,7 @@ impl SelectionState {
             show_layers: false,
             layer_drop_target: None,
             intensity_drag: false,
+            capture_history_index: 0,
         };
     }
 
@@ -179,12 +181,51 @@ impl SelectionState {
             app::show_error("Display configuration changed; capture again".into(), cx);
             return;
         }
+        let history = &mut cx.global_mut::<AppState>().capture_history;
+        history.insert(0, screenshot.clone());
+        history.truncate(10);
+        self.capture_history_index = 0;
         self.background = Some(background);
         self.screenshot = Some(screenshot);
         self.activate(window, cx);
         if let Some(action) = self.pending_action.take() {
             self.perform_action(action, window, cx);
         }
+        cx.notify();
+    }
+
+    fn navigate_capture_history(
+        &mut self,
+        direction: i32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.screenshot.is_none() {
+            return;
+        }
+        let history = &cx.global::<AppState>().capture_history;
+        let bounds = history
+            .iter()
+            .map(|screenshot| screenshot.bounds)
+            .collect::<Vec<_>>();
+        let Some(index) =
+            get_capture_history_index(&bounds, self.capture_history_index, direction, self.bounds)
+        else {
+            return;
+        };
+        let screenshot = history[index].clone();
+        let background = raster::create_render_image(&screenshot.image);
+        if let Some(image) = self.background.take() {
+            cx.drop_image(image, Some(window));
+        }
+        if let Some(image) = self.preview.take() {
+            cx.drop_image(image, Some(window));
+        }
+        let bounds = self.bounds;
+        *self = Self::new(bounds, window, cx);
+        self.capture_history_index = index;
+        self.screenshot = Some(screenshot);
+        self.background = Some(background);
         cx.notify();
     }
 
@@ -669,6 +710,8 @@ impl SelectionState {
             return;
         }
         match key {
+            "," => self.navigate_capture_history(1, window, cx),
+            "." => self.navigate_capture_history(-1, window, cx),
             "enter" => self.perform_action(Action::Copy, window, cx),
             "backspace" | "delete" => {
                 self.editor.delete_selected();
@@ -2614,8 +2657,53 @@ fn create_action_bar_rect(selection: Rect, bounds: Vec2) -> Rect {
     };
 }
 
+fn get_capture_history_index(
+    history: &[Rect],
+    current: usize,
+    direction: i32,
+    bounds: Rect,
+) -> Option<usize> {
+    for offset in 1..history.len() {
+        let index =
+            (current as i32 + direction * offset as i32).rem_euclid(history.len() as i32) as usize;
+        if history[index] == bounds {
+            return Some(index);
+        }
+    }
+    return None;
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn capture_history_wraps_and_skips_other_displays() {
+        let display = Rect {
+            pos: vec2(0.0, 0.0),
+            size: vec2(1440.0, 900.0),
+        };
+        let other = Rect {
+            pos: vec2(1440.0, 0.0),
+            size: vec2(1920.0, 1080.0),
+        };
+        let history = [display, other, display];
+        assert_eq!(
+            super::get_capture_history_index(&history, 0, 1, display),
+            Some(2)
+        );
+        assert_eq!(
+            super::get_capture_history_index(&history, 2, -1, display),
+            Some(0)
+        );
+        assert_eq!(
+            super::get_capture_history_index(&history, 2, 1, display),
+            Some(0)
+        );
+        assert_eq!(
+            super::get_capture_history_index(&history[..2], 0, 1, display),
+            None
+        );
+    }
+
     #[test]
     fn layers_panel_prefers_sides_and_stays_on_screen() {
         let screen = vec2(1440.0, 900.0);

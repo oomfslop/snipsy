@@ -36,6 +36,7 @@ Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When
 | Copy / save / pin selection | `Enter` or `⌘C` / `⌘S` / `⌘P` |
 | Undo / redo | `⌘Z` / `⌘⇧Z` |
 | Select full display | `⌘A` or `Space` before selecting |
+| Previous / next capture | `,` / `.` |
 | Copy magnifier color / show RGB | `C` / hold `Shift` while selecting a capture region |
 | Move selection or selected annotation | Arrow keys; `Shift` for 10 points |
 | Constrain square, circle, or arrow angle | Hold `Shift` while drawing |
@@ -46,7 +47,7 @@ Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When
 
 Pins: drag to move; scroll or `+`/`-` to resize; `⌘`+scroll, `⌘`+`+`/`-`, or `[`/`]` for opacity; `1`/`2` rotate; `3`/`4` flip; `0` restores the initial size; `⌘⇧X` toggles click-through for the pin under the pointer (or restores all pins); `⌘C` copies; `⌘S` saves; `Escape` closes. Hover a pin for its controls.
 
-PNG and JPEG exports use an atomic file replacement. The last ten finished captures remain in memory; history UI and settings are deferred. History does not persist after quitting.
+PNG and JPEG exports use an atomic file replacement. The last ten screen captures can be replayed while snipping, and the last ten finished selections remain in memory. History does not persist after quitting; history UI and settings are deferred.
 
 Google Lens remains available in the editor toolbar. It submits the edited PNG directly from the default browser, via a temporary local handoff page deleted after 30 seconds. The Lens endpoint is undocumented and may change.
 

@@ -1,4 +1,4 @@
-use crate::{icons::Icons, pin, platform, raster, selection::SelectionState};
+use crate::{editor::Screenshot, icons::Icons, pin, platform, raster, selection::SelectionState};
 use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
     hotkey::{Code, HotKey, Modifiers},
@@ -17,6 +17,7 @@ pub struct AppState {
     pub selection: Option<WindowHandle<SelectionState>>,
     pub cached_selection: Option<WindowHandle<SelectionState>>,
     pub pins: Vec<WindowHandle<pin::Pin>>,
+    pub capture_history: Vec<Screenshot>,
     pub history: Vec<(Arc<RgbaImage>, Arc<RenderImage>)>,
     pub error: Option<String>,
 }
@@ -75,6 +76,7 @@ pub fn run() {
             selection: None,
             cached_selection: None,
             pins: Vec::new(),
+            capture_history: Vec::new(),
             history: Vec::new(),
             error: hotkey_error,
         });
