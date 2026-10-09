@@ -8,9 +8,9 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlert, NSApplication, NSApplicationActivationPolicy, NSColor, NSColorPanel, NSColorSpace,
-    NSEvent, NSModalResponseCancel, NSModalResponseOK, NSPopUpMenuWindowLevel, NSSavePanel,
-    NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowCollectionBehavior,
-    NSWindowStyleMask,
+    NSEvent, NSModalResponseCancel, NSModalResponseOK, NSPasteboard, NSPasteboardTypeFileURL,
+    NSPopUpMenuWindowLevel, NSSavePanel, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType};
 use objc2_core_graphics::{
@@ -19,7 +19,7 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::{
     NSArray, NSError, NSObject, NSObjectProtocol, NSOperationQueue, NSPoint, NSRect, NSSize,
-    NSString,
+    NSString, NSURL,
 };
 use objc2_screen_capture_kit::{
     SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
@@ -107,6 +107,21 @@ pub fn initialize_app() {
     let mtm = MainThreadMarker::new().expect("app initializes on the main thread");
     NSApplication::sharedApplication(mtm)
         .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+}
+
+pub fn get_clipboard_paths() -> Vec<PathBuf> {
+    // SAFETY: AppKit provides this pasteboard type constant on every supported macOS version.
+    let file_url_type = unsafe { NSPasteboardTypeFileURL };
+    return NSPasteboard::generalPasteboard()
+        .pasteboardItems()
+        .into_iter()
+        .flat_map(|items| items.to_vec())
+        .filter_map(|item| item.stringForType(file_url_type))
+        .filter_map(|url| NSURL::URLWithString(&url))
+        .filter(|url| url.isFileURL())
+        .filter_map(|url| url.path())
+        .map(|path| PathBuf::from(path.to_string()))
+        .collect();
 }
 
 pub fn get_capture_bounds() -> Result<Rect, String> {

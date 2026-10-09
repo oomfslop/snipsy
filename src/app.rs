@@ -6,7 +6,7 @@ use global_hotkey::{
 use gpui::{prelude::*, *};
 use image::{Rgba, RgbaImage};
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -237,6 +237,11 @@ pub fn start_capture(cx: &mut App) {
 }
 
 pub fn paste_image(cx: &mut App) {
+    let paths = platform::get_clipboard_paths();
+    if !paths.is_empty() {
+        open_paths(paths, cx);
+        return;
+    }
     let Some(item) = cx.read_from_clipboard() else {
         show_error("Clipboard is empty".into(), cx);
         return;
@@ -273,6 +278,46 @@ pub fn paste_image(cx: &mut App) {
             }
         }
     }
+}
+
+pub fn open_paths(paths: Vec<PathBuf>, cx: &mut App) {
+    let fonts = cx.global::<AppState>().fonts.clone();
+    let load = cx.background_executor().spawn(async move {
+        return paths
+            .into_iter()
+            .map(|path| load_path(&path, &fonts))
+            .collect::<Vec<_>>();
+    });
+    cx.spawn(async move |cx| {
+        let results = load.await;
+        let _ = cx.update(|cx| {
+            let mut errors = Vec::new();
+            for result in results {
+                match result {
+                    Ok((image, Some(text))) => pin::open_text_pin(image, text, cx),
+                    Ok((image, None)) => pin::open_pin(image, None, cx),
+                    Err(error) => errors.push(error),
+                }
+            }
+            if !errors.is_empty() {
+                show_error(errors.join("\n"), cx);
+            }
+        });
+    })
+    .detach();
+}
+
+fn load_path(
+    path: &Path,
+    fonts: &Arc<resvg::usvg::fontdb::Database>,
+) -> Result<(Arc<RgbaImage>, Option<String>), String> {
+    if let Ok(image) = image::open(path) {
+        return Ok((Arc::new(image.to_rgba8()), None));
+    }
+    let text = path.to_string_lossy().into_owned();
+    return raster::render_text_image(&text, fonts)
+        .map(|image| (Arc::new(image), Some(text)))
+        .map_err(|error| format!("{}: {error}", path.display()));
 }
 
 fn parse_color(text: &str) -> Option<[u8; 4]> {
@@ -414,7 +459,7 @@ pub fn show_error(error: String, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_color, write_image};
+    use super::{load_path, parse_color, write_image};
     use image::{Rgba, RgbaImage};
 
     #[test]
@@ -444,5 +489,25 @@ mod tests {
         assert_eq!(parse_color("256, 0, 0"), None);
         assert_eq!(parse_color("1.1 0.0 0.0"), None);
         assert_eq!(parse_color("not a color"), None);
+    }
+
+    #[test]
+    fn paths_load_images_or_render_their_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let image_path = directory.path().join("image.png");
+        RgbaImage::from_pixel(2, 3, Rgba([1, 2, 3, 255]))
+            .save(&image_path)
+            .unwrap();
+        let fonts = std::sync::Arc::new(resvg::usvg::fontdb::Database::new());
+        let (image, text) = load_path(&image_path, &fonts).unwrap();
+        assert_eq!(image.dimensions(), (2, 3));
+        assert_eq!(text, None);
+
+        let file_path = directory.path().join("notes.txt");
+        std::fs::write(&file_path, "notes").unwrap();
+        let mut fonts = resvg::usvg::fontdb::Database::new();
+        fonts.load_system_fonts();
+        let (_, text) = load_path(&file_path, &std::sync::Arc::new(fonts)).unwrap();
+        assert_eq!(text.as_deref(), Some(file_path.to_str().unwrap()));
     }
 }

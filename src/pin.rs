@@ -181,6 +181,9 @@ impl Render for Pin {
             .cursor(CursorStyle::OpenHand)
             .on_key_down(cx.listener(Self::handle_key))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .on_drop(cx.listener(|_, paths: &ExternalPaths, _, cx| {
+                app::open_paths(paths.paths().to_vec(), cx)
+            }))
             .on_scroll_wheel(cx.listener(|state, event: &ScrollWheelEvent, window, cx| {
                 let delta: f32 = event.delta.pixel_delta(px(16.0)).y.into();
                 if event.modifiers.platform {
