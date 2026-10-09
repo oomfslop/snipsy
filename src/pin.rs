@@ -77,14 +77,39 @@ impl Pin {
                 }
             }
             "s" if event.keystroke.modifiers.platform => app::save_image(self.image.clone(), cx),
-            "1" => window.resize(self.original_size),
+            "0" => window.resize(self.original_size),
+            "1" | "2" | "3" | "4" => {
+                let swap_dimensions = matches!(event.keystroke.key.as_str(), "1" | "2");
+                let image = transform_image(&self.image, &event.keystroke.key);
+                let previous =
+                    std::mem::replace(&mut self.preview, raster::create_render_image(&image));
+                self.image = Arc::new(image);
+                cx.drop_image(previous, Some(window));
+                if swap_dimensions {
+                    let viewport = window.viewport_size();
+                    window.resize(size(viewport.height, viewport.width));
+                    self.original_size = size(self.original_size.height, self.original_size.width);
+                }
+                cx.notify();
+            }
             "+" | "=" | "-" => {
-                let factor = if event.keystroke.key == "-" { 0.9 } else { 1.1 };
-                let size = window.viewport_size();
-                window.resize(gpui::size(
-                    (size.width * factor).max(px(40.0)),
-                    (size.height * factor).max(px(40.0)),
-                ));
+                if event.keystroke.modifiers.platform {
+                    self.opacity = (self.opacity
+                        + if event.keystroke.key == "-" {
+                            -0.1
+                        } else {
+                            0.1
+                        })
+                    .clamp(0.2, 1.0);
+                    cx.notify();
+                } else {
+                    let factor = if event.keystroke.key == "-" { 0.9 } else { 1.1 };
+                    let viewport = window.viewport_size();
+                    window.resize(size(
+                        (viewport.width * factor).max(px(40.0)),
+                        (viewport.height * factor).max(px(40.0)),
+                    ));
+                }
             }
             "[" => {
                 self.opacity = (self.opacity - 0.1).max(0.2);
@@ -97,6 +122,16 @@ impl Pin {
             _ => {}
         }
     }
+}
+
+fn transform_image(image: &RgbaImage, key: &str) -> RgbaImage {
+    return match key {
+        "1" => image::imageops::rotate270(image),
+        "2" => image::imageops::rotate90(image),
+        "3" => image::imageops::flip_horizontal(image),
+        "4" => image::imageops::flip_vertical(image),
+        _ => unreachable!(),
+    };
 }
 
 impl Render for Pin {
@@ -181,5 +216,22 @@ impl Render for Pin {
                         window.start_window_resize(ResizeEdge::BottomRight);
                     }),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transform_image;
+    use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn pin_transforms_are_reversible() {
+        let image = RgbaImage::from_fn(2, 3, |x, y| Rgba([x as u8, y as u8, 0, 255]));
+
+        let rotated = transform_image(&image, "1");
+        assert_eq!(rotated.dimensions(), (3, 2));
+        assert_eq!(transform_image(&rotated, "2"), image);
+        assert_eq!(transform_image(&transform_image(&image, "3"), "3"), image);
+        assert_eq!(transform_image(&transform_image(&image, "4"), "4"), image);
     }
 }
