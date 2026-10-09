@@ -98,6 +98,7 @@ pub struct SelectionState {
     layer_drop_target: Option<(u64, bool)>,
     intensity_drag: bool,
     capture_history_index: usize,
+    capture_history: Vec<Screenshot>,
 }
 
 impl SelectionState {
@@ -136,6 +137,7 @@ impl SelectionState {
             layer_drop_target: None,
             intensity_drag: false,
             capture_history_index: 0,
+            capture_history: Vec::new(),
         };
     }
 
@@ -181,9 +183,10 @@ impl SelectionState {
             app::show_error("Display configuration changed; capture again".into(), cx);
             return;
         }
-        let history = &mut cx.global_mut::<AppState>().capture_history;
-        history.insert(0, screenshot.clone());
-        history.truncate(10);
+        self.capture_history = std::iter::once(screenshot.clone())
+            .chain(cx.global::<AppState>().capture_history.iter().cloned())
+            .take(11)
+            .collect();
         self.capture_history_index = 0;
         self.background = Some(background);
         self.screenshot = Some(screenshot);
@@ -203,8 +206,8 @@ impl SelectionState {
         if self.screenshot.is_none() {
             return;
         }
-        let history = &cx.global::<AppState>().capture_history;
-        let bounds = history
+        let bounds = self
+            .capture_history
             .iter()
             .map(|screenshot| screenshot.bounds)
             .collect::<Vec<_>>();
@@ -213,7 +216,7 @@ impl SelectionState {
         else {
             return;
         };
-        let screenshot = history[index].clone();
+        let screenshot = self.capture_history[index].clone();
         let background = raster::create_render_image(&screenshot.image);
         if let Some(image) = self.background.take() {
             cx.drop_image(image, Some(window));
@@ -222,7 +225,9 @@ impl SelectionState {
             cx.drop_image(image, Some(window));
         }
         let bounds = self.bounds;
+        let history = std::mem::take(&mut self.capture_history);
         *self = Self::new(bounds, window, cx);
+        self.capture_history = history;
         self.capture_history_index = index;
         self.screenshot = Some(screenshot);
         self.background = Some(background);
@@ -590,11 +595,17 @@ impl SelectionState {
                                     cx.notify();
                                     return;
                                 }
+                                if let Some(screenshot) = self.screenshot.clone() {
+                                    app::remember_capture_frame(screenshot, cx);
+                                }
                                 app::remember_capture(image, cx);
                                 self.dismiss(window, cx);
                             }
-                            Action::Save => app::save_image(image, cx),
+                            Action::Save => app::save_image(image, self.screenshot.clone(), cx),
                             Action::Pin => {
+                                if let Some(screenshot) = self.screenshot.clone() {
+                                    app::remember_capture_frame(screenshot, cx);
+                                }
                                 app::remember_capture(image.clone(), cx);
                                 let selection = self.selection.unwrap();
                                 let bounds = Rect {
@@ -611,6 +622,9 @@ impl SelectionState {
                                 .and_then(|image| lens::create_handoff(&image))
                             {
                                 Ok(path) => {
+                                    if let Some(screenshot) = self.screenshot.clone() {
+                                        app::remember_capture_frame(screenshot, cx);
+                                    }
                                     app::remember_capture(image, cx);
                                     cx.open_with_system(&path);
                                     lens::schedule_cleanup(path);

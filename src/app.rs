@@ -445,7 +445,17 @@ pub fn remember_capture(image: Arc<RgbaImage>, cx: &mut App) {
     cx.refresh_windows();
 }
 
-pub fn save_image(image: Arc<RgbaImage>, cx: &mut App) {
+pub fn remember_capture_frame(screenshot: Screenshot, cx: &mut App) {
+    insert_capture_history(&mut cx.global_mut::<AppState>().capture_history, screenshot);
+}
+
+fn insert_capture_history(history: &mut Vec<Screenshot>, screenshot: Screenshot) {
+    history.retain(|entry| !Arc::ptr_eq(&entry.image, &screenshot.image));
+    history.insert(0, screenshot);
+    history.truncate(10);
+}
+
+pub fn save_image(image: Arc<RgbaImage>, capture: Option<Screenshot>, cx: &mut App) {
     let suggested = format!(
         "Snipsy-{}.png",
         SystemTime::now()
@@ -464,7 +474,12 @@ pub fn save_image(image: Arc<RgbaImage>, cx: &mut App) {
             if let Err(error) = result {
                 let _ = cx.update(|cx| show_error(error, cx));
             } else {
-                let _ = cx.update(|cx| remember_capture(saved_image, cx));
+                let _ = cx.update(|cx| {
+                    if let Some(capture) = capture {
+                        remember_capture_frame(capture, cx);
+                    }
+                    remember_capture(saved_image, cx);
+                });
             }
         }
         Ok(Ok(None)) => {}
@@ -515,7 +530,9 @@ pub fn show_error(error: String, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_path, parse_color, should_restore_pin, write_image};
+    use super::{insert_capture_history, load_path, parse_color, should_restore_pin, write_image};
+    use crate::{editor::Screenshot, geometry::Rect};
+    use glam::{Vec2, vec2};
     use image::{Rgba, RgbaImage};
 
     #[test]
@@ -572,5 +589,48 @@ mod tests {
         assert!(should_restore_pin(Some(7), 7));
         assert!(!should_restore_pin(Some(7), 8));
         assert!(!should_restore_pin(None, 7));
+    }
+
+    #[test]
+    fn capture_history_deduplicates_frames_and_stays_bounded() {
+        let image = std::sync::Arc::new(RgbaImage::new(1, 1));
+        let mut history = Vec::new();
+        for index in 0..12 {
+            insert_capture_history(
+                &mut history,
+                Screenshot {
+                    image: if index == 11 {
+                        image.clone()
+                    } else {
+                        std::sync::Arc::new(RgbaImage::new(1, 1))
+                    },
+                    bounds: Rect {
+                        pos: Vec2::ZERO,
+                        size: vec2(1.0, 1.0),
+                    },
+                    windows: Vec::new(),
+                },
+            );
+        }
+        insert_capture_history(
+            &mut history,
+            Screenshot {
+                image: image.clone(),
+                bounds: Rect {
+                    pos: Vec2::ZERO,
+                    size: vec2(1.0, 1.0),
+                },
+                windows: Vec::new(),
+            },
+        );
+        assert_eq!(history.len(), 10);
+        assert!(std::sync::Arc::ptr_eq(&history[0].image, &image));
+        assert_eq!(
+            history
+                .iter()
+                .filter(|entry| std::sync::Arc::ptr_eq(&entry.image, &image))
+                .count(),
+            1
+        );
     }
 }

@@ -204,7 +204,9 @@ impl Pin {
                     app::show_error(error, cx);
                 }
             }
-            "s" if event.keystroke.modifiers.platform => app::save_image(self.image.clone(), cx),
+            "s" if event.keystroke.modifiers.platform => {
+                app::save_image(self.image.clone(), None, cx)
+            }
             "0" => self.reset(window, cx),
             "1" | "2" | "3" | "4" => {
                 let swap_dimensions = matches!(event.keystroke.key.as_str(), "1" | "2");
@@ -450,7 +452,7 @@ impl Render for Pin {
                                             app::show_error(error, cx);
                                         }
                                     }
-                                    1 => app::save_image(state.image.clone(), cx),
+                                    1 => app::save_image(state.image.clone(), None, cx),
                                     _ => state.close(window, cx),
                                 }))
                         },
