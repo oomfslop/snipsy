@@ -44,7 +44,7 @@ Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When
 | Bold / italic / underline text | `⌘B` / `⌘I` / `⌘U` |
 | Cancel text or capture | `Escape` |
 
-Pins: drag to move; scroll or `+`/`-` to resize; `⌘`+scroll, `⌘`+`+`/`-`, or `[`/`]` for opacity; `1`/`2` rotate; `3`/`4` flip; `0` restores the initial size; `⌘C` copies; `⌘S` saves; `Escape` closes. Hover a pin for its controls.
+Pins: drag to move; scroll or `+`/`-` to resize; `⌘`+scroll, `⌘`+`+`/`-`, or `[`/`]` for opacity; `1`/`2` rotate; `3`/`4` flip; `0` restores the initial size; `⌘⇧X` toggles click-through for the pin under the pointer (or restores all pins); `⌘C` copies; `⌘S` saves; `Escape` closes. Hover a pin for its controls.
 
 PNG and JPEG exports use an atomic file replacement. The last ten finished captures remain in memory; history UI and settings are deferred. History does not persist after quitting.
 

@@ -157,6 +157,28 @@ pub fn hide_overlay(window: &gpui::Window) {
     NSApplication::sharedApplication(mtm).deactivate();
 }
 
+pub fn is_window_under_pointer(window: &gpui::Window) -> bool {
+    let target = get_native_window(window);
+    let pointer = NSEvent::mouseLocation();
+    let mtm = MainThreadMarker::new().expect("window lookup runs on the main thread");
+    return NSApplication::sharedApplication(mtm)
+        .orderedWindows()
+        .iter()
+        .find(|window| {
+            let frame = window.frame();
+            window.isVisible()
+                && pointer.x >= frame.origin.x
+                && pointer.x < frame.origin.x + frame.size.width
+                && pointer.y >= frame.origin.y
+                && pointer.y < frame.origin.y + frame.size.height
+        })
+        .is_some_and(|window| Retained::as_ptr(&window) == Retained::as_ptr(&target));
+}
+
+pub fn set_window_click_through(window: &gpui::Window, enabled: bool) {
+    get_native_window(window).setIgnoresMouseEvents(enabled);
+}
+
 pub fn configure_overlay(window: &gpui::Window, bounds: Rect, resizable: bool) {
     let native = get_native_window(window);
     native.setStyleMask(if resizable {

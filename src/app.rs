@@ -16,6 +16,7 @@ pub struct AppState {
     pub fonts: Arc<resvg::usvg::fontdb::Database>,
     pub selection: Option<WindowHandle<SelectionState>>,
     pub cached_selection: Option<WindowHandle<SelectionState>>,
+    pub pins: Vec<WindowHandle<pin::Pin>>,
     pub history: Vec<(Arc<RgbaImage>, Arc<RenderImage>)>,
     pub error: Option<String>,
 }
@@ -24,6 +25,7 @@ impl Global for AppState {}
 enum Command {
     Capture,
     Paste,
+    ToggleClickThrough,
 }
 
 actions!(snipsy, [CaptureScreen, PinClipboard, QuitSnipsy]);
@@ -40,7 +42,8 @@ pub fn run() {
         let capture = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
         let lens = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyL);
         let paste = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyP);
-        for hotkey in [&capture, &lens, &paste] {
+        let click_through = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyX);
+        for hotkey in [&capture, &lens, &paste, &click_through] {
             if let Err(error) = hotkeys.register(*hotkey) {
                 eprintln!("could not register shortcut: {error}");
                 hotkey_error = Some(format!("Could not register a shortcut: {error}"));
@@ -55,6 +58,8 @@ pub fn run() {
                 Command::Capture
             } else if event.id == paste.id() {
                 Command::Paste
+            } else if event.id == click_through.id() {
+                Command::ToggleClickThrough
             } else {
                 return;
             };
@@ -69,6 +74,7 @@ pub fn run() {
             fonts: Arc::new(fonts),
             selection: None,
             cached_selection: None,
+            pins: Vec::new(),
             history: Vec::new(),
             error: hotkey_error,
         });
@@ -90,6 +96,7 @@ pub fn run() {
                 if let Err(error) = cx.update(|cx| match command {
                     Command::Capture => start_capture(cx),
                     Command::Paste => paste_image(cx),
+                    Command::ToggleClickThrough => toggle_pin_click_through(cx),
                 }) {
                     eprintln!("could not dispatch shortcut: {error}");
                 }
@@ -100,6 +107,32 @@ pub fn run() {
             cx.defer(move |cx| show_error(error, cx));
         }
     });
+}
+
+fn toggle_pin_click_through(cx: &mut App) {
+    let pins = std::mem::take(&mut cx.global_mut::<AppState>().pins);
+    let mut live = Vec::with_capacity(pins.len());
+    let mut target = None;
+    for pin in pins {
+        match pin.update(cx, |_, window, _| platform::is_window_under_pointer(window)) {
+            Ok(true) => target = Some(pin),
+            Ok(false) => live.push(pin),
+            Err(_) => {}
+        }
+    }
+    if let Some(pin) = target {
+        let _ = pin.update(cx, |state, window, cx| {
+            state.toggle_click_through(window, cx)
+        });
+        live.push(pin);
+    } else {
+        for pin in &live {
+            let _ = pin.update(cx, |state, window, cx| {
+                state.disable_click_through(window, cx)
+            });
+        }
+    }
+    cx.global_mut::<AppState>().pins = live;
 }
 
 pub fn start_capture(cx: &mut App) {

@@ -18,7 +18,7 @@ pub fn open_pin(image: Arc<RgbaImage>, bounds: Option<Rect>, cx: &mut App) {
     let bounds = bounds
         .map(|bounds| Bounds::new(point(px(bounds.pos.x), px(bounds.pos.y)), logical_size))
         .unwrap_or_else(|| Bounds::centered(None, logical_size, cx));
-    if let Err(error) = cx.open_window(
+    match cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: None,
@@ -51,23 +51,38 @@ pub fn open_pin(image: Arc<RgbaImage>, bounds: Option<Rect>, cx: &mut App) {
                     opacity: 1.0,
                     focus,
                     original_size: logical_size,
+                    click_through: false,
                 }
             })
         },
     ) {
-        app::show_error(error.to_string(), cx);
+        Ok(handle) => cx.global_mut::<app::AppState>().pins.push(handle),
+        Err(error) => app::show_error(error.to_string(), cx),
     }
 }
 
-struct Pin {
+pub struct Pin {
     image: Arc<RgbaImage>,
     preview: Arc<RenderImage>,
     opacity: f32,
     focus: FocusHandle,
     original_size: Size<Pixels>,
+    click_through: bool,
 }
 
 impl Pin {
+    pub fn toggle_click_through(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.click_through = !self.click_through;
+        platform::set_window_click_through(window, self.click_through);
+        cx.notify();
+    }
+
+    pub fn disable_click_through(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.click_through {
+            self.toggle_click_through(window, cx);
+        }
+    }
+
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => window.remove_window(),
