@@ -37,6 +37,7 @@ impl AssetSource for Icons {
             "copy" => "M8 8h13v13H8ZM16 8V3H3v13h5",
             "search" => "M11 3a8 8 0 1 0 0 16 8 8 0 0 0 0-16M21 21l-5-5",
             "capture" => "M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5M7 7h10v10H7Z",
+            "record" => "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8",
             "apply" => "m4 12 5 5L20 6",
             "print" => "M6 9V3h12v6M6 18H3v-7h18v7h-3M6 15h12v6H6Z",
             _ => return Ok(None),
@@ -86,6 +87,7 @@ mod tests {
             "copy",
             "search",
             "capture",
+            "record",
             "apply",
             "print",
         ] {

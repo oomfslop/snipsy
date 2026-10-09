@@ -1164,11 +1164,6 @@ fn toggle_pin_click_through(cx: &mut App) {
     cx.global_mut::<AppState>().pins = live;
 }
 
-pub fn start_capture(cx: &mut App) {
-    cancel_recording_selection(cx);
-    start_capture_selection(false, cx);
-}
-
 pub fn toggle_recording(cx: &mut App) {
     if cx.global::<AppState>().recorder.is_some() {
         stop_recording(None, false, cx);
@@ -1177,17 +1172,24 @@ pub fn toggle_recording(cx: &mut App) {
     if cx.global::<AppState>().recording_pending {
         return;
     }
-    cx.global_mut::<AppState>().recording_pending = true;
-    start_capture_selection(true, cx);
+    start_capture(cx);
 }
 
-pub fn cancel_recording_selection(cx: &mut App) {
+fn cancel_recording(cx: &mut App) {
     if cx.global::<AppState>().recorder.is_none() {
         cx.global_mut::<AppState>().recording_pending = false;
     }
 }
 
 pub fn start_recording(bounds: Rect, cx: &mut App) {
+    if cx.global::<AppState>().recorder.is_some() {
+        show_error("A screen recording is already active".into(), cx);
+        return;
+    }
+    if cx.global::<AppState>().recording_pending {
+        return;
+    }
+    cx.global_mut::<AppState>().recording_pending = true;
     let path = platform::prompt_save_recording();
     cx.spawn(async move |cx| {
         let result = match path.recv().await {
@@ -1201,7 +1203,7 @@ pub fn start_recording(bounds: Rect, cx: &mut App) {
                 }
             }
             Ok(Ok(None)) => {
-                let _ = cx.update(cancel_recording_selection);
+                let _ = cx.update(cancel_recording);
                 return;
             }
             Ok(Err(error)) => Err(error),
@@ -1226,7 +1228,7 @@ pub fn start_recording(bounds: Rect, cx: &mut App) {
                 .detach();
             }
             Err(error) => {
-                cancel_recording_selection(cx);
+                cancel_recording(cx);
                 show_error(error, cx);
             }
         });
@@ -1288,14 +1290,10 @@ fn quit(cx: &mut App) {
     }
 }
 
-fn start_capture_selection(recording: bool, cx: &mut App) {
+pub fn start_capture(cx: &mut App) {
     if let Some(handle) = cx.global::<AppState>().selection {
         if handle
-            .update(cx, |state, window, cx| {
-                state.set_recording_selection(recording);
-                state.activate(window, cx);
-                cx.notify();
-            })
+            .update(cx, |state, window, cx| state.activate(window, cx))
             .is_ok()
         {
             return;
@@ -1305,9 +1303,6 @@ fn start_capture_selection(recording: bool, cx: &mut App) {
     let bounds = match platform::get_capture_bounds() {
         Ok(bounds) => bounds,
         Err(error) => {
-            if recording {
-                cancel_recording_selection(cx);
-            }
             show_error(error, cx);
             return;
         }
@@ -1329,7 +1324,6 @@ fn start_capture_selection(recording: bool, cx: &mut App) {
             .update(cx, |state, window, cx| {
                 platform::configure_overlay(window, bounds, false);
                 state.reset_for_capture(bounds, window, cx);
-                state.set_recording_selection(recording);
             })
             .is_ok()
     });
@@ -1354,18 +1348,11 @@ fn start_capture_selection(recording: bool, cx: &mut App) {
             },
             |window, cx| {
                 platform::configure_overlay(window, bounds, false);
-                cx.new(|cx| {
-                    let mut state = SelectionState::new(bounds, window, cx);
-                    state.set_recording_selection(recording);
-                    state
-                })
+                cx.new(|cx| SelectionState::new(bounds, window, cx))
             },
         ) {
             Ok(handle) => handle,
             Err(error) => {
-                if recording {
-                    cancel_recording_selection(cx);
-                }
                 show_error(error.to_string(), cx);
                 return;
             }

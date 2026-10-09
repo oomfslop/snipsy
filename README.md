@@ -27,13 +27,13 @@ Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When
 The menu-bar item provides capture, selected-region recording, clipboard pinning, history, whiteboard, pin visibility, and quit actions.
 Global capture, paste, click-through, and pin-visibility shortcuts are configurable from Preferences.
 
-Choose **Start Recording…**, select an area within one display, and press `Enter`. Snipsy records a cursor-visible, silent 60 fps H.264 MP4 until **Stop Recording** is chosen. Normal quit finalizes an active recording.
+Press `⌘⇧A`, select an area within one display, then choose Record in the toolbar. Snipsy records a cursor-visible, silent 60 fps H.264 MP4 until **Stop Recording** is chosen. Normal quit finalizes an active recording.
 
 ## Shortcuts
 
 | Action | Shortcut |
 | --- | --- |
-| Capture | `⌘⇧A` or `⌘⇧L` |
+| Open capture / recording selector | `⌘⇧A` or `⌘⇧L` |
 | Pin clipboard image, color, or text | `⌘⇧P` |
 | Show / hide all pins | `⇧F3` |
 | Select / rectangle / ellipse / arrow | `V` / `R` / `O` / `A` |

@@ -106,7 +106,6 @@ pub struct SelectionState {
     capture_history: Vec<Screenshot>,
     edit_target: Option<WindowHandle<pin::Pin>>,
     is_whiteboard: bool,
-    recording_selection: bool,
 }
 
 pub fn open_pin_editor(
@@ -197,7 +196,6 @@ impl SelectionState {
             capture_history: Vec::new(),
             edit_target: None,
             is_whiteboard: false,
-            recording_selection: false,
         };
     }
 
@@ -259,10 +257,6 @@ impl SelectionState {
         window.focus(&self.focus);
     }
 
-    pub fn set_recording_selection(&mut self, recording: bool) {
-        self.recording_selection = recording;
-    }
-
     pub fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(target) = self.edit_target.take() {
             let _ = target.update(cx, |_, window, _| {
@@ -276,9 +270,6 @@ impl SelectionState {
             == Some(window.window_handle())
         {
             cx.global_mut::<AppState>().selection = None;
-        }
-        if self.recording_selection {
-            app::cancel_recording_selection(cx);
         }
         crate::platform::hide_overlay(window);
         self.reset_for_capture(self.bounds, window, cx);
@@ -706,7 +697,6 @@ impl SelectionState {
                 size: selection.size,
             };
             app::remember_capture_selection(self.bounds, selection, cx);
-            self.recording_selection = false;
             self.dismiss(window, cx);
             app::start_recording(bounds, cx);
             return;
@@ -978,8 +968,6 @@ impl SelectionState {
             "enter" => self.perform_action(
                 if self.edit_target.is_some() {
                     Action::Apply
-                } else if self.recording_selection {
-                    Action::Record
                 } else {
                     Action::Copy
                 },
@@ -1878,16 +1866,14 @@ impl Render for SelectionState {
                     .border_color(rgb(0x44444c))
                     .overflow_x_scroll()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .when(self.recording_selection, |bar| {
-                        bar.child(self.build_button(
-                            "capture",
-                            "Record region (Enter)",
-                            Action::Record,
-                            false,
-                            true,
-                            cx,
-                        ))
-                    })
+                    .child(self.build_button(
+                        "record",
+                        "Record region",
+                        Action::Record,
+                        false,
+                        true,
+                        cx,
+                    ))
                     .children(tools.into_iter().map(|(icon, label, tool)| {
                         self.build_button(
                             icon,
@@ -1961,11 +1947,7 @@ impl Render for SelectionState {
                     })
                     .child(self.build_button(
                         "copy",
-                        if self.recording_selection {
-                            "Copy (⌘C)"
-                        } else {
-                            "Copy (Enter / ⌘C)"
-                        },
+                        "Copy (Enter / ⌘C)",
                         Action::Copy,
                         false,
                         true,
