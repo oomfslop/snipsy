@@ -2,6 +2,7 @@ use crate::{
     editor::Screenshot, history::History, icons::Icons, pin, platform, raster,
     selection::SelectionState,
 };
+use base64::Engine;
 use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
     hotkey::{Code, HotKey, Modifiers},
@@ -9,6 +10,8 @@ use global_hotkey::{
 use gpui::{prelude::*, *};
 use image::{Rgba, RgbaImage};
 use std::{
+    collections::HashMap,
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -26,6 +29,7 @@ pub struct AppState {
     pub capture_history: Vec<Screenshot>,
     pub history: Vec<(Arc<RgbaImage>, Arc<RenderImage>)>,
     history_persist: async_channel::Sender<Arc<RgbaImage>>,
+    pin_persist: async_channel::Sender<pin::PinBackupCommand>,
     pub error: Option<String>,
 }
 impl Global for AppState {}
@@ -55,11 +59,12 @@ pub fn run() {
         platform::initialize_app();
         let mut fonts = resvg::usvg::fontdb::Database::new();
         fonts.load_system_fonts();
-        let (history_directory, mut hotkey_error) = match platform::get_app_data_dir() {
-            Ok(directory) => (Some(directory.join("history")), None),
+        let (data_directory, mut hotkey_error) = match platform::get_app_data_dir() {
+            Ok(directory) => (Some(directory), None),
             Err(error) => (None, Some(error)),
         };
         let (history_persist, history_receiver) = async_channel::unbounded();
+        let (pin_persist, pin_receiver) = async_channel::unbounded();
         let hotkeys = GlobalHotKeyManager::new().expect("could not create global shortcuts");
         let capture = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
         let lens = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyL);
@@ -106,10 +111,12 @@ pub fn run() {
             capture_history: Vec::new(),
             history: Vec::new(),
             history_persist,
+            pin_persist,
             error: hotkey_error,
         });
-        if let Some(directory) = history_directory {
-            let persist_directory = directory.clone();
+        if let Some(directory) = data_directory {
+            let history_directory = directory.join("history");
+            let persist_directory = history_directory.clone();
             cx.background_executor()
                 .spawn(async move {
                     while let Ok(image) = history_receiver.recv().await {
@@ -121,7 +128,7 @@ pub fn run() {
                 .detach();
             let load = cx
                 .background_executor()
-                .spawn(async move { load_history(&directory) });
+                .spawn(async move { load_history(&history_directory) });
             cx.spawn(async move |cx| {
                 let loaded = load.await;
                 let _ = cx.update(|cx| {
@@ -141,6 +148,42 @@ pub fn run() {
                         Err(error) => eprintln!("could not load history: {error}"),
                     }
                     cx.refresh_windows();
+                });
+            })
+            .detach();
+            let pin_directory = directory.join("pins");
+            let persist_directory = pin_directory.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    let mut images = HashMap::new();
+                    while let Ok(command) = pin_receiver.recv().await {
+                        let result = match command {
+                            pin::PinBackupCommand::Save(pin) => {
+                                write_pin_backup(&persist_directory, &pin, &mut images)
+                            }
+                            pin::PinBackupCommand::Remove(id) => {
+                                images.remove(&id);
+                                remove_pin_backup(&persist_directory, id)
+                            }
+                        };
+                        if let Err(error) = result {
+                            eprintln!("could not persist pin: {error}");
+                        }
+                    }
+                })
+                .detach();
+            let load = cx
+                .background_executor()
+                .spawn(async move { load_pin_backups(&pin_directory) });
+            cx.spawn(async move |cx| {
+                let loaded = load.await;
+                let _ = cx.update(|cx| match loaded {
+                    Ok(pins) => {
+                        for pin in pins {
+                            pin::restore_backup(pin, cx);
+                        }
+                    }
+                    Err(error) => eprintln!("could not load pins: {error}"),
                 });
             })
             .detach();
@@ -234,6 +277,10 @@ pub fn set_pins_visible(visible: bool, cx: &mut App) {
     let state = cx.global_mut::<AppState>();
     state.pins = live;
     state.pins_hidden = !visible;
+}
+
+pub fn persist_pin(command: pin::PinBackupCommand, cx: &mut App) {
+    let _ = cx.global::<AppState>().pin_persist.try_send(command);
 }
 
 fn toggle_pin_click_through(cx: &mut App) {
@@ -659,6 +706,144 @@ fn get_history_paths(directory: &Path) -> Result<Vec<(u128, PathBuf)>, String> {
     return Ok(paths);
 }
 
+fn write_pin_backup(
+    directory: &Path,
+    pin: &pin::PinBackup,
+    images: &mut HashMap<u128, Arc<RgbaImage>>,
+) -> Result<(), String> {
+    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    if images
+        .get(&pin.id)
+        .is_none_or(|image| !Arc::ptr_eq(image, &pin.image))
+    {
+        write_image(&pin.image, &directory.join(format!("{}.png", pin.id)))?;
+        images.insert(pin.id, pin.image.clone());
+    }
+    let thumbnail = pin
+        .thumbnail_size
+        .map(|size| (f32::from(size.width), f32::from(size.height)))
+        .unwrap_or_default();
+    let text = pin
+        .text
+        .as_ref()
+        .map(|text| base64::engine::general_purpose::STANDARD.encode(text.as_bytes()))
+        .unwrap_or_default();
+    let metadata = format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        f32::from(pin.bounds.origin.x),
+        f32::from(pin.bounds.origin.y),
+        f32::from(pin.bounds.size.width),
+        f32::from(pin.bounds.size.height),
+        pin.opacity,
+        f32::from(pin.original_size.width),
+        f32::from(pin.original_size.height),
+        thumbnail.0,
+        thumbnail.1,
+        text,
+    );
+    let mut file = tempfile::NamedTempFile::new_in(directory).map_err(|error| error.to_string())?;
+    file.write_all(metadata.as_bytes())
+        .map_err(|error| error.to_string())?;
+    file.as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    file.persist(directory.join(format!("{}.meta", pin.id)))
+        .map_err(|error| error.to_string())?;
+    return Ok(());
+}
+
+fn remove_pin_backup(directory: &Path, id: u128) -> Result<(), String> {
+    for extension in ["png", "meta"] {
+        match std::fs::remove_file(directory.join(format!("{id}.{extension}"))) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    return Ok(());
+}
+
+fn load_pin_backups(directory: &Path) -> Result<Vec<pin::PinBackup>, String> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let id = path.file_stem()?.to_str()?.parse::<u128>().ok()?;
+            (path.extension().and_then(|extension| extension.to_str()) == Some("meta"))
+                .then_some((id, path))
+        })
+        .collect::<Vec<_>>();
+    paths.sort_unstable_by_key(|(id, _)| *id);
+    let mut pins = Vec::new();
+    for (id, path) in paths {
+        let result = std::fs::read_to_string(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|metadata| parse_pin_backup(id, &metadata, directory));
+        match result {
+            Ok(pin) => pins.push(pin),
+            Err(error) => eprintln!("could not load pin {id}: {error}"),
+        }
+    }
+    return Ok(pins);
+}
+
+fn parse_pin_backup(id: u128, metadata: &str, directory: &Path) -> Result<pin::PinBackup, String> {
+    let fields = metadata.splitn(10, '\t').collect::<Vec<_>>();
+    if fields.len() != 10 {
+        return Err("invalid metadata".into());
+    }
+    let numbers = fields[..9]
+        .iter()
+        .map(|field| field.parse::<f32>().map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    if numbers.iter().any(|number| !number.is_finite())
+        || numbers[2] < 40.0
+        || numbers[3] < 40.0
+        || !(0.2..=1.0).contains(&numbers[4])
+        || numbers[5] <= 0.0
+        || numbers[6] <= 0.0
+        || !((numbers[7] == 0.0 && numbers[8] == 0.0) || (numbers[7] > 0.0 && numbers[8] > 0.0))
+    {
+        return Err("invalid dimensions or opacity".into());
+    }
+    let image = image::open(directory.join(format!("{id}.png")))
+        .map_err(|error| error.to_string())?
+        .to_rgba8();
+    if image.width() == 0 || image.height() == 0 {
+        return Err("empty image".into());
+    }
+    let text = if fields[9].is_empty() {
+        None
+    } else {
+        Some(
+            String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(fields[9])
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?
+            .into(),
+        )
+    };
+    return Ok(pin::PinBackup {
+        id,
+        image: Arc::new(image),
+        bounds: Bounds::new(
+            point(px(numbers[0]), px(numbers[1])),
+            size(px(numbers[2]), px(numbers[3])),
+        ),
+        opacity: numbers[4],
+        original_size: size(px(numbers[5]), px(numbers[6])),
+        thumbnail_size: (numbers[7] > 0.0).then_some(size(px(numbers[7]), px(numbers[8]))),
+        text,
+    });
+}
+
 pub fn show_error(error: String, cx: &mut App) {
     eprintln!("{error}");
     cx.global_mut::<AppState>().error = Some(error.clone());
@@ -668,11 +853,13 @@ pub fn show_error(error: String, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        get_history_paths, insert_capture_history, load_history, load_path, parse_color,
-        should_restore_pin, write_history, write_image,
+        get_history_paths, insert_capture_history, load_history, load_path, load_pin_backups,
+        parse_color, parse_pin_backup, remove_pin_backup, should_restore_pin, write_history,
+        write_image, write_pin_backup,
     };
-    use crate::{editor::Screenshot, geometry::Rect};
+    use crate::{editor::Screenshot, geometry::Rect, pin::PinBackup};
     use glam::{Vec2, vec2};
+    use gpui::{Bounds, point, px, size};
     use image::{Rgba, RgbaImage};
 
     #[test]
@@ -793,5 +980,32 @@ mod tests {
             .unwrap();
         }
         assert_eq!(get_history_paths(directory.path()).unwrap().len(), 10);
+    }
+
+    #[test]
+    fn pin_backups_round_trip_text_geometry_and_validation() {
+        let directory = tempfile::tempdir().unwrap();
+        let image = std::sync::Arc::new(RgbaImage::from_pixel(3, 2, Rgba([1, 2, 3, 255])));
+        let pin = PinBackup {
+            id: 42,
+            image: image.clone(),
+            bounds: Bounds::new(point(px(-20.0), px(30.0)), size(px(320.0), px(180.0))),
+            opacity: 0.6,
+            original_size: size(px(640.0), px(360.0)),
+            thumbnail_size: Some(size(px(160.0), px(90.0))),
+            text: Some(std::sync::Arc::from("héllo")),
+        };
+        let mut images = std::collections::HashMap::new();
+        write_pin_backup(directory.path(), &pin, &mut images).unwrap();
+        let loaded = load_pin_backups(directory.path()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, 42);
+        assert_eq!(&*loaded[0].image, &*image);
+        assert_eq!(loaded[0].text.as_deref(), Some("héllo"));
+        assert_eq!(f32::from(loaded[0].bounds.origin.x), -20.0);
+        assert_eq!(loaded[0].opacity, 0.6);
+        assert!(parse_pin_backup(42, "0\t0\t0\t0\t2\t0\t0\t0\t0\t", directory.path()).is_err());
+        remove_pin_backup(directory.path(), 42).unwrap();
+        assert!(load_pin_backups(directory.path()).unwrap().is_empty());
     }
 }

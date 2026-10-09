@@ -1,7 +1,15 @@
 use crate::{app, geometry::Rect, platform, raster};
 use gpui::{prelude::*, *};
 use image::RgbaImage;
-use std::sync::Arc;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+static NEXT_PIN_ID: AtomicU64 = AtomicU64::new(0);
 
 pub fn open_pin(image: Arc<RgbaImage>, bounds: Option<Rect>, cx: &mut App) {
     open_pin_with_text(image, bounds, None, cx);
@@ -34,7 +42,7 @@ fn open_pin_with_text(
     let bounds = bounds
         .map(|bounds| Bounds::new(point(px(bounds.pos.x), px(bounds.pos.y)), logical_size))
         .unwrap_or_else(|| Bounds::centered(None, logical_size, cx));
-    open_pin_window(image, bounds, logical_size, None, 1.0, text, cx);
+    open_pin_window(image, bounds, logical_size, None, 1.0, text, None, true, cx);
 }
 
 fn open_pin_window(
@@ -44,8 +52,11 @@ fn open_pin_window(
     thumbnail_size: Option<Size<Pixels>>,
     opacity: f32,
     text: Option<Arc<str>>,
+    id: Option<u128>,
+    activate: bool,
     cx: &mut App,
 ) {
+    let id = id.unwrap_or_else(create_pin_id);
     match cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -68,11 +79,21 @@ fn open_pin_window(
                 },
                 true,
             );
-            cx.activate(true);
-            window.activate_window();
+            if activate {
+                cx.activate(true);
+                window.activate_window();
+            } else {
+                platform::set_window_visible(window, true);
+            }
             cx.new(|cx| {
                 let focus = cx.focus_handle();
-                window.focus(&focus);
+                if activate {
+                    window.focus(&focus);
+                }
+                cx.observe_window_bounds(window, |state: &mut Pin, window, cx| {
+                    state.schedule_backup(window, cx)
+                })
+                .detach();
                 Pin {
                     preview: raster::create_render_image(&image),
                     image,
@@ -82,16 +103,31 @@ fn open_pin_window(
                     thumbnail_size,
                     click_through: false,
                     text,
+                    id,
+                    backup_task: None,
                 }
             })
         },
     ) {
-        Ok(handle) => cx.global_mut::<app::AppState>().pins.push(handle),
+        Ok(handle) => {
+            cx.global_mut::<app::AppState>().pins.push(handle);
+            let _ = handle.update(cx, |state, window, cx| state.schedule_backup(window, cx));
+        }
         Err(error) => app::show_error(error.to_string(), cx),
     }
 }
 
+fn create_pin_id() -> u128 {
+    return (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        << 32)
+        | NEXT_PIN_ID.fetch_add(1, Ordering::Relaxed) as u128;
+}
+
 pub struct ClosedPin {
+    id: u128,
     image: Arc<RgbaImage>,
     bounds: Bounds<Pixels>,
     opacity: f32,
@@ -116,6 +152,37 @@ pub fn restore_pin(pin: ClosedPin, cx: &mut App) {
         pin.thumbnail_size,
         pin.opacity,
         pin.text,
+        Some(pin.id),
+        true,
+        cx,
+    );
+}
+
+pub struct PinBackup {
+    pub id: u128,
+    pub image: Arc<RgbaImage>,
+    pub bounds: Bounds<Pixels>,
+    pub opacity: f32,
+    pub original_size: Size<Pixels>,
+    pub thumbnail_size: Option<Size<Pixels>>,
+    pub text: Option<Arc<str>>,
+}
+
+pub enum PinBackupCommand {
+    Save(PinBackup),
+    Remove(u128),
+}
+
+pub fn restore_backup(pin: PinBackup, cx: &mut App) {
+    open_pin_window(
+        pin.image,
+        pin.bounds,
+        pin.original_size,
+        pin.thumbnail_size,
+        pin.opacity,
+        pin.text,
+        Some(pin.id),
+        false,
         cx,
     );
 }
@@ -129,12 +196,36 @@ pub struct Pin {
     thumbnail_size: Option<Size<Pixels>>,
     click_through: bool,
     text: Option<Arc<str>>,
+    id: u128,
+    backup_task: Option<Task<()>>,
 }
 
 impl Pin {
+    fn schedule_backup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.backup_task = Some(cx.spawn_in(window, async move |this, cx| {
+            Timer::after(Duration::from_millis(200)).await;
+            let _ = this.update_in(cx, |state, window, cx| {
+                app::persist_pin(
+                    PinBackupCommand::Save(PinBackup {
+                        id: state.id,
+                        image: state.image.clone(),
+                        bounds: window.bounds(),
+                        opacity: state.opacity,
+                        original_size: state.original_size,
+                        thumbnail_size: state.thumbnail_size,
+                        text: state.text.clone(),
+                    }),
+                    cx,
+                );
+            });
+        }));
+    }
+
     fn close(&self, window: &mut Window, cx: &mut Context<Self>) {
+        app::persist_pin(PinBackupCommand::Remove(self.id), cx);
         let state = cx.global_mut::<app::AppState>();
         state.closed_pins.push(ClosedPin {
+            id: self.id,
             image: self.image.clone(),
             bounds: window.bounds(),
             opacity: self.opacity,
@@ -146,6 +237,11 @@ impl Pin {
         if state.closed_pins.len() > 10 {
             state.closed_pins.remove(0);
         }
+        window.remove_window();
+    }
+
+    fn destroy(&self, window: &mut Window, cx: &mut Context<Self>) {
+        app::persist_pin(PinBackupCommand::Remove(self.id), cx);
         window.remove_window();
     }
 
@@ -164,6 +260,7 @@ impl Pin {
         self.opacity = 1.0;
         self.thumbnail_size = None;
         window.resize(self.original_size);
+        self.schedule_backup(window, cx);
         cx.notify();
     }
 
@@ -181,7 +278,7 @@ impl Pin {
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
-            "escape" if event.keystroke.modifiers.shift => window.remove_window(),
+            "escape" if event.keystroke.modifiers.shift => self.destroy(window, cx),
             "escape" => self.close(window, cx),
             "w" if event.keystroke.modifiers.platform => self.close(window, cx),
             "c" if event.keystroke.modifiers.alt => {
@@ -223,6 +320,7 @@ impl Pin {
                         .thumbnail_size
                         .map(|size| gpui::size(size.height, size.width));
                 }
+                self.schedule_backup(window, cx);
                 cx.notify();
             }
             "+" | "=" | "-" => {
@@ -234,6 +332,7 @@ impl Pin {
                             0.1
                         })
                     .clamp(0.2, 1.0);
+                    self.schedule_backup(window, cx);
                     cx.notify();
                 } else {
                     let factor = if event.keystroke.key == "-" { 0.9 } else { 1.1 };
@@ -246,10 +345,12 @@ impl Pin {
             }
             "[" => {
                 self.opacity = (self.opacity - 0.1).max(0.2);
+                self.schedule_backup(window, cx);
                 cx.notify();
             }
             "]" => {
                 self.opacity = (self.opacity + 0.1).min(1.0);
+                self.schedule_backup(window, cx);
                 cx.notify();
             }
             "left" | "right" | "up" | "down" => {
@@ -381,6 +482,7 @@ impl Render for Pin {
                 let delta: f32 = event.delta.pixel_delta(px(16.0)).y.into();
                 if event.modifiers.platform {
                     state.opacity = (state.opacity + delta * 0.002).clamp(0.2, 1.0);
+                    state.schedule_backup(window, cx);
                     cx.notify();
                 } else {
                     let factor = (1.0 + delta * 0.002).clamp(0.8, 1.2);
@@ -475,7 +577,7 @@ impl Render for Pin {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_thumbnail_size, sample_pin_pixel, transform_image};
+    use super::{create_pin_id, create_thumbnail_size, sample_pin_pixel, transform_image};
     use gpui::{point, px, size};
     use image::{Rgba, RgbaImage};
 
@@ -518,5 +620,10 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn pin_ids_are_unique_without_clock_progress() {
+        assert_ne!(create_pin_id(), create_pin_id());
     }
 }
