@@ -1,4 +1,7 @@
-use crate::{editor::Screenshot, icons::Icons, pin, platform, raster, selection::SelectionState};
+use crate::{
+    editor::Screenshot, history::History, icons::Icons, pin, platform, raster,
+    selection::SelectionState,
+};
 use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
     hotkey::{Code, HotKey, Modifiers},
@@ -16,6 +19,7 @@ pub struct AppState {
     pub fonts: Arc<resvg::usvg::fontdb::Database>,
     pub selection: Option<WindowHandle<SelectionState>>,
     pub cached_selection: Option<WindowHandle<SelectionState>>,
+    pub history_window: Option<WindowHandle<History>>,
     pub pins: Vec<WindowHandle<pin::Pin>>,
     pub closed_pins: Vec<pin::ClosedPin>,
     pub pins_hidden: bool,
@@ -34,7 +38,13 @@ enum Command {
 
 actions!(
     snipsy,
-    [CaptureScreen, PinClipboard, TogglePinnedImages, QuitSnipsy]
+    [
+        CaptureScreen,
+        PinClipboard,
+        ShowHistory,
+        TogglePinnedImages,
+        QuitSnipsy
+    ]
 );
 
 pub fn run() {
@@ -84,6 +94,7 @@ pub fn run() {
             fonts: Arc::new(fonts),
             selection: None,
             cached_selection: None,
+            history_window: None,
             pins: Vec::new(),
             closed_pins: Vec::new(),
             pins_hidden: false,
@@ -93,6 +104,7 @@ pub fn run() {
         });
         cx.on_action(|_: &CaptureScreen, cx| start_capture(cx));
         cx.on_action(|_: &PinClipboard, cx| paste_image(cx));
+        cx.on_action(|_: &ShowHistory, cx| show_history(cx));
         cx.on_action(|_: &TogglePinnedImages, cx| toggle_pins(cx));
         cx.on_action(|_: &QuitSnipsy, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", QuitSnipsy, None)]);
@@ -101,6 +113,7 @@ pub fn run() {
             items: vec![
                 MenuItem::action("New screenshot", CaptureScreen),
                 MenuItem::action("Pin clipboard", PinClipboard),
+                MenuItem::action("History", ShowHistory),
                 MenuItem::action("Show/hide pins", TogglePinnedImages),
                 MenuItem::separator(),
                 MenuItem::action("Quit Snipsy", QuitSnipsy),
@@ -123,6 +136,40 @@ pub fn run() {
             cx.defer(move |cx| show_error(error, cx));
         }
     });
+}
+
+fn show_history(cx: &mut App) {
+    if let Some(handle) = cx.global::<AppState>().history_window {
+        if handle
+            .update(cx, |_, window, cx| {
+                cx.activate(true);
+                window.activate_window();
+            })
+            .is_ok()
+        {
+            return;
+        }
+    }
+    cx.activate(true);
+    match cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(760.0), px(520.0)),
+                cx,
+            ))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("History".into()),
+                ..Default::default()
+            }),
+            window_min_size: Some(size(px(280.0), px(220.0))),
+            ..Default::default()
+        },
+        |window, cx| cx.new(|cx| History::new(window, cx)),
+    ) {
+        Ok(handle) => cx.global_mut::<AppState>().history_window = Some(handle),
+        Err(error) => show_error(error.to_string(), cx),
+    }
 }
 
 fn toggle_pins(cx: &mut App) {
