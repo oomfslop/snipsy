@@ -10,6 +10,9 @@ use std::{
 };
 
 static NEXT_PIN_ID: AtomicU64 = AtomicU64::new(0);
+const MAGNIFIER_CELL: f32 = 8.0;
+const MAGNIFIER_COLUMNS: i32 = 13;
+const MAGNIFIER_ROWS: i32 = 9;
 
 pub fn open_pin(image: Arc<RgbaImage>, bounds: Option<Rect>, cx: &mut App) {
     open_pin_with_text(image, bounds, None, None, cx);
@@ -638,25 +641,84 @@ impl Render for Pin {
                     .object_fit(ObjectFit::Contain),
             )
             .when_some(sample, |root, (x, y, color)| {
+                let width = MAGNIFIER_COLUMNS as f32 * MAGNIFIER_CELL;
+                let height = MAGNIFIER_ROWS as f32 * MAGNIFIER_CELL + 38.0;
                 let left = (f32::from(pointer.x) + 12.0)
-                    .clamp(4.0, (f32::from(viewport.width) - 128.0).max(4.0));
+                    .clamp(4.0, (f32::from(viewport.width) - width - 4.0).max(4.0));
                 let top = (f32::from(pointer.y) + 12.0)
-                    .clamp(4.0, (f32::from(viewport.height) - 48.0).max(4.0));
+                    .clamp(4.0, (f32::from(viewport.height) - height - 4.0).max(4.0));
+                let source = self.image.clone();
                 root.child(
                     div()
                         .absolute()
                         .left(px(left))
                         .top(px(top))
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
+                        .w(px(width))
+                        .h(px(height))
+                        .overflow_hidden()
                         .bg(rgba(0x17171bee))
+                        .border_1()
+                        .border_color(rgb(0x55555d))
                         .text_color(rgb(0xffffff))
                         .font_family("Menlo")
                         .text_size(px(11.0))
-                        .child(format!(
-                            "({x}, {y})  {}",
-                            create_color_label(color, window.modifiers().shift)
+                        .child(
+                            canvas(
+                                |_, _, _| (),
+                                move |bounds, _, window, _| {
+                                    for row in 0..MAGNIFIER_ROWS {
+                                        for column in 0..MAGNIFIER_COLUMNS {
+                                            let sx =
+                                                x as i64 + (column - MAGNIFIER_COLUMNS / 2) as i64;
+                                            let sy = y as i64 + (row - MAGNIFIER_ROWS / 2) as i64;
+                                            if sx < 0
+                                                || sy < 0
+                                                || sx >= source.width() as i64
+                                                || sy >= source.height() as i64
+                                            {
+                                                continue;
+                                            }
+                                            let pixel = source.get_pixel(sx as u32, sy as u32);
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    bounds.origin
+                                                        + point(
+                                                            px(column as f32 * MAGNIFIER_CELL),
+                                                            px(row as f32 * MAGNIFIER_CELL),
+                                                        ),
+                                                    size(px(MAGNIFIER_CELL), px(MAGNIFIER_CELL)),
+                                                ),
+                                                rgb(crate::geometry::Color::from_rgb(
+                                                    pixel[0], pixel[1], pixel[2],
+                                                )
+                                                .0),
+                                            ));
+                                        }
+                                    }
+                                    let center = bounds.origin
+                                        + point(
+                                            px((MAGNIFIER_COLUMNS / 2) as f32 * MAGNIFIER_CELL),
+                                            px((MAGNIFIER_ROWS / 2) as f32 * MAGNIFIER_CELL),
+                                        );
+                                    let center = Bounds::new(
+                                        center,
+                                        size(px(MAGNIFIER_CELL), px(MAGNIFIER_CELL)),
+                                    );
+                                    window.paint_quad(outline(
+                                        center,
+                                        rgb(0xffffff),
+                                        BorderStyle::Solid,
+                                    ));
+                                },
+                            )
+                            .w(px(width))
+                            .h(px(MAGNIFIER_ROWS as f32 * MAGNIFIER_CELL)),
+                        )
+                        .child(div().flex_1().flex().items_center().justify_center().child(
+                            format!(
+                                "({x}, {y})  {}",
+                                create_color_label(color, window.modifiers().shift)
+                            ),
                         )),
                 )
             })
