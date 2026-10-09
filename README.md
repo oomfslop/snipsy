@@ -29,7 +29,7 @@ Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When
 | Action | Shortcut |
 | --- | --- |
 | Capture | `⌘⇧A` or `⌘⇧L` |
-| Pin clipboard image | `⌘⇧P` |
+| Pin clipboard image or color | `⌘⇧P` |
 | Select / rectangle / ellipse / arrow | `V` / `R` / `O` / `A` |
 | Straight line | `L` |
 | Pen / highlighter / text / mosaic / eraser | `B` / `H` / `T` / `M` / `E` |

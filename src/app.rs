@@ -4,7 +4,7 @@ use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
 };
 use gpui::{prelude::*, *};
-use image::RgbaImage;
+use image::{Rgba, RgbaImage};
 use std::{
     path::Path,
     sync::Arc,
@@ -88,7 +88,7 @@ pub fn run() {
             name: "Snipsy".into(),
             items: vec![
                 MenuItem::action("New screenshot", CaptureScreen),
-                MenuItem::action("Pin clipboard image", PinClipboard),
+                MenuItem::action("Pin clipboard", PinClipboard),
                 MenuItem::separator(),
                 MenuItem::action("Quit Snipsy", QuitSnipsy),
             ],
@@ -237,22 +237,77 @@ pub fn start_capture(cx: &mut App) {
 }
 
 pub fn paste_image(cx: &mut App) {
-    let image = cx.read_from_clipboard().and_then(|item| {
-        item.entries().iter().find_map(|entry| {
-            if let ClipboardEntry::Image(image) = entry {
-                Some(image.clone())
-            } else {
-                None
-            }
-        })
+    let Some(item) = cx.read_from_clipboard() else {
+        show_error("Clipboard is empty".into(), cx);
+        return;
+    };
+    let image = item.entries().iter().find_map(|entry| {
+        if let ClipboardEntry::Image(image) = entry {
+            Some(image.clone())
+        } else {
+            None
+        }
     });
     match image {
         Some(image) => match image::load_from_memory(&image.bytes) {
             Ok(image) => pin::open_pin(Arc::new(image.to_rgba8()), None, cx),
             Err(error) => show_error(error.to_string(), cx),
         },
-        None => show_error("Clipboard has no image".into(), cx),
+        None => match item.text().and_then(|text| parse_color(&text)) {
+            Some(color) => pin::open_pin(
+                Arc::new(RgbaImage::from_pixel(240, 160, Rgba(color))),
+                None,
+                cx,
+            ),
+            None => show_error("Clipboard has no image or color".into(), cx),
+        },
     }
+}
+
+fn parse_color(text: &str) -> Option<[u8; 4]> {
+    let text = text.trim();
+    if let Some(hex) = text.strip_prefix('#') {
+        let mut color = [0, 0, 0, 255];
+        match hex.len() {
+            3 | 4 => {
+                for (index, value) in hex.bytes().enumerate() {
+                    color[index] = (value as char).to_digit(16)? as u8 * 17;
+                }
+            }
+            6 | 8 => {
+                for (index, value) in hex.as_bytes().chunks_exact(2).enumerate() {
+                    color[index] = u8::from_str_radix(std::str::from_utf8(value).ok()?, 16).ok()?;
+                }
+            }
+            _ => return None,
+        }
+        return Some(color);
+    }
+    let values = text
+        .strip_prefix("rgb(")
+        .and_then(|text| text.strip_suffix(')'))
+        .unwrap_or(text)
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if values.len() != 3 {
+        return None;
+    }
+    let mut color = [0, 0, 0, 255];
+    if values.iter().any(|value| value.contains(['.', 'e', 'E'])) {
+        for (channel, value) in color.iter_mut().zip(values) {
+            let value = value.parse::<f32>().ok()?;
+            if !(0.0..=1.0).contains(&value) {
+                return None;
+            }
+            *channel = (value * 255.0).round() as u8;
+        }
+    } else {
+        for (channel, value) in color.iter_mut().zip(values) {
+            *channel = value.parse().ok()?;
+        }
+    }
+    return Some(color);
 }
 
 pub fn copy_image(image: &RgbaImage, cx: &mut App) -> Result<(), String> {
@@ -348,7 +403,7 @@ pub fn show_error(error: String, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::write_image;
+    use super::{parse_color, write_image};
     use image::{Rgba, RgbaImage};
 
     #[test]
@@ -366,5 +421,17 @@ mod tests {
         let jpeg = directory.path().join("capture.jpg");
         write_image(&image, &jpeg).unwrap();
         assert_eq!(image::open(jpeg).unwrap().width(), 3);
+    }
+
+    #[test]
+    fn clipboard_colors_accept_hex_integer_and_unit_rgb() {
+        assert_eq!(parse_color("#0f8"), Some([0, 255, 136, 255]));
+        assert_eq!(parse_color("#0102ff80"), Some([1, 2, 255, 128]));
+        assert_eq!(parse_color("rgb(255, 2, 3)"), Some([255, 2, 3, 255]));
+        assert_eq!(parse_color("1.0 0 0.5"), Some([255, 0, 128, 255]));
+        assert_eq!(parse_color("1 0 0"), Some([1, 0, 0, 255]));
+        assert_eq!(parse_color("256, 0, 0"), None);
+        assert_eq!(parse_color("1.1 0.0 0.0"), None);
+        assert_eq!(parse_color("not a color"), None);
     }
 }
