@@ -42,6 +42,7 @@ Global capture, paste, click-through, and pin-visibility shortcuts are configura
 | Quick-save selection | `⌘⇧S` |
 | Undo / redo | `⌘Z` / `⌘⇧Z` |
 | Select full display | `⌘A` or `Space` before selecting |
+| Show / hide annotation bar | `Space` after selecting |
 | Restore last capture region | `R` before selecting |
 | Previous / next capture | `,` / `.` |
 | Toggle cursor capture | Backtick (`` ` ``) |

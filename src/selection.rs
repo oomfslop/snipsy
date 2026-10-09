@@ -98,6 +98,7 @@ pub struct SelectionState {
     pending_action: Option<Action>,
     color_task: Option<Task<()>>,
     show_layers: bool,
+    show_toolbar: bool,
     layer_drop_target: Option<(u64, bool)>,
     intensity_drag: bool,
     capture_history_index: usize,
@@ -187,6 +188,7 @@ impl SelectionState {
             pending_action: None,
             color_task: None,
             show_layers: false,
+            show_toolbar: true,
             layer_drop_target: None,
             intensity_drag: false,
             capture_history_index: 0,
@@ -972,6 +974,10 @@ impl SelectionState {
                     pos: Vec2::ZERO,
                     size: self.bounds.size,
                 });
+                cx.notify();
+            }
+            "space" => {
+                self.show_toolbar = !self.show_toolbar;
                 cx.notify();
             }
             "left" | "right" | "up" | "down" => {
@@ -1764,6 +1770,7 @@ impl Render for SelectionState {
             root = root.child(
                 div()
                     .absolute()
+                    .when(!self.show_toolbar, |element| element.invisible())
                     .left(px(rect.pos.x.clamp(8.0, (screen_size.x - 150.0).max(8.0))))
                     .top(px((rect.pos.y - 30.0).max(8.0)))
                     .px(px(6.0))
@@ -1825,6 +1832,7 @@ impl Render for SelectionState {
             root = root.child(
                 div()
                     .id("action-bar")
+                    .when(!self.show_toolbar, |element| element.invisible())
                     .cursor(CursorStyle::Arrow)
                     .absolute()
                     .left(px(bar.pos.x))
@@ -1922,7 +1930,7 @@ impl Render for SelectionState {
                     )),
             );
             let tool = self.editor.get_current_tool();
-            if tool != Tool::Select && tool != Tool::Eraser {
+            if self.show_toolbar && tool != Tool::Select && tool != Tool::Eraser {
                 let y = if bar.pos.y + BAR_HEIGHT + PALETTE_HEIGHT + 4.0 <= screen_size.y - 8.0 {
                     bar.pos.y + BAR_HEIGHT + 4.0
                 } else {
@@ -2148,7 +2156,9 @@ impl Render for SelectionState {
                 }
                 root = root.child(options);
             }
-            if let Some(panel) = layers_panel {
+            if self.show_toolbar
+                && let Some(panel) = layers_panel
+            {
                 let layers = self
                     .editor
                     .layers
