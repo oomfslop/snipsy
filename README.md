@@ -2,7 +2,7 @@
 
 GPUI screenshot editor for macOS 14+. Capture a frozen screen region or click a window, annotate it, copy/save it, or pin it above other apps.
 
-Tools: outlined/filled rectangles and ovals, lines/arrows, pen, highlighter, rich text, pixelated/Gaussian blur, and annotation eraser. Secondary controls update the selected or latest annotation. Scroll the size control to adjust stroke width or text size; blur has an intensity slider. Color circles accompany the native color picker. Layers can be selected, moved, reordered, deleted, and undone/redone. Double-click text to edit; select text ranges for bold/italic/underline. Unicode input and IME composition use GPUI's input handler. Ordinary annotations preview through GPUI GPU paths. Blur composites render on a background worker; exports use the same annotation coordinates and styles.
+Tools: outlined/filled rectangles and ovals, line strips/arrows, pen, highlighter, rich text, pixelated/Gaussian blur, and annotation eraser. Secondary controls update the selected or latest annotation. Scroll the size control to adjust stroke width or text size; blur has an intensity slider. Color circles accompany the native color picker. Layers can be selected, moved, reordered, deleted, and undone/redone. Double-click text to edit; select text ranges for bold/italic/underline. Unicode input and IME composition use GPUI's input handler. Ordinary annotations preview through GPUI GPU paths. Blur composites render on a background worker; exports use the same annotation coordinates and styles.
 
 ## Build
 

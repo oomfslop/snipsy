@@ -248,7 +248,18 @@ impl SelectionState {
             self.begin_text_selection(event, window, cx);
             return;
         }
-        self.editor.commit_draft();
+        let continue_line = self.editor.tool == Tool::Line
+            && self
+                .editor
+                .draft
+                .as_ref()
+                .is_some_and(|draft| draft.tool == Tool::Line)
+            && self
+                .selection
+                .is_some_and(|selection| selection.intersects(self.pointer));
+        if !continue_line {
+            self.editor.commit_draft();
+        }
         if let Some(selection) = self.selection {
             if let Some(handle) = get_resize_handle(self.pointer, selection) {
                 self.drag_origin = Some(selection);
@@ -310,6 +321,15 @@ impl SelectionState {
                     Tool::Eraser => {
                         self.drag_mode = Some(DragMode::Erase);
                         self.erase_at_pointer();
+                    }
+                    Tool::Line if continue_line => {
+                        self.editor
+                            .draft
+                            .as_mut()
+                            .unwrap()
+                            .points
+                            .push(self.pointer);
+                        self.drag_mode = Some(DragMode::Draw);
                     }
                     tool => {
                         self.editor.selected = None;
@@ -461,7 +481,7 @@ impl SelectionState {
                     } else if draft.points.len() == 1 {
                         draft.points.push(point);
                     } else {
-                        draft.points[1] = point;
+                        *draft.points.last_mut().unwrap() = point;
                     }
                 }
             }
@@ -501,7 +521,25 @@ impl SelectionState {
             .selection
             .filter(|selection| selection.size.min_element() >= 2.0);
         if self.drag_mode == Some(DragMode::Draw) {
-            self.editor.commit_draft();
+            if self.editor.tool == Tool::Line {
+                let dragged = self.start.distance(self.pointer) >= 1.0;
+                if !dragged {
+                    if let Some(draft) = &mut self.editor.draft {
+                        if draft.points.len() > 1
+                            && draft.points[draft.points.len() - 2]
+                                .distance(*draft.points.last().unwrap())
+                                < 1.0
+                        {
+                            draft.points.pop();
+                        }
+                    }
+                }
+                if dragged || event.click_count >= 2 {
+                    self.editor.commit_draft();
+                }
+            } else {
+                self.editor.commit_draft();
+            }
         }
         self.drag_mode = None;
         self.drag_origin = None;
@@ -1438,7 +1476,13 @@ impl Render for SelectionState {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|state, _, window, cx| {
-                    state.perform_action(Action::Cancel, window, cx)
+                    if state.editor.draft.is_some() {
+                        state.editor.commit_draft();
+                        state.drag_mode = None;
+                        cx.notify();
+                    } else {
+                        state.perform_action(Action::Cancel, window, cx);
+                    }
                 }),
             )
             .on_key_down(cx.listener(Self::handle_key))
@@ -2515,13 +2559,15 @@ fn build_annotation_path(annotation: &Annotation) -> Result<Option<Path<Pixels>>
             path.close();
         }
         Tool::Arrow | Tool::Line => {
-            if start == end {
+            if (annotation.tool == Tool::Arrow && start == end) || annotation.points.len() < 2 {
                 return Ok(None);
             }
-            let [left, right] = crate::editor::get_arrow_head(start, end, annotation.width);
             path.move_to(at(start));
-            path.line_to(at(end));
+            for point in &annotation.points[1..] {
+                path.line_to(at(*point));
+            }
             if annotation.tool == Tool::Arrow {
+                let [left, right] = crate::editor::get_arrow_head(start, end, annotation.width);
                 path.move_to(at(left));
                 path.line_to(at(end));
                 path.line_to(at(right));

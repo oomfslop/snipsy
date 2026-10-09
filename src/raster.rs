@@ -313,20 +313,25 @@ fn append_annotation_svg(svg: &mut String, annotation: &Annotation) {
                 size.y / 2.0
             );
         }
-        Tool::Arrow | Tool::Line => {
+        Tool::Arrow => {
             let [left, right] = get_arrow_head(start, end, annotation.width);
             let _ = write!(
                 svg,
                 "<path d='M{} {}L{} {}'/>",
                 start.x, start.y, end.x, end.y
             );
-            if annotation.tool == Tool::Arrow {
-                let _ = write!(
-                    svg,
-                    "<path d='M{} {}L{} {}L{} {}'/>",
-                    left.x, left.y, end.x, end.y, right.x, right.y
-                );
+            let _ = write!(
+                svg,
+                "<path d='M{} {}L{} {}L{} {}'/>",
+                left.x, left.y, end.x, end.y, right.x, right.y
+            );
+        }
+        Tool::Line => {
+            svg.push_str("<polyline points='");
+            for point in &annotation.points {
+                let _ = write!(svg, "{},{} ", point.x, point.y);
             }
+            svg.push_str("'/>");
         }
         Tool::Pen | Tool::Highlighter => {
             if annotation.points.len() == 1 {
@@ -431,6 +436,18 @@ mod tests {
         )
         .unwrap();
         assert!(output.pixels().any(|pixel| pixel[0] > 0));
+    }
+
+    #[test]
+    fn line_strip_exports_every_vertex() {
+        let annotation = Annotation {
+            tool: Tool::Line,
+            points: vec![vec2(1.0, 2.0), vec2(3.0, 4.0), vec2(5.0, 6.0)],
+            ..Default::default()
+        };
+        let mut svg = String::new();
+        append_annotation_svg(&mut svg, &annotation);
+        assert!(svg.contains("<polyline points='1,2 3,4 5,6 '"));
     }
 
     #[test]

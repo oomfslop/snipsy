@@ -307,6 +307,7 @@ impl Editor {
         if draft.tool != Tool::Text
             && draft.tool != Tool::Pen
             && draft.tool != Tool::Highlighter
+            && !(draft.tool == Tool::Line && draft.points.len() > 2)
             && draft.points[0].distance(*draft.points.last().unwrap()) < 1.0
         {
             return;
@@ -745,6 +746,19 @@ mod tests {
         });
         editor.commit_draft();
         assert!(editor.undo.is_empty());
+    }
+
+    #[test]
+    fn closed_line_strip_is_not_discarded_as_a_zero_length_line() {
+        let mut editor = Editor::new();
+        editor.draft = Some(Annotation {
+            tool: Tool::Line,
+            points: vec![vec2(10.0, 10.0), vec2(30.0, 20.0), vec2(10.0, 10.0)],
+            ..Default::default()
+        });
+        editor.commit_draft();
+        assert_eq!(editor.layers.len(), 1);
+        assert_eq!(editor.layers[0].points.len(), 3);
     }
 
     #[test]
