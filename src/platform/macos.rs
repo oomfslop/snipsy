@@ -27,7 +27,11 @@ use objc2_screen_capture_kit::{
 };
 use objc2_uniform_type_identifiers::UTType;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use crate::{
     editor::Screenshot,
@@ -159,13 +163,8 @@ pub fn get_capture_bounds() -> Result<Rect, String> {
         return Err("Enable Screen Recording for Snipsy (or its terminal) in System Settings, then capture again.".into());
     }
     let mtm = MainThreadMarker::new().expect("capture starts on the main thread");
-    let mouse = NSEvent::mouseLocation();
     let screens = NSScreen::screens(mtm);
     let primary = screens.firstObject().ok_or("No display available")?;
-    let pointer = vec2(
-        mouse.x as f32,
-        (primary.frame().size.height - mouse.y) as f32,
-    );
     return screens
         .iter()
         .map(|screen| {
@@ -176,8 +175,17 @@ pub fn get_capture_bounds() -> Result<Rect, String> {
             }
             .flip_vertically(primary.frame().size.height as f32)
         })
-        .find(|bounds| bounds.intersects(pointer))
-        .ok_or_else(|| "No display under the pointer".into());
+        .reduce(create_rect_union)
+        .ok_or_else(|| "No display available".into());
+}
+
+fn create_rect_union(left: Rect, right: Rect) -> Rect {
+    let min = left.pos.min(right.pos);
+    let max = (left.pos + left.size).max(right.pos + right.size);
+    return Rect {
+        pos: min,
+        size: max - min,
+    };
 }
 
 fn get_native_view(window: &gpui::Window) -> &NSView {
@@ -316,6 +324,12 @@ pub fn show_error(error: &str) {
     }
 }
 
+struct PendingCapture {
+    remaining: usize,
+    images: Vec<(Rect, f32, image::RgbaImage)>,
+    finished: bool,
+}
+
 pub fn capture_screen(bounds: Rect, sender: Sender<Result<Screenshot, String>>) {
     let mtm = MainThreadMarker::new().expect("capture starts on the main thread");
     let own_window_ids: Vec<u32> = NSApplication::sharedApplication(mtm)
@@ -328,148 +342,196 @@ pub fn capture_screen(bounds: Rect, sender: Sender<Result<Screenshot, String>>) 
         move |content: *mut SCShareableContent, error: *mut NSError| {
             autoreleasepool(|_| {
                 // SAFETY: ScreenCaptureKit keeps callback arguments alive for this invocation.
-                let result = unsafe {
-                    let Some(content) = content.as_ref() else {
-                        let message = error
-                            .as_ref()
-                            .map(|error| error.localizedDescription().to_string())
-                            .unwrap_or_else(|| "Could not enumerate displays".into());
-                        let _ = sender.try_send(Err(message));
-                        return;
-                    };
-                    let displays = content.displays();
-                    let Some(display) = displays.iter().find(|display| {
-                        let frame = display.frame();
-                        Rect {
-                            pos: vec2(frame.origin.x as f32, frame.origin.y as f32),
-                            size: vec2(frame.size.width as f32, frame.size.height as f32),
-                        } == bounds
-                    }) else {
-                        let _ = sender
-                            .try_send(Err("Display configuration changed; capture again".into()));
-                        return;
-                    };
-                    let frame = display.frame();
-                    let bounds = Rect {
-                        pos: vec2(frame.origin.x as f32, frame.origin.y as f32),
-                        size: vec2(frame.size.width as f32, frame.size.height as f32),
-                    };
-                    let excluded_windows: Vec<_> = content
-                        .windows()
-                        .iter()
-                        .filter(|window| {
-                            is_own_window(
-                                window.windowID(),
-                                window.owningApplication().map(|app| app.processID()),
-                                &own_window_ids,
-                            )
-                        })
-                        .collect();
-                    if own_window_ids.iter().any(|id| {
-                        !excluded_windows
+                let prepared = unsafe {
+                    (|| {
+                        let Some(content) = content.as_ref() else {
+                            return Err(error
+                                .as_ref()
+                                .map(|error| error.localizedDescription().to_string())
+                                .unwrap_or_else(|| "Could not enumerate displays".into()));
+                        };
+                        let displays = content.displays();
+                        let display_bounds = displays
                             .iter()
-                            .any(|window| window.windowID() == *id)
-                    }) {
-                        let _ = sender.try_send(Err(
-                            "Could not exclude Snipsy's overlay from capture; try again".into(),
-                        ));
-                        return;
-                    }
-                    let filter = SCContentFilter::initWithDisplay_excludingWindows(
-                        SCContentFilter::alloc(),
-                        &display,
-                        &NSArray::from_retained_slice(&excluded_windows),
-                    );
-                    let config = SCStreamConfiguration::new();
-                    config.setColorSpaceName(kCGColorSpaceSRGB);
-                    let scale = filter.pointPixelScale() as f64;
-                    config.setWidth((frame.size.width * scale).round() as usize);
-                    config.setHeight((frame.size.height * scale).round() as usize);
-                    config.setShowsCursor(false);
-                    let order: HashMap<_, _> =
-                        CGWindowListCopyWindowInfo(CGWindowListOption::OptionOnScreenOnly, 0)
-                            .map(|info| {
-                                // CGWindowListCopyWindowInfo returns CFString-keyed dictionaries of CFType values.
-                                info.cast_unchecked::<CFDictionary<CFString, CFType>>()
-                                    .to_vec()
-                                    .into_iter()
-                                    .filter_map(|item| {
-                                        return item
-                                            .get(kCGWindowNumber)?
-                                            .downcast::<CFNumber>()
-                                            .ok()?
-                                            .as_i64();
-                                    })
-                                    .enumerate()
-                                    .map(|(index, id)| (id as u32, index))
-                                    .collect()
+                            .map(|display| {
+                                let frame = display.frame();
+                                Rect {
+                                    pos: vec2(frame.origin.x as f32, frame.origin.y as f32),
+                                    size: vec2(frame.size.width as f32, frame.size.height as f32),
+                                }
                             })
-                            .unwrap_or_default();
-                    let mut windows = content
-                        .windows()
-                        .iter()
-                        .filter_map(|window| {
-                            if !window.isOnScreen()
-                                || window.windowLayer() != 0
-                                || is_own_window(
+                            .collect::<Vec<_>>();
+                        if display_bounds.iter().copied().reduce(create_rect_union) != Some(bounds)
+                        {
+                            return Err("Display configuration changed; capture again".into());
+                        }
+                        let excluded_windows: Vec<_> = content
+                            .windows()
+                            .iter()
+                            .filter(|window| {
+                                is_own_window(
                                     window.windowID(),
                                     window.owningApplication().map(|app| app.processID()),
                                     &own_window_ids,
                                 )
-                            {
-                                return None;
-                            }
-                            let frame = window.frame();
-                            let min =
-                                vec2(frame.origin.x as f32, frame.origin.y as f32).max(bounds.pos);
-                            let max = (vec2(frame.origin.x as f32, frame.origin.y as f32)
-                                + vec2(frame.size.width as f32, frame.size.height as f32))
-                            .min(bounds.pos + bounds.size);
-                            return ((max - min).min_element() >= 2.0).then_some((
-                                window.windowID(),
-                                Rect {
-                                    pos: min - bounds.pos,
-                                    size: max - min,
-                                },
-                            ));
-                        })
-                        .collect::<Vec<_>>();
-                    windows.sort_by_key(|(id, _)| order.get(id).copied().unwrap_or(usize::MAX));
-                    let windows = windows
-                        .into_iter()
-                        .map(|(_, rect)| rect)
-                        .collect::<Vec<_>>();
-                    (filter, config, bounds, windows)
-                };
-                let (filter, config, bounds, windows) = result;
-                let sender = sender.clone();
-                let callback = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
-                    autoreleasepool(|_| {
-                        // SAFETY: Callback pointers are valid until this invocation returns.
-                        let result = unsafe {
-                            if let Some(image) = image.as_ref() {
-                                copy_capture_image(image).map(|image| Screenshot {
-                                    image: std::sync::Arc::new(image),
-                                    bounds,
-                                    windows: windows.clone(),
+                            })
+                            .collect();
+                        if own_window_ids.iter().any(|id| {
+                            !excluded_windows
+                                .iter()
+                                .any(|window| window.windowID() == *id)
+                        }) {
+                            return Err(
+                                "Could not exclude Snipsy's windows from capture; try again".into(),
+                            );
+                        }
+                        let excluded_windows = NSArray::from_retained_slice(&excluded_windows);
+                        let mut captures = Vec::with_capacity(displays.len());
+                        let mut scale = 1.0_f32;
+                        for (display, display_bounds) in displays.iter().zip(display_bounds) {
+                            let filter = SCContentFilter::initWithDisplay_excludingWindows(
+                                SCContentFilter::alloc(),
+                                &display,
+                                &excluded_windows,
+                            );
+                            let display_scale = filter.pointPixelScale() as f32;
+                            scale = scale.max(display_scale);
+                            let config = SCStreamConfiguration::new();
+                            config.setColorSpaceName(kCGColorSpaceSRGB);
+                            config
+                                .setWidth((display_bounds.size.x * display_scale).round() as usize);
+                            config.setHeight((display_bounds.size.y * display_scale).round() as usize);
+                            config.setShowsCursor(false);
+                            captures.push((filter, config, display_bounds, display_scale));
+                        }
+                        let order: HashMap<_, _> =
+                            CGWindowListCopyWindowInfo(CGWindowListOption::OptionOnScreenOnly, 0)
+                                .map(|info| {
+                                    // CGWindowListCopyWindowInfo returns CFString-keyed dictionaries of CFType values.
+                                    info.cast_unchecked::<CFDictionary<CFString, CFType>>()
+                                        .to_vec()
+                                        .into_iter()
+                                        .filter_map(|item| {
+                                            return item
+                                                .get(kCGWindowNumber)?
+                                                .downcast::<CFNumber>()
+                                                .ok()?
+                                                .as_i64();
+                                        })
+                                        .enumerate()
+                                        .map(|(index, id)| (id as u32, index))
+                                        .collect()
                                 })
-                            } else {
-                                Err(error
-                                    .as_ref()
-                                    .map(|error| error.localizedDescription().to_string())
-                                    .unwrap_or_else(|| "Screen capture failed".into()))
-                            }
-                        };
-                        let _ = sender.try_send(result);
-                    });
-                });
-                // SAFETY: Framework copies the completion block; filter/config live through this call.
-                unsafe {
-                    SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
-                        &filter,
-                        &config,
-                        Some(&callback),
-                    );
+                                .unwrap_or_default();
+                        let mut windows = content
+                            .windows()
+                            .iter()
+                            .filter_map(|window| {
+                                if !window.isOnScreen()
+                                    || window.windowLayer() != 0
+                                    || is_own_window(
+                                        window.windowID(),
+                                        window.owningApplication().map(|app| app.processID()),
+                                        &own_window_ids,
+                                    )
+                                {
+                                    return None;
+                                }
+                                let frame = window.frame();
+                                let min = vec2(frame.origin.x as f32, frame.origin.y as f32)
+                                    .max(bounds.pos);
+                                let max = (vec2(frame.origin.x as f32, frame.origin.y as f32)
+                                    + vec2(frame.size.width as f32, frame.size.height as f32))
+                                .min(bounds.pos + bounds.size);
+                                return ((max - min).min_element() >= 2.0).then_some((
+                                    window.windowID(),
+                                    Rect {
+                                        pos: min - bounds.pos,
+                                        size: max - min,
+                                    },
+                                ));
+                            })
+                            .collect::<Vec<_>>();
+                        windows.sort_by_key(|(id, _)| order.get(id).copied().unwrap_or(usize::MAX));
+                        let windows = windows
+                            .into_iter()
+                            .map(|(_, rect)| rect)
+                            .collect::<Vec<_>>();
+                        Ok((captures, windows, scale))
+                    })()
+                };
+                let (captures, windows, scale) = match prepared {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        let _ = sender.try_send(Err(error));
+                        return;
+                    }
+                };
+                if captures.is_empty() {
+                    let _ = sender.try_send(Err("No display available".into()));
+                    return;
+                }
+                let pending = Arc::new(Mutex::new(PendingCapture {
+                    remaining: captures.len(),
+                    images: Vec::with_capacity(captures.len()),
+                    finished: false,
+                }));
+                for (filter, config, display_bounds, display_scale) in captures {
+                    let pending = pending.clone();
+                    let sender = sender.clone();
+                    let windows = windows.clone();
+                    let callback =
+                        RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
+                            autoreleasepool(|_| {
+                                // SAFETY: Callback pointers are valid until this invocation returns.
+                                let result = unsafe {
+                                    if let Some(image) = image.as_ref() {
+                                        copy_capture_image(image)
+                                    } else {
+                                        Err(error
+                                            .as_ref()
+                                            .map(|error| error.localizedDescription().to_string())
+                                            .unwrap_or_else(|| "Screen capture failed".into()))
+                                    }
+                                };
+                                let mut pending = pending.lock().expect("capture state poisoned");
+                                if pending.finished {
+                                    return;
+                                }
+                                match result {
+                                    Ok(image) => {
+                                        pending.images.push((display_bounds, display_scale, image));
+                                        pending.remaining -= 1;
+                                        if pending.remaining > 0 {
+                                            return;
+                                        }
+                                        pending.finished = true;
+                                        let images = std::mem::take(&mut pending.images);
+                                        drop(pending);
+                                        let result = stitch_capture_images(bounds, images, scale)
+                                            .map(|image| Screenshot {
+                                                image: Arc::new(image),
+                                                bounds,
+                                                windows: windows.clone(),
+                                            });
+                                        let _ = sender.try_send(result);
+                                    }
+                                    Err(error) => {
+                                        pending.finished = true;
+                                        drop(pending);
+                                        let _ = sender.try_send(Err(error));
+                                    }
+                                }
+                            });
+                        });
+                    // SAFETY: Framework copies the completion block; filter/config live through this call.
+                    unsafe {
+                        SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+                            &filter,
+                            &config,
+                            Some(&callback),
+                        );
+                    }
                 }
             });
         },
@@ -481,13 +543,83 @@ pub fn capture_screen(bounds: Rect, sender: Sender<Result<Screenshot, String>>) 
     }
 }
 
+fn stitch_capture_images(
+    bounds: Rect,
+    captures: Vec<(Rect, f32, image::RgbaImage)>,
+    scale: f32,
+) -> Result<image::RgbaImage, String> {
+    if bounds.size.min_element() <= 0.0 || !scale.is_finite() || scale <= 0.0 {
+        return Err("Invalid desktop capture geometry".into());
+    }
+    let (width, height) = get_scaled_size(bounds.size, scale)?;
+    let length = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|length| length.checked_mul(4))
+        .ok_or("Desktop capture is too large")?;
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(length)
+        .map_err(|error| error.to_string())?;
+    pixels.resize(length, 0);
+    for alpha in pixels.iter_mut().skip(3).step_by(4) {
+        *alpha = 255;
+    }
+    let mut output = image::RgbaImage::from_raw(width, height, pixels)
+        .ok_or("Could not allocate desktop capture")?;
+    for (display, display_scale, image) in captures {
+        if !display_scale.is_finite() || display_scale <= 0.0 {
+            return Err("Invalid display scale".into());
+        }
+        let size = get_scaled_size(display.size, scale)?;
+        let image = if image.dimensions() == size {
+            image
+        } else {
+            image::imageops::resize(
+                &image,
+                size.0,
+                size.1,
+                image::imageops::FilterType::Triangle,
+            )
+        };
+        let offset = (display.pos - bounds.pos) * scale;
+        if offset.min_element() < 0.0
+            || offset.x + size.0 as f32 > width as f32
+            || offset.y + size.1 as f32 > height as f32
+        {
+            return Err("Display capture lies outside desktop bounds".into());
+        }
+        image::imageops::replace(
+            &mut output,
+            &image,
+            offset.x.round() as i64,
+            offset.y.round() as i64,
+        );
+    }
+    return Ok(output);
+}
+
+fn get_scaled_size(size: glam::Vec2, scale: f32) -> Result<(u32, u32), String> {
+    if !size.x.is_finite() || !size.y.is_finite() || !scale.is_finite() || scale <= 0.0 {
+        return Err("Invalid desktop capture geometry".into());
+    }
+    let width = (size.x * scale).round();
+    let height = (size.y * scale).round();
+    if width <= 0.0 || height <= 0.0 || width > u32::MAX as f32 || height > u32::MAX as f32 {
+        return Err("Desktop capture is too large".into());
+    }
+    return Ok((width as u32, height as u32));
+}
+
 fn is_own_window(id: u32, owner: Option<i32>, own_ids: &[u32]) -> bool {
     return own_ids.contains(&id) || owner == Some(std::process::id() as i32);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_own_window;
+    use super::{create_rect_union, get_scaled_size, is_own_window, stitch_capture_images};
+    use crate::geometry::Rect;
+    use glam::vec2;
+    use image::{Rgba, RgbaImage};
 
     #[test]
     fn overlay_exclusion_does_not_require_application_metadata() {
@@ -495,6 +627,44 @@ mod tests {
         assert!(is_own_window(99, Some(std::process::id() as i32), &[42]));
         assert!(!is_own_window(99, None, &[42]));
         assert!(!is_own_window(99, Some(-1), &[42]));
+    }
+
+    #[test]
+    fn desktop_union_and_stitch_preserve_display_positions_and_gaps() {
+        let left = Rect {
+            pos: vec2(-100.0, 0.0),
+            size: vec2(100.0, 100.0),
+        };
+        let right = Rect {
+            pos: vec2(100.0, 0.0),
+            size: vec2(100.0, 100.0),
+        };
+        let bounds = create_rect_union(left, right);
+        assert_eq!(bounds.pos, vec2(-100.0, 0.0));
+        assert_eq!(bounds.size, vec2(300.0, 100.0));
+        let image = stitch_capture_images(
+            bounds,
+            vec![
+                (
+                    left,
+                    1.0,
+                    RgbaImage::from_pixel(100, 100, Rgba([255, 0, 0, 255])),
+                ),
+                (
+                    right,
+                    2.0,
+                    RgbaImage::from_pixel(200, 200, Rgba([0, 0, 255, 255])),
+                ),
+            ],
+            2.0,
+        )
+        .unwrap();
+        assert_eq!(image.dimensions(), (600, 200));
+        assert_eq!(image.get_pixel(100, 100).0, [255, 0, 0, 255]);
+        assert_eq!(image.get_pixel(300, 100).0, [0, 0, 0, 255]);
+        assert_eq!(image.get_pixel(500, 100).0, [0, 0, 255, 255]);
+        assert!(get_scaled_size(vec2(f32::MAX, 100.0), 2.0).is_err());
+        assert!(get_scaled_size(vec2(100.0, 100.0), f32::NAN).is_err());
     }
 }
 

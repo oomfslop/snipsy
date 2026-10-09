@@ -67,7 +67,7 @@ Google Lens remains available in the editor toolbar. It submits the edited PNG d
 - `platform/macos.rs`: ScreenCaptureKit, exact borderless overlay bounds, background app policy, and native dialogs. This is the boundary to replace for another OS; there is no speculative backend trait.
 - `lens.rs`: platform-independent browser handoff document.
 
-Capture currently targets the display under the pointer. OCR, scrolling capture, and persistent history are not implemented.
+Capture spans the connected desktop, including mixed-scale displays. OCR and scrolling capture are not implemented.
 
 ## Checks
 
