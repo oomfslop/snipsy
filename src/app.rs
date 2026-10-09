@@ -11,6 +11,7 @@ use gpui::{prelude::*, *};
 use image::{Rgba, RgbaImage};
 use std::{
     collections::HashMap,
+    ffi::OsString,
     io::Write,
     path::{Path, PathBuf},
     sync::Arc,
@@ -41,6 +42,17 @@ enum Command {
     TogglePins,
 }
 
+#[derive(Debug, Default, PartialEq)]
+pub enum StartupAction {
+    #[default]
+    None,
+    Capture,
+    Paste,
+    Plain(String),
+    Files(Vec<PathBuf>),
+    History,
+}
+
 actions!(
     snipsy,
     [
@@ -52,10 +64,53 @@ actions!(
     ]
 );
 
-pub fn run() {
+pub fn parse_startup_action(
+    args: impl IntoIterator<Item = OsString>,
+) -> Result<StartupAction, String> {
+    let args = args.into_iter().collect::<Vec<_>>();
+    let Some(command) = args.first().and_then(|arg| arg.to_str()) else {
+        return Ok(StartupAction::None);
+    };
+    return match command {
+        "snip" => (args.len() == 1)
+            .then_some(StartupAction::Capture)
+            .ok_or("Usage: snipsy snip".into()),
+        "paste"
+            if args.len() == 1
+                || args.get(1).and_then(|arg| arg.to_str()) == Some("--clipboard") =>
+        {
+            (args.len() <= 2)
+                .then_some(StartupAction::Paste)
+                .ok_or("Usage: snipsy paste [--clipboard]".into())
+        }
+        "paste" if args.get(1).and_then(|arg| arg.to_str()) == Some("--plain") => (!args[2..]
+            .is_empty())
+        .then(|| {
+            StartupAction::Plain(
+                args[2..]
+                    .iter()
+                    .map(|arg| arg.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        })
+        .ok_or("Usage: snipsy paste --plain TEXT".into()),
+        "paste" if args.get(1).and_then(|arg| arg.to_str()) == Some("--files") => (!args[2..]
+            .is_empty())
+        .then(|| StartupAction::Files(args[2..].iter().map(PathBuf::from).collect()))
+        .ok_or("Usage: snipsy paste --files FILE...".into()),
+        "history" if args.len() == 1 => Ok(StartupAction::History),
+        _ => Err(
+            "Usage: snipsy [snip | paste [--clipboard | --plain TEXT | --files FILE...] | history]"
+                .into(),
+        ),
+    };
+}
+
+pub fn run(startup: StartupAction) {
     let application = Application::new().with_assets(Icons);
     application.on_reopen(start_capture);
-    application.run(|cx| {
+    application.run(move |cx| {
         platform::initialize_app();
         let mut fonts = resvg::usvg::fontdb::Database::new();
         fonts.load_system_fonts();
@@ -71,10 +126,12 @@ pub fn run() {
         let paste = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyP);
         let click_through = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyX);
         let toggle_pins_hotkey = HotKey::new(Some(Modifiers::SHIFT), Code::F3);
-        for hotkey in [&capture, &lens, &paste, &click_through, &toggle_pins_hotkey] {
-            if let Err(error) = hotkeys.register(*hotkey) {
-                eprintln!("could not register shortcut: {error}");
-                hotkey_error = Some(format!("Could not register a shortcut: {error}"));
+        if startup == StartupAction::None {
+            for hotkey in [&capture, &lens, &paste, &click_through, &toggle_pins_hotkey] {
+                if let Err(error) = hotkeys.register(*hotkey) {
+                    eprintln!("could not register shortcut: {error}");
+                    hotkey_error = Some(format!("Could not register a shortcut: {error}"));
+                }
             }
         }
         let (sender, receiver) = async_channel::unbounded();
@@ -218,6 +275,14 @@ pub fn run() {
             }
         })
         .detach();
+        cx.defer(move |cx| match startup {
+            StartupAction::None => {}
+            StartupAction::Capture => start_capture(cx),
+            StartupAction::Paste => paste_image(cx),
+            StartupAction::Plain(text) => pin_text(text, cx),
+            StartupAction::Files(paths) => open_paths(paths, cx),
+            StartupAction::History => show_history(cx),
+        });
         if let Some(error) = cx.global::<AppState>().error.clone() {
             cx.defer(move |cx| show_error(error, cx));
         }
@@ -452,20 +517,24 @@ pub fn paste_image(cx: &mut App) {
                 show_error("Clipboard has no supported content".into(), cx);
                 return;
             };
-            if let Some(color) = parse_color(&text) {
-                pin::open_pin(
-                    Arc::new(RgbaImage::from_pixel(240, 160, Rgba(color))),
-                    None,
-                    cx,
-                );
-                return;
-            }
-            let fonts = cx.global::<AppState>().fonts.clone();
-            match raster::render_text_image(&text, &fonts) {
-                Ok(image) => pin::open_text_pin(Arc::new(image), text, cx),
-                Err(error) => show_error(error, cx),
-            }
+            pin_text(text, cx);
         }
+    }
+}
+
+fn pin_text(text: String, cx: &mut App) {
+    if let Some(color) = parse_color(&text) {
+        pin::open_pin(
+            Arc::new(RgbaImage::from_pixel(240, 160, Rgba(color))),
+            None,
+            cx,
+        );
+        return;
+    }
+    let fonts = cx.global::<AppState>().fonts.clone();
+    match raster::render_text_image(&text, &fonts) {
+        Ok(image) => pin::open_text_pin(Arc::new(image), text, cx),
+        Err(error) => show_error(error, cx),
     }
 }
 
@@ -853,14 +922,15 @@ pub fn show_error(error: String, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        get_history_paths, insert_capture_history, load_history, load_path, load_pin_backups,
-        parse_color, parse_pin_backup, remove_pin_backup, should_restore_pin, write_history,
-        write_image, write_pin_backup,
+        StartupAction, get_history_paths, insert_capture_history, load_history, load_path,
+        load_pin_backups, parse_color, parse_pin_backup, parse_startup_action, remove_pin_backup,
+        should_restore_pin, write_history, write_image, write_pin_backup,
     };
     use crate::{editor::Screenshot, geometry::Rect, pin::PinBackup};
     use glam::{Vec2, vec2};
     use gpui::{Bounds, point, px, size};
     use image::{Rgba, RgbaImage};
+    use std::path::PathBuf;
 
     #[test]
     fn save_replaces_png_and_rejects_unsupported_formats_without_truncating() {
@@ -1007,5 +1077,32 @@ mod tests {
         assert!(parse_pin_backup(42, "0\t0\t0\t0\t2\t0\t0\t0\t0\t", directory.path()).is_err());
         remove_pin_backup(directory.path(), 42).unwrap();
         assert!(load_pin_backups(directory.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_commands_parse_without_losing_file_paths() {
+        assert_eq!(
+            parse_startup_action(Vec::<std::ffi::OsString>::new()).unwrap(),
+            StartupAction::None
+        );
+        assert_eq!(
+            parse_startup_action(["snip".into()]).unwrap(),
+            StartupAction::Capture
+        );
+        assert_eq!(
+            parse_startup_action([
+                "paste".into(),
+                "--plain".into(),
+                "hello".into(),
+                "world".into()
+            ])
+            .unwrap(),
+            StartupAction::Plain("hello world".into())
+        );
+        assert_eq!(
+            parse_startup_action(["paste".into(), "--files".into(), "image.png".into()]).unwrap(),
+            StartupAction::Files(vec![PathBuf::from("image.png")])
+        );
+        assert!(parse_startup_action(["paste".into(), "--files".into()]).is_err());
     }
 }

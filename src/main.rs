@@ -10,5 +10,11 @@ mod raster;
 mod selection;
 
 fn main() {
-    app::run();
+    match app::parse_startup_action(std::env::args_os().skip(1)) {
+        Ok(action) => app::run(action),
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    }
 }
