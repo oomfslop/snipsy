@@ -3,6 +3,7 @@ use std::{fmt::Write, io::Cursor, sync::Arc};
 use gpui::RenderImage;
 use image::{Frame, Rgba, RgbaImage};
 use resvg::{tiny_skia, usvg};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     editor::{Annotation, BlurMode, Tool, get_arrow_head},
@@ -81,6 +82,70 @@ pub fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
         .write_to(&mut output, image::ImageFormat::Png)
         .map_err(|error| error.to_string())?;
     return Ok(output.into_inner());
+}
+
+pub fn render_text_image(
+    text: &str,
+    fonts: &Arc<usvg::fontdb::Database>,
+) -> Result<RgbaImage, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("Clipboard text is empty".into());
+    }
+    if text.len() > 16_384 {
+        return Err("Clipboard text is too large".into());
+    }
+    // shortcut: hard-wrap at 80 graphemes, use shaped layout when text cards become editable.
+    let mut wrapped = String::new();
+    let mut lines = 0usize;
+    let mut columns = 0usize;
+    for (line_index, line) in text.split('\n').enumerate() {
+        if line_index > 0 {
+            wrapped.push('\n');
+        }
+        lines += 1;
+        let mut line_columns = 0usize;
+        for grapheme in line.graphemes(true) {
+            if line_columns == 80 {
+                wrapped.push('\n');
+                lines += 1;
+                line_columns = 0;
+            }
+            wrapped.push_str(grapheme);
+            line_columns += 1;
+            columns = columns.max(line_columns);
+        }
+    }
+    if lines > 60 {
+        return Err("Clipboard text has too many lines".into());
+    }
+    let font_size = 18.0;
+    let padding = 16.0;
+    let width = (columns as f32 * font_size * 0.7 + padding * 2.0)
+        .ceil()
+        .max(120.0) as u32;
+    let height = (lines as f32 * font_size * 1.3 + padding * 2.0)
+        .ceil()
+        .max(64.0) as u32;
+    let bounds = Rect {
+        pos: glam::Vec2::ZERO,
+        size: glam::vec2(width as f32, height as f32),
+    };
+    let annotation = Annotation {
+        tool: Tool::Text,
+        points: vec![glam::vec2(padding, padding)],
+        text: wrapped,
+        width: font_size,
+        color: crate::geometry::Color(0x202024),
+        ..Default::default()
+    };
+    return render_selection(
+        &RgbaImage::from_pixel(width, height, Rgba([250, 250, 250, 255])),
+        bounds,
+        bounds,
+        std::iter::once(&annotation),
+        fonts,
+    );
 }
 
 pub fn render_selection(
@@ -366,6 +431,17 @@ mod tests {
         )
         .unwrap();
         assert!(output.pixels().any(|pixel| pixel[0] > 0));
+    }
+
+    #[test]
+    fn text_cards_wrap_unicode_and_reject_unbounded_height() {
+        let mut fonts = usvg::fontdb::Database::new();
+        fonts.load_system_fonts();
+        let image = render_text_image(&"😀".repeat(81), &Arc::new(fonts)).unwrap();
+        assert!(image.width() >= 120);
+        assert!(image.height() > 64);
+        assert!(image.pixels().any(|pixel| pixel.0 != [250, 250, 250, 255]));
+        assert!(render_text_image(&"line\n".repeat(61), &Arc::new(Default::default())).is_err());
     }
 
     #[test]

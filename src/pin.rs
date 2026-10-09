@@ -4,6 +4,19 @@ use image::RgbaImage;
 use std::sync::Arc;
 
 pub fn open_pin(image: Arc<RgbaImage>, bounds: Option<Rect>, cx: &mut App) {
+    open_pin_with_text(image, bounds, None, cx);
+}
+
+pub fn open_text_pin(image: Arc<RgbaImage>, text: String, cx: &mut App) {
+    open_pin_with_text(image, None, Some(text.into()), cx);
+}
+
+fn open_pin_with_text(
+    image: Arc<RgbaImage>,
+    bounds: Option<Rect>,
+    text: Option<Arc<str>>,
+    cx: &mut App,
+) {
     let logical_size = bounds
         .map(|bounds| size(px(bounds.size.x), px(bounds.size.y)))
         .unwrap_or_else(|| {
@@ -52,6 +65,7 @@ pub fn open_pin(image: Arc<RgbaImage>, bounds: Option<Rect>, cx: &mut App) {
                     focus,
                     original_size: logical_size,
                     click_through: false,
+                    text,
                 }
             })
         },
@@ -68,6 +82,7 @@ pub struct Pin {
     focus: FocusHandle,
     original_size: Size<Pixels>,
     click_through: bool,
+    text: Option<Arc<str>>,
 }
 
 impl Pin {
@@ -86,6 +101,11 @@ impl Pin {
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => window.remove_window(),
+            "c" if event.keystroke.modifiers.platform && event.keystroke.modifiers.shift => {
+                if let Some(text) = &self.text {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                }
+            }
             "c" if event.keystroke.modifiers.platform => {
                 if let Err(error) = app::copy_image(&self.image, cx) {
                     app::show_error(error, cx);

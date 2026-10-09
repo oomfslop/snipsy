@@ -253,14 +253,25 @@ pub fn paste_image(cx: &mut App) {
             Ok(image) => pin::open_pin(Arc::new(image.to_rgba8()), None, cx),
             Err(error) => show_error(error.to_string(), cx),
         },
-        None => match item.text().and_then(|text| parse_color(&text)) {
-            Some(color) => pin::open_pin(
-                Arc::new(RgbaImage::from_pixel(240, 160, Rgba(color))),
-                None,
-                cx,
-            ),
-            None => show_error("Clipboard has no image or color".into(), cx),
-        },
+        None => {
+            let Some(text) = item.text() else {
+                show_error("Clipboard has no supported content".into(), cx);
+                return;
+            };
+            if let Some(color) = parse_color(&text) {
+                pin::open_pin(
+                    Arc::new(RgbaImage::from_pixel(240, 160, Rgba(color))),
+                    None,
+                    cx,
+                );
+                return;
+            }
+            let fonts = cx.global::<AppState>().fonts.clone();
+            match raster::render_text_image(&text, &fonts) {
+                Ok(image) => pin::open_text_pin(Arc::new(image), text, cx),
+                Err(error) => show_error(error, cx),
+            }
+        }
     }
 }
 
