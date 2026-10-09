@@ -15,7 +15,11 @@ use image::{
 use std::{
     collections::HashMap,
     ffi::OsString,
-    io::{BufReader, Cursor, Write},
+    io::{BufReader, Cursor, Read, Write},
+    os::unix::{
+        ffi::{OsStrExt, OsStringExt},
+        net::{UnixListener, UnixStream},
+    },
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -127,7 +131,158 @@ pub fn parse_startup_action(
     };
 }
 
-pub fn run(startup: StartupAction) {
+fn encode_startup_action(action: &StartupAction) -> Result<Vec<u8>, String> {
+    let mut output = Vec::new();
+    match action {
+        StartupAction::None | StartupAction::Capture => output.push(0),
+        StartupAction::Paste => output.push(1),
+        StartupAction::Plain(text) => {
+            output.push(2);
+            append_startup_bytes(&mut output, text.as_bytes())?;
+        }
+        StartupAction::Files(paths) => {
+            output.push(3);
+            output.extend_from_slice(
+                &u32::try_from(paths.len())
+                    .map_err(|_| "Too many file paths")?
+                    .to_be_bytes(),
+            );
+            for path in paths {
+                append_startup_bytes(&mut output, path.as_os_str().as_bytes())?;
+            }
+        }
+        StartupAction::History => output.push(4),
+        StartupAction::Whiteboard(color) => {
+            output.push(5);
+            output.extend_from_slice(color);
+        }
+    }
+    return Ok(output);
+}
+
+fn append_startup_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<(), String> {
+    output.extend_from_slice(
+        &u32::try_from(value.len())
+            .map_err(|_| "Command value is too large")?
+            .to_be_bytes(),
+    );
+    output.extend_from_slice(value);
+    return Ok(());
+}
+
+fn decode_startup_action(input: &[u8]) -> Result<StartupAction, String> {
+    let (&tag, mut rest) = input.split_first().ok_or("Empty command")?;
+    let action = match tag {
+        0 => StartupAction::Capture,
+        1 => StartupAction::Paste,
+        2 => StartupAction::Plain(
+            String::from_utf8(read_startup_bytes(&mut rest)?.to_vec())
+                .map_err(|error| error.to_string())?,
+        ),
+        3 => {
+            let count = read_startup_u32(&mut rest)? as usize;
+            if count > 10_000 {
+                return Err("Too many file paths".into());
+            }
+            let mut paths = Vec::with_capacity(count);
+            for _ in 0..count {
+                paths.push(PathBuf::from(OsString::from_vec(
+                    read_startup_bytes(&mut rest)?.to_vec(),
+                )));
+            }
+            StartupAction::Files(paths)
+        }
+        4 => StartupAction::History,
+        5 if rest.len() == 4 => StartupAction::Whiteboard(rest.try_into().unwrap()),
+        _ => return Err("Invalid command".into()),
+    };
+    if !rest.is_empty() && tag != 5 {
+        return Err("Unexpected command data".into());
+    }
+    return Ok(action);
+}
+
+fn read_startup_u32(input: &mut &[u8]) -> Result<u32, String> {
+    let bytes = input.get(..4).ok_or("Truncated command")?;
+    *input = &input[4..];
+    return Ok(u32::from_be_bytes(bytes.try_into().unwrap()));
+}
+
+fn read_startup_bytes<'a>(input: &mut &'a [u8]) -> Result<&'a [u8], String> {
+    let length = read_startup_u32(input)? as usize;
+    let bytes = input.get(..length).ok_or("Truncated command")?;
+    *input = &input[length..];
+    return Ok(bytes);
+}
+
+fn connect_instance(
+    startup: &StartupAction,
+) -> Result<Option<async_channel::Receiver<StartupAction>>, String> {
+    let socket = platform::get_app_data_dir()?.join("snipsy.sock");
+    let command = encode_startup_action(startup)?;
+    match UnixStream::connect(&socket) {
+        Ok(mut stream) => {
+            stream
+                .write_all(&command)
+                .map_err(|error| error.to_string())?;
+            return Ok(None);
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    match std::fs::remove_file(&socket) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    let listener = match UnixListener::bind(&socket) {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            let mut stream = UnixStream::connect(&socket).map_err(|error| error.to_string())?;
+            stream
+                .write_all(&command)
+                .map_err(|error| error.to_string())?;
+            return Ok(None);
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let (sender, receiver) = async_channel::unbounded();
+    std::thread::Builder::new()
+        .name("snipsy-command-listener".into())
+        .spawn(move || {
+            for stream in listener.incoming() {
+                let result = stream
+                    .map_err(|error| error.to_string())
+                    .and_then(|stream| {
+                        let mut input = Vec::new();
+                        stream
+                            .take(16 * 1024 * 1024)
+                            .read_to_end(&mut input)
+                            .map_err(|error| error.to_string())?;
+                        decode_startup_action(&input)
+                    });
+                match result {
+                    Ok(action) => {
+                        if sender.send_blocking(action).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => eprintln!("invalid startup command: {error}"),
+                }
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    return Ok(Some(receiver));
+}
+
+pub fn run(startup: StartupAction) -> Result<(), String> {
+    let Some(instance_commands) = connect_instance(&startup)? else {
+        return Ok(());
+    };
     let application = Application::new().with_assets(Icons);
     application.on_reopen(start_capture);
     application.run(move |cx| {
@@ -146,12 +301,10 @@ pub fn run(startup: StartupAction) {
         let paste = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyP);
         let click_through = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyX);
         let toggle_pins_hotkey = HotKey::new(Some(Modifiers::SHIFT), Code::F3);
-        if startup == StartupAction::None {
-            for hotkey in [&capture, &lens, &paste, &click_through, &toggle_pins_hotkey] {
-                if let Err(error) = hotkeys.register(*hotkey) {
-                    eprintln!("could not register shortcut: {error}");
-                    hotkey_error = Some(format!("Could not register a shortcut: {error}"));
-                }
+        for hotkey in [&capture, &lens, &paste, &click_through, &toggle_pins_hotkey] {
+            if let Err(error) = hotkeys.register(*hotkey) {
+                eprintln!("could not register shortcut: {error}");
+                hotkey_error = Some(format!("Could not register a shortcut: {error}"));
             }
         }
         let (sender, receiver) = async_channel::unbounded();
@@ -299,19 +452,30 @@ pub fn run(startup: StartupAction) {
             }
         })
         .detach();
-        cx.defer(move |cx| match startup {
-            StartupAction::None => {}
-            StartupAction::Capture => start_capture(cx),
-            StartupAction::Paste => paste_image(cx),
-            StartupAction::Plain(text) => pin_text(text, cx),
-            StartupAction::Files(paths) => open_paths(paths, cx),
-            StartupAction::History => show_history(cx),
-            StartupAction::Whiteboard(color) => start_whiteboard(color, cx),
-        });
+        cx.spawn(async move |cx| {
+            while let Ok(action) = instance_commands.recv().await {
+                let _ = cx.update(|cx| dispatch_startup(action, cx));
+            }
+        })
+        .detach();
+        cx.defer(move |cx| dispatch_startup(startup, cx));
         if let Some(error) = cx.global::<AppState>().error.clone() {
             cx.defer(move |cx| show_error(error, cx));
         }
     });
+    return Ok(());
+}
+
+fn dispatch_startup(action: StartupAction, cx: &mut App) {
+    match action {
+        StartupAction::None => {}
+        StartupAction::Capture => start_capture(cx),
+        StartupAction::Paste => paste_image(cx),
+        StartupAction::Plain(text) => pin_text(text, cx),
+        StartupAction::Files(paths) => open_paths(paths, cx),
+        StartupAction::History => show_history(cx),
+        StartupAction::Whiteboard(color) => start_whiteboard(color, cx),
+    }
 }
 
 fn show_history(cx: &mut App) {
@@ -1190,16 +1354,17 @@ pub fn show_error(error: String, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        StartupAction, collect_animation_frames, create_quick_save_path, get_history_paths,
-        insert_capture_history, load_history, load_path, load_pin_backups, parse_color,
-        parse_pin_backup, parse_startup_action, remove_pin_backup, should_restore_pin,
-        write_history, write_image, write_pin_backup,
+        StartupAction, collect_animation_frames, create_quick_save_path, decode_startup_action,
+        encode_startup_action, get_history_paths, insert_capture_history, load_history, load_path,
+        load_pin_backups, parse_color, parse_pin_backup, parse_startup_action, remove_pin_backup,
+        should_restore_pin, write_history, write_image, write_pin_backup,
     };
     use crate::{editor::Screenshot, geometry::Rect, pin::PinBackup};
     use glam::{Vec2, vec2};
     use gpui::{Bounds, point, px, size};
     use image::{Delay, Frame, Rgba, RgbaImage};
     use std::path::PathBuf;
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
     #[test]
     fn save_replaces_png_and_rejects_unsupported_formats_without_truncating() {
@@ -1436,6 +1601,25 @@ mod tests {
             parse_startup_action(["transparent-whiteboard".into()]).unwrap(),
             StartupAction::Whiteboard([0, 0, 0, 0])
         );
+    }
+
+    #[test]
+    fn startup_commands_round_trip_over_instance_socket() {
+        let actions = [
+            StartupAction::Capture,
+            StartupAction::Paste,
+            StartupAction::Plain("héllo".into()),
+            StartupAction::Files(vec![PathBuf::from(OsString::from_vec(vec![0xff, b'a']))]),
+            StartupAction::History,
+            StartupAction::Whiteboard([1, 2, 3, 4]),
+        ];
+        for action in actions {
+            assert_eq!(
+                decode_startup_action(&encode_startup_action(&action).unwrap()).unwrap(),
+                action
+            );
+        }
+        assert!(decode_startup_action(&[2, 0, 0, 0, 4, b'a']).is_err());
     }
 
     #[test]
