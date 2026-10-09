@@ -330,7 +330,11 @@ struct PendingCapture {
     finished: bool,
 }
 
-pub fn capture_screen(bounds: Rect, sender: Sender<Result<Screenshot, String>>) {
+pub fn capture_screen(
+    bounds: Rect,
+    shows_cursor: bool,
+    sender: Sender<Result<Screenshot, String>>,
+) {
     let mtm = MainThreadMarker::new().expect("capture starts on the main thread");
     let own_window_ids: Vec<u32> = NSApplication::sharedApplication(mtm)
         .windows()
@@ -401,7 +405,7 @@ pub fn capture_screen(bounds: Rect, sender: Sender<Result<Screenshot, String>>) 
                             config
                                 .setWidth((display_bounds.size.x * display_scale).round() as usize);
                             config.setHeight((display_bounds.size.y * display_scale).round() as usize);
-                            config.setShowsCursor(false);
+                            config.setShowsCursor(shows_cursor);
                             captures.push((filter, config, display_bounds, display_scale));
                         }
                         let order: HashMap<_, _> =

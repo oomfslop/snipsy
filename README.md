@@ -39,6 +39,7 @@ Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When
 | Undo / redo | `⌘Z` / `⌘⇧Z` |
 | Select full display | `⌘A` or `Space` before selecting |
 | Previous / next capture | `,` / `.` |
+| Toggle cursor capture | Backtick (`` ` ``) |
 | Copy magnifier color / show RGB | `C` / hold `Shift` while selecting a capture region |
 | Move pointer before selecting | `W` / `A` / `S` / `D` |
 | Move / grow / shrink selection | Arrow keys / `⌘`+arrows / `⇧`+arrows |

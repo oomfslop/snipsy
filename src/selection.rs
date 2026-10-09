@@ -808,6 +808,13 @@ impl SelectionState {
             self.handle_text_key(event, window, cx);
             return;
         }
+        if key == "`" && self.edit_target.is_none() {
+            let state = cx.global_mut::<AppState>();
+            state.capture_cursor = !state.capture_cursor;
+            self.dismiss(window, cx);
+            cx.defer(app::start_capture);
+            return;
+        }
         if modifiers.platform {
             match key {
                 "z" => self.perform_action(

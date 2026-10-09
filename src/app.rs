@@ -32,6 +32,7 @@ pub struct AppState {
     pub closed_pins: Vec<pin::ClosedPin>,
     pub pins_hidden: bool,
     pub capture_history: Vec<Screenshot>,
+    pub capture_cursor: bool,
     pub history: Vec<(Arc<RgbaImage>, Arc<RenderImage>)>,
     history_persist: async_channel::Sender<Arc<RgbaImage>>,
     pin_persist: async_channel::Sender<pin::PinBackupCommand>,
@@ -171,6 +172,7 @@ pub fn run(startup: StartupAction) {
             closed_pins: Vec::new(),
             pins_hidden: false,
             capture_history: Vec::new(),
+            capture_cursor: false,
             history: Vec::new(),
             history_persist,
             pin_persist,
@@ -397,7 +399,7 @@ pub fn start_capture(cx: &mut App) {
         }
     };
     let (sender, receiver) = async_channel::bounded(1);
-    platform::capture_screen(bounds, sender);
+    platform::capture_screen(bounds, cx.global::<AppState>().capture_cursor, sender);
     let capture = cx.background_executor().spawn(async move {
         match receiver.recv().await {
             Ok(Ok(screenshot)) => {
