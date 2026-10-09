@@ -1,6 +1,7 @@
 mod app;
 mod editor;
 mod geometry;
+mod groups;
 mod history;
 mod icons;
 mod lens;

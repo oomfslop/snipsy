@@ -57,6 +57,7 @@ fn open_pin_with_text(
         text,
         frames,
         None,
+        None,
         true,
         cx,
     );
@@ -70,11 +71,13 @@ fn open_pin_window(
     opacity: f32,
     text: Option<Arc<str>>,
     frames: Option<Arc<Vec<image::Frame>>>,
+    group: Option<usize>,
     id: Option<u128>,
     activate: bool,
     cx: &mut App,
 ) {
     let id = id.unwrap_or_else(create_pin_id);
+    let group = group.unwrap_or(cx.global::<app::AppState>().active_group);
     match cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -126,6 +129,7 @@ fn open_pin_window(
                     text,
                     frames,
                     animation_frame: None,
+                    group,
                     id,
                     backup_task: None,
                     replace_task: None,
@@ -136,6 +140,13 @@ fn open_pin_window(
         Ok(handle) => {
             cx.global_mut::<app::AppState>().pins.push(handle);
             let _ = handle.update(cx, |state, window, cx| state.schedule_backup(window, cx));
+            if group != cx.global::<app::AppState>().active_group
+                || cx.global::<app::AppState>().pins_hidden
+            {
+                let _ = handle.update(cx, |_, window, _| {
+                    platform::set_window_visible(window, false)
+                });
+            }
         }
         Err(error) => app::show_error(error.to_string(), cx),
     }
@@ -159,6 +170,7 @@ pub struct ClosedPin {
     thumbnail_size: Option<Size<Pixels>>,
     text: Option<Arc<str>>,
     frames: Option<Arc<Vec<image::Frame>>>,
+    group: usize,
     clipboard_change_count: i64,
 }
 
@@ -169,7 +181,7 @@ impl ClosedPin {
 }
 
 pub fn restore_pin(pin: ClosedPin, cx: &mut App) {
-    app::set_pins_visible(true, cx);
+    let _ = app::switch_group(pin.group, cx);
     open_pin_window(
         pin.image,
         pin.bounds,
@@ -178,6 +190,7 @@ pub fn restore_pin(pin: ClosedPin, cx: &mut App) {
         pin.opacity,
         pin.text,
         pin.frames,
+        Some(pin.group),
         Some(pin.id),
         true,
         cx,
@@ -193,6 +206,7 @@ pub struct PinBackup {
     pub thumbnail_size: Option<Size<Pixels>>,
     pub text: Option<Arc<str>>,
     pub frames: Option<Arc<Vec<image::Frame>>>,
+    pub group: usize,
 }
 
 pub enum PinBackupCommand {
@@ -209,6 +223,7 @@ pub fn restore_backup(pin: PinBackup, cx: &mut App) {
         pin.opacity,
         pin.text,
         pin.frames,
+        Some(pin.group),
         Some(pin.id),
         false,
         cx,
@@ -226,6 +241,7 @@ pub struct Pin {
     text: Option<Arc<str>>,
     frames: Option<Arc<Vec<image::Frame>>>,
     animation_frame: Option<usize>,
+    group: usize,
     id: u128,
     backup_task: Option<Task<()>>,
     replace_task: Option<Task<()>>,
@@ -246,6 +262,7 @@ impl Pin {
                         thumbnail_size: state.thumbnail_size,
                         text: state.text.clone(),
                         frames: state.frames.clone(),
+                        group: state.group,
                     }),
                     cx,
                 );
@@ -318,6 +335,7 @@ impl Pin {
             thumbnail_size: self.thumbnail_size,
             text: self.text.clone(),
             frames: self.frames.clone(),
+            group: self.group,
             clipboard_change_count: platform::get_clipboard_change_count(),
         });
         if state.closed_pins.len() > 10 {
@@ -326,7 +344,7 @@ impl Pin {
         window.remove_window();
     }
 
-    fn destroy(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn destroy(&self, window: &mut Window, cx: &mut Context<Self>) {
         app::persist_pin(PinBackupCommand::Remove(self.id), cx);
         window.remove_window();
     }
@@ -361,6 +379,10 @@ impl Pin {
         if self.click_through {
             self.toggle_click_through(window, cx);
         }
+    }
+
+    pub fn group(&self) -> usize {
+        return self.group;
     }
 
     fn show_animation_frame(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {

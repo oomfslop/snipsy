@@ -71,6 +71,7 @@ pub enum StatusCommand {
     History,
     Whiteboard,
     Preferences,
+    Groups,
     TogglePins,
     Quit,
 }
@@ -96,6 +97,7 @@ define_class!(
                 3 => StatusCommand::Whiteboard,
                 4 => StatusCommand::TogglePins,
                 5 => StatusCommand::Preferences,
+                6 => StatusCommand::Groups,
                 _ => StatusCommand::Quit,
             };
             let _ = self.ivars().sender.try_send(command);
@@ -122,6 +124,7 @@ pub fn create_status_item(sender: Sender<StatusCommand>) -> StatusItem {
         ("Whiteboard", 3),
         ("Show/hide pins", 4),
         ("Preferences…", 5),
+        ("Image Groups…", 6),
     ] {
         // SAFETY: command: is implemented by the retained target.
         let item = unsafe {
@@ -147,7 +150,7 @@ pub fn create_status_item(sender: Sender<StatusCommand>) -> StatusItem {
             &NSString::new(),
         )
     };
-    quit.setTag(6);
+    quit.setTag(7);
     // SAFETY: The target implements command: and outlives the menu.
     unsafe { quit.setTarget(Some(&target)) };
     menu.addItem(&quit);

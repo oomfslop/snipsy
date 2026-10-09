@@ -63,6 +63,7 @@ Open pins, including animated GIFs, are backed up in Application Support and res
 
 Startup commands: `snipsy snip`, `snipsy paste`, `snipsy paste --plain TEXT`, `snipsy paste --files FILE...`, `snipsy history`, `snipsy whiteboard [--color COLOR]`, and `snipsy transparent-whiteboard`.
 Commands are forwarded to the resident Snipsy process; a command starts the resident process when needed.
+Image groups are available from the menu-bar manager or `create-group`, `switch-group`, `switch-groups`, and `empty-group` commands; new pins enter the active group.
 
 PNG, JPEG, WebP, BMP, TIFF, TGA, ICO, and static GIF exports use an atomic file replacement. The last ten screen captures can be replayed while snipping, and the last ten finished selections persist in Application Support and are available from the History menu.
 

@@ -1,6 +1,6 @@
 use crate::{
-    editor::Screenshot, geometry::Rect, history::History, icons::Icons, pin, platform,
-    preferences::Preferences, raster, selection::SelectionState,
+    editor::Screenshot, geometry::Rect, groups::Groups, history::History, icons::Icons, pin,
+    platform, preferences::Preferences, raster, selection::SelectionState,
 };
 use base64::Engine;
 use global_hotkey::{
@@ -34,6 +34,7 @@ pub struct AppState {
     pub history_window: Option<WindowHandle<History>>,
     pub pin_editor: Option<WindowHandle<SelectionState>>,
     pub preferences_window: Option<WindowHandle<Preferences>>,
+    pub groups_window: Option<WindowHandle<Groups>>,
     pub pins: Vec<WindowHandle<pin::Pin>>,
     pub closed_pins: Vec<pin::ClosedPin>,
     pub pins_hidden: bool,
@@ -46,6 +47,9 @@ pub struct AppState {
     hotkeys: HotkeySettings,
     hotkey_commands: Arc<Mutex<HashMap<u32, Command>>>,
     settings_path: Option<PathBuf>,
+    pub groups: Vec<String>,
+    pub active_group: usize,
+    groups_path: Option<PathBuf>,
     pub error: Option<String>,
 }
 impl Global for AppState {}
@@ -114,6 +118,10 @@ pub enum StartupAction {
     Files(Vec<PathBuf>),
     History,
     Whiteboard([u8; 4]),
+    CreateGroup(Option<String>),
+    SwitchGroup(Option<String>),
+    Groups,
+    EmptyGroup,
 }
 
 actions!(
@@ -124,6 +132,7 @@ actions!(
         ShowHistory,
         ShowWhiteboard,
         ShowPreferences,
+        ShowGroups,
         TogglePinnedImages,
         QuitSnipsy
     ]
@@ -179,8 +188,24 @@ pub fn parse_startup_action(
         "transparent-whiteboard" if args.len() == 1 => {
             Ok(StartupAction::Whiteboard([0, 0, 0, 0]))
         }
+        "create-group" => Ok(StartupAction::CreateGroup((args.len() > 1).then(|| {
+            args[1..]
+                .iter()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ")
+        }))),
+        "switch-group" => Ok(StartupAction::SwitchGroup((args.len() > 1).then(|| {
+            args[1..]
+                .iter()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ")
+        }))),
+        "switch-groups" | "show-group-manager" if args.len() == 1 => Ok(StartupAction::Groups),
+        "empty-group" if args.len() == 1 => Ok(StartupAction::EmptyGroup),
         _ => Err(
-            "Usage: snipsy [snip | paste [--clipboard | --plain TEXT | --files FILE...] | history | whiteboard [--color COLOR] | transparent-whiteboard]".into(),
+            "Usage: snipsy [snip | paste [--clipboard | --plain TEXT | --files FILE...] | history | whiteboard [--color COLOR] | transparent-whiteboard | create-group [NAME] | switch-group [NAME] | switch-groups | empty-group]".into(),
         ),
     };
 }
@@ -210,6 +235,16 @@ fn encode_startup_action(action: &StartupAction) -> Result<Vec<u8>, String> {
             output.push(5);
             output.extend_from_slice(color);
         }
+        StartupAction::CreateGroup(name) => {
+            output.push(6);
+            append_startup_bytes(&mut output, name.as_deref().unwrap_or_default().as_bytes())?;
+        }
+        StartupAction::SwitchGroup(name) => {
+            output.push(7);
+            append_startup_bytes(&mut output, name.as_deref().unwrap_or_default().as_bytes())?;
+        }
+        StartupAction::Groups => output.push(8),
+        StartupAction::EmptyGroup => output.push(9),
     }
     return Ok(output);
 }
@@ -248,6 +283,18 @@ fn decode_startup_action(input: &[u8]) -> Result<StartupAction, String> {
         }
         4 => StartupAction::History,
         5 if rest.len() == 4 => StartupAction::Whiteboard(rest.try_into().unwrap()),
+        6 => {
+            let name = String::from_utf8(read_startup_bytes(&mut rest)?.to_vec())
+                .map_err(|error| error.to_string())?;
+            StartupAction::CreateGroup((!name.is_empty()).then_some(name))
+        }
+        7 => {
+            let name = String::from_utf8(read_startup_bytes(&mut rest)?.to_vec())
+                .map_err(|error| error.to_string())?;
+            StartupAction::SwitchGroup((!name.is_empty()).then_some(name))
+        }
+        8 => StartupAction::Groups,
+        9 => StartupAction::EmptyGroup,
         _ => return Err("Invalid command".into()),
     };
     if !rest.is_empty() && tag != 5 {
@@ -396,6 +443,59 @@ fn write_hotkey_settings(path: &Path, settings: HotkeySettings) -> Result<(), St
     return Ok(());
 }
 
+fn load_groups(path: &Path) -> Result<(Vec<String>, usize), String> {
+    let input = match std::fs::read_to_string(path) {
+        Ok(input) => input,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((vec!["Default".into()], 0));
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut groups = Vec::new();
+    let mut active = 0;
+    for line in input.lines() {
+        if let Some(value) = line.strip_prefix("active=") {
+            active = value.parse::<usize>().map_err(|error| error.to_string())?;
+        } else if let Some(value) = line.strip_prefix("group=") {
+            let name = String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(value)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            if name.is_empty() || name.len() > 128 || groups.len() == 64 {
+                return Err("Invalid image group".into());
+            }
+            groups.push(name);
+        } else {
+            return Err("Invalid image-group settings".into());
+        }
+    }
+    if groups.is_empty() || active >= groups.len() {
+        return Err("Invalid active image group".into());
+    }
+    return Ok((groups, active));
+}
+
+fn write_groups(path: &Path, groups: &[String], active: usize) -> Result<(), String> {
+    let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))
+        .map_err(|error| error.to_string())?;
+    writeln!(file, "active={active}").map_err(|error| error.to_string())?;
+    for group in groups {
+        writeln!(
+            file,
+            "group={}",
+            base64::engine::general_purpose::STANDARD.encode(group.as_bytes())
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    file.as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    file.persist(path).map_err(|error| error.to_string())?;
+    return Ok(());
+}
+
 fn get_hotkey_entries(settings: HotkeySettings) -> [(HotKey, Command); 4] {
     return [
         (settings.capture, Command::Capture),
@@ -489,6 +589,17 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
             }
             None => HotkeySettings::default(),
         };
+        let groups_path = data_directory
+            .as_ref()
+            .map(|directory| directory.join("groups.conf"));
+        let (groups, active_group) = match groups_path.as_deref().map(load_groups) {
+            Some(Ok(groups)) => groups,
+            Some(Err(error)) => {
+                hotkey_error = Some(format!("Could not load image groups: {error}"));
+                (vec!["Default".into()], 0)
+            }
+            None => (vec!["Default".into()], 0),
+        };
         let (history_persist, history_receiver) = async_channel::unbounded();
         let (pin_persist, pin_receiver) = async_channel::unbounded();
         let hotkeys = GlobalHotKeyManager::new().expect("could not create global shortcuts");
@@ -529,6 +640,7 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
             history_window: None,
             pin_editor: None,
             preferences_window: None,
+            groups_window: None,
             pins: Vec::new(),
             closed_pins: Vec::new(),
             pins_hidden: false,
@@ -541,6 +653,9 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
             hotkeys: hotkey_settings,
             hotkey_commands,
             settings_path,
+            groups,
+            active_group,
+            groups_path,
             error: hotkey_error,
         });
         if let Some(directory) = data_directory {
@@ -608,6 +723,17 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
                 let loaded = load.await;
                 let _ = cx.update(|cx| match loaded {
                     Ok(pins) => {
+                        if let Some(max_group) = pins.iter().map(|pin| pin.group).max() {
+                            let state = cx.global_mut::<AppState>();
+                            while state.groups.len() <= max_group && state.groups.len() < 64 {
+                                state
+                                    .groups
+                                    .push(format!("Group {}", state.groups.len() + 1));
+                            }
+                            if let Some(path) = &state.groups_path {
+                                let _ = write_groups(path, &state.groups, state.active_group);
+                            }
+                        }
                         for pin in pins {
                             pin::restore_backup(pin, cx);
                         }
@@ -622,6 +748,7 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
         cx.on_action(|_: &ShowHistory, cx| show_history(cx));
         cx.on_action(|_: &ShowWhiteboard, cx| start_whiteboard([255; 4], cx));
         cx.on_action(|_: &ShowPreferences, cx| show_preferences(cx));
+        cx.on_action(|_: &ShowGroups, cx| show_groups(cx));
         cx.on_action(|_: &TogglePinnedImages, cx| toggle_pins(cx));
         cx.on_action(|_: &QuitSnipsy, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", QuitSnipsy, None)]);
@@ -633,6 +760,7 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
                 MenuItem::action("History", ShowHistory),
                 MenuItem::action("Whiteboard", ShowWhiteboard),
                 MenuItem::action("Preferences…", ShowPreferences),
+                MenuItem::action("Image Groups…", ShowGroups),
                 MenuItem::action("Show/hide pins", TogglePinnedImages),
                 MenuItem::separator(),
                 MenuItem::action("Quit Snipsy", QuitSnipsy),
@@ -665,6 +793,7 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
                     platform::StatusCommand::History => show_history(cx),
                     platform::StatusCommand::Whiteboard => start_whiteboard([255; 4], cx),
                     platform::StatusCommand::Preferences => show_preferences(cx),
+                    platform::StatusCommand::Groups => show_groups(cx),
                     platform::StatusCommand::TogglePins => toggle_pins(cx),
                     platform::StatusCommand::Quit => cx.quit(),
                 });
@@ -688,6 +817,29 @@ fn dispatch_startup(action: StartupAction, cx: &mut App) {
         StartupAction::Files(paths) => open_paths(paths, cx),
         StartupAction::History => show_history(cx),
         StartupAction::Whiteboard(color) => start_whiteboard(color, cx),
+        StartupAction::CreateGroup(name) => {
+            if let Err(error) = create_group(name, cx) {
+                show_error(error, cx);
+            }
+        }
+        StartupAction::SwitchGroup(name) => {
+            let result = if let Some(name) = name {
+                let (groups, _) = get_groups(cx);
+                groups
+                    .iter()
+                    .position(|group| group == &name)
+                    .ok_or_else(|| "Image group does not exist".into())
+                    .and_then(|index| switch_group(index, cx))
+            } else {
+                let (groups, active) = get_groups(cx);
+                switch_group((active + 1) % groups.len(), cx)
+            };
+            if let Err(error) = result {
+                show_error(error, cx);
+            }
+        }
+        StartupAction::Groups => show_groups(cx),
+        StartupAction::EmptyGroup => empty_active_group(cx),
     }
 }
 
@@ -759,6 +911,40 @@ fn show_preferences(cx: &mut App) {
     }
 }
 
+fn show_groups(cx: &mut App) {
+    if let Some(handle) = cx.global::<AppState>().groups_window {
+        if handle
+            .update(cx, |_, window, cx| {
+                cx.activate(true);
+                window.activate_window();
+            })
+            .is_ok()
+        {
+            return;
+        }
+    }
+    cx.activate(true);
+    match cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(360.0), px(420.0)),
+                cx,
+            ))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Image Groups".into()),
+                ..Default::default()
+            }),
+            window_min_size: Some(size(px(280.0), px(240.0))),
+            ..Default::default()
+        },
+        |window, cx| cx.new(|cx| Groups::new(window, cx)),
+    ) {
+        Ok(handle) => cx.global_mut::<AppState>().groups_window = Some(handle),
+        Err(error) => show_error(error.to_string(), cx),
+    }
+}
+
 fn start_whiteboard(color: [u8; 4], cx: &mut App) {
     let bounds = match platform::get_desktop_bounds() {
         Ok(bounds) => bounds,
@@ -821,12 +1007,13 @@ fn toggle_pins(cx: &mut App) {
 }
 
 pub fn set_pins_visible(visible: bool, cx: &mut App) {
+    let active_group = cx.global::<AppState>().active_group;
     let pins = std::mem::take(&mut cx.global_mut::<AppState>().pins);
     let live = pins
         .into_iter()
         .filter(|pin| {
-            pin.update(cx, |_, window, _| {
-                platform::set_window_visible(window, visible)
+            pin.update(cx, |state, window, _| {
+                platform::set_window_visible(window, visible && state.group() == active_group)
             })
             .is_ok()
         })
@@ -834,6 +1021,79 @@ pub fn set_pins_visible(visible: bool, cx: &mut App) {
     let state = cx.global_mut::<AppState>();
     state.pins = live;
     state.pins_hidden = !visible;
+}
+
+pub fn get_groups(cx: &App) -> (Vec<String>, usize) {
+    let state = cx.global::<AppState>();
+    return (state.groups.clone(), state.active_group);
+}
+
+pub fn create_group(name: Option<String>, cx: &mut App) -> Result<(), String> {
+    let state = cx.global_mut::<AppState>();
+    if state.groups.len() == 64 {
+        return Err("Maximum image-group count reached".into());
+    }
+    let name = name.unwrap_or_else(|| format!("Group {}", state.groups.len() + 1));
+    if name.trim().is_empty() || name.len() > 128 || state.groups.contains(&name) {
+        return Err("Image-group name must be unique and 1–128 bytes".into());
+    }
+    state.groups.push(name);
+    let index = state.groups.len() - 1;
+    if let Some(path) = &state.groups_path {
+        write_groups(path, &state.groups, index)?;
+    }
+    state.active_group = index;
+    set_active_group_visibility(cx);
+    return Ok(());
+}
+
+pub fn switch_group(index: usize, cx: &mut App) -> Result<(), String> {
+    let state = cx.global_mut::<AppState>();
+    if index >= state.groups.len() {
+        return Err("Image group does not exist".into());
+    }
+    if let Some(path) = &state.groups_path {
+        write_groups(path, &state.groups, index)?;
+    }
+    state.active_group = index;
+    set_active_group_visibility(cx);
+    return Ok(());
+}
+
+fn set_active_group_visibility(cx: &mut App) {
+    let active = cx.global::<AppState>().active_group;
+    let pins = std::mem::take(&mut cx.global_mut::<AppState>().pins);
+    let live = pins
+        .into_iter()
+        .filter(|pin| {
+            pin.update(cx, |state, window, _| {
+                platform::set_window_visible(window, state.group() == active)
+            })
+            .is_ok()
+        })
+        .collect();
+    let state = cx.global_mut::<AppState>();
+    state.pins = live;
+    state.pins_hidden = false;
+}
+
+fn empty_active_group(cx: &mut App) {
+    let active = cx.global::<AppState>().active_group;
+    let pins = std::mem::take(&mut cx.global_mut::<AppState>().pins);
+    let mut live = Vec::new();
+    for pin in pins {
+        match pin.update(cx, |state, window, cx| {
+            if state.group() == active {
+                state.destroy(window, cx);
+                return false;
+            }
+            return true;
+        }) {
+            Ok(true) => live.push(pin),
+            Ok(false) | Err(_) => {}
+        }
+    }
+    cx.global_mut::<AppState>().pins = live;
 }
 
 pub fn persist_pin(command: pin::PinBackupCommand, cx: &mut App) {
@@ -1484,7 +1744,7 @@ fn write_pin_backup(
         .map(|text| base64::engine::general_purpose::STANDARD.encode(text.as_bytes()))
         .unwrap_or_default();
     let metadata = format!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         f32::from(pin.bounds.origin.x),
         f32::from(pin.bounds.origin.y),
         f32::from(pin.bounds.size.width),
@@ -1496,6 +1756,7 @@ fn write_pin_backup(
         thumbnail.1,
         text,
         u8::from(pin.frames.is_some()),
+        pin.group,
     );
     let mut file = tempfile::NamedTempFile::new_in(directory).map_err(|error| error.to_string())?;
     file.write_all(metadata.as_bytes())
@@ -1549,8 +1810,8 @@ fn load_pin_backups(directory: &Path) -> Result<Vec<pin::PinBackup>, String> {
 }
 
 fn parse_pin_backup(id: u128, metadata: &str, directory: &Path) -> Result<pin::PinBackup, String> {
-    let fields = metadata.splitn(11, '\t').collect::<Vec<_>>();
-    if !matches!(fields.len(), 10 | 11) {
+    let fields = metadata.splitn(12, '\t').collect::<Vec<_>>();
+    if !matches!(fields.len(), 10 | 11 | 12) {
         return Err("invalid metadata".into());
     }
     let numbers = fields[..9]
@@ -1573,6 +1834,14 @@ fn parse_pin_backup(id: u128, metadata: &str, directory: &Path) -> Result<pin::P
         .is_some_and(|value| !matches!(*value, "0" | "1"))
     {
         return Err("invalid animation flag".into());
+    }
+    let group = fields
+        .get(11)
+        .map(|value| value.parse::<usize>().map_err(|error| error.to_string()))
+        .transpose()?
+        .unwrap_or(0);
+    if group >= 64 {
+        return Err("invalid image group".into());
     }
     let content =
         load_image_path(&directory.join(format!("{id}.{}", if animated { "gif" } else { "png" })))?;
@@ -1601,6 +1870,7 @@ fn parse_pin_backup(id: u128, metadata: &str, directory: &Path) -> Result<pin::P
         thumbnail_size: (numbers[7] > 0.0).then_some(size(px(numbers[7]), px(numbers[8]))),
         text,
         frames: content.frames,
+        group,
     });
 }
 
@@ -1615,9 +1885,9 @@ mod tests {
     use super::{
         HotkeySettings, StartupAction, collect_animation_frames, create_quick_save_path,
         decode_startup_action, encode_startup_action, get_history_paths, insert_capture_history,
-        load_history, load_hotkey_settings, load_path, load_pin_backups, parse_color,
+        load_groups, load_history, load_hotkey_settings, load_path, load_pin_backups, parse_color,
         parse_pin_backup, parse_startup_action, remove_pin_backup, should_restore_pin,
-        validate_hotkey_settings, write_history, write_hotkey_settings, write_image,
+        validate_hotkey_settings, write_groups, write_history, write_hotkey_settings, write_image,
         write_pin_backup,
     };
     use crate::{editor::Screenshot, geometry::Rect, pin::PinBackup};
@@ -1768,6 +2038,7 @@ mod tests {
             thumbnail_size: Some(size(px(160.0), px(90.0))),
             text: Some(std::sync::Arc::from("héllo")),
             frames: None,
+            group: 1,
         };
         let mut images = std::collections::HashMap::new();
         write_pin_backup(directory.path(), &pin, &mut images).unwrap();
@@ -1776,6 +2047,7 @@ mod tests {
         assert_eq!(loaded[0].id, 42);
         assert_eq!(&*loaded[0].image, &*image);
         assert_eq!(loaded[0].text.as_deref(), Some("héllo"));
+        assert_eq!(loaded[0].group, 1);
         assert_eq!(f32::from(loaded[0].bounds.origin.x), -20.0);
         assert_eq!(loaded[0].opacity, 0.6);
         assert!(parse_pin_backup(42, "0\t0\t0\t0\t2\t0\t0\t0\t0\t", directory.path()).is_err());
@@ -1815,6 +2087,7 @@ mod tests {
             thumbnail_size: None,
             text: None,
             frames: content.frames,
+            group: 0,
         };
         write_pin_backup(
             directory.path(),
@@ -1873,6 +2146,10 @@ mod tests {
             StartupAction::Files(vec![PathBuf::from(OsString::from_vec(vec![0xff, b'a']))]),
             StartupAction::History,
             StartupAction::Whiteboard([1, 2, 3, 4]),
+            StartupAction::CreateGroup(Some("Work".into())),
+            StartupAction::SwitchGroup(None),
+            StartupAction::Groups,
+            StartupAction::EmptyGroup,
         ];
         for action in actions {
             assert_eq!(
@@ -1906,5 +2183,16 @@ mod tests {
         let mut reserved = settings;
         reserved.paste = "super+shift+KeyL".parse().unwrap();
         assert!(validate_hotkey_settings(reserved).is_err());
+    }
+
+    #[test]
+    fn image_groups_round_trip_names_and_active_group() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("groups.conf");
+        let groups = vec!["Default".into(), "レビュー".into()];
+        write_groups(&path, &groups, 1).unwrap();
+        assert_eq!(load_groups(&path).unwrap(), (groups, 1));
+        std::fs::write(&path, "active=2\ngroup=RGVmYXVsdA==\n").unwrap();
+        assert!(load_groups(&path).is_err());
     }
 }
