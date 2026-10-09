@@ -17,6 +17,8 @@ pub struct AppState {
     pub selection: Option<WindowHandle<SelectionState>>,
     pub cached_selection: Option<WindowHandle<SelectionState>>,
     pub pins: Vec<WindowHandle<pin::Pin>>,
+    pub closed_pins: Vec<pin::ClosedPin>,
+    pub pins_hidden: bool,
     pub capture_history: Vec<Screenshot>,
     pub history: Vec<(Arc<RgbaImage>, Arc<RenderImage>)>,
     pub error: Option<String>,
@@ -27,9 +29,13 @@ enum Command {
     Capture,
     Paste,
     ToggleClickThrough,
+    TogglePins,
 }
 
-actions!(snipsy, [CaptureScreen, PinClipboard, QuitSnipsy]);
+actions!(
+    snipsy,
+    [CaptureScreen, PinClipboard, TogglePinnedImages, QuitSnipsy]
+);
 
 pub fn run() {
     let application = Application::new().with_assets(Icons);
@@ -44,7 +50,8 @@ pub fn run() {
         let lens = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyL);
         let paste = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyP);
         let click_through = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyX);
-        for hotkey in [&capture, &lens, &paste, &click_through] {
+        let toggle_pins_hotkey = HotKey::new(Some(Modifiers::SHIFT), Code::F3);
+        for hotkey in [&capture, &lens, &paste, &click_through, &toggle_pins_hotkey] {
             if let Err(error) = hotkeys.register(*hotkey) {
                 eprintln!("could not register shortcut: {error}");
                 hotkey_error = Some(format!("Could not register a shortcut: {error}"));
@@ -61,6 +68,8 @@ pub fn run() {
                 Command::Paste
             } else if event.id == click_through.id() {
                 Command::ToggleClickThrough
+            } else if event.id == toggle_pins_hotkey.id() {
+                Command::TogglePins
             } else {
                 return;
             };
@@ -76,12 +85,15 @@ pub fn run() {
             selection: None,
             cached_selection: None,
             pins: Vec::new(),
+            closed_pins: Vec::new(),
+            pins_hidden: false,
             capture_history: Vec::new(),
             history: Vec::new(),
             error: hotkey_error,
         });
         cx.on_action(|_: &CaptureScreen, cx| start_capture(cx));
         cx.on_action(|_: &PinClipboard, cx| paste_image(cx));
+        cx.on_action(|_: &TogglePinnedImages, cx| toggle_pins(cx));
         cx.on_action(|_: &QuitSnipsy, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", QuitSnipsy, None)]);
         cx.set_menus(vec![Menu {
@@ -89,6 +101,7 @@ pub fn run() {
             items: vec![
                 MenuItem::action("New screenshot", CaptureScreen),
                 MenuItem::action("Pin clipboard", PinClipboard),
+                MenuItem::action("Show/hide pins", TogglePinnedImages),
                 MenuItem::separator(),
                 MenuItem::action("Quit Snipsy", QuitSnipsy),
             ],
@@ -99,6 +112,7 @@ pub fn run() {
                     Command::Capture => start_capture(cx),
                     Command::Paste => paste_image(cx),
                     Command::ToggleClickThrough => toggle_pin_click_through(cx),
+                    Command::TogglePins => toggle_pins(cx),
                 }) {
                     eprintln!("could not dispatch shortcut: {error}");
                 }
@@ -109,6 +123,27 @@ pub fn run() {
             cx.defer(move |cx| show_error(error, cx));
         }
     });
+}
+
+fn toggle_pins(cx: &mut App) {
+    let visible = cx.global::<AppState>().pins_hidden;
+    set_pins_visible(visible, cx);
+}
+
+pub fn set_pins_visible(visible: bool, cx: &mut App) {
+    let pins = std::mem::take(&mut cx.global_mut::<AppState>().pins);
+    let live = pins
+        .into_iter()
+        .filter(|pin| {
+            pin.update(cx, |_, window, _| {
+                platform::set_window_visible(window, visible)
+            })
+            .is_ok()
+        })
+        .collect();
+    let state = cx.global_mut::<AppState>();
+    state.pins = live;
+    state.pins_hidden = !visible;
 }
 
 fn toggle_pin_click_through(cx: &mut App) {
@@ -237,6 +272,23 @@ pub fn start_capture(cx: &mut App) {
 }
 
 pub fn paste_image(cx: &mut App) {
+    let clipboard_change_count = platform::get_clipboard_change_count();
+    let closed = {
+        let state = cx.global_mut::<AppState>();
+        should_restore_pin(
+            state
+                .closed_pins
+                .last()
+                .map(pin::ClosedPin::clipboard_change_count),
+            clipboard_change_count,
+        )
+        .then(|| state.closed_pins.pop())
+        .flatten()
+    };
+    if let Some(closed) = closed {
+        pin::restore_pin(closed, cx);
+        return;
+    }
     let paths = platform::get_clipboard_paths();
     if !paths.is_empty() {
         open_paths(paths, cx);
@@ -278,6 +330,10 @@ pub fn paste_image(cx: &mut App) {
             }
         }
     }
+}
+
+fn should_restore_pin(closed_change_count: Option<i64>, clipboard_change_count: i64) -> bool {
+    return closed_change_count == Some(clipboard_change_count);
 }
 
 pub fn open_paths(paths: Vec<PathBuf>, cx: &mut App) {
@@ -459,7 +515,7 @@ pub fn show_error(error: String, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_path, parse_color, write_image};
+    use super::{load_path, parse_color, should_restore_pin, write_image};
     use image::{Rgba, RgbaImage};
 
     #[test]
@@ -509,5 +565,12 @@ mod tests {
         fonts.load_system_fonts();
         let (_, text) = load_path(&file_path, &std::sync::Arc::new(fonts)).unwrap();
         assert_eq!(text.as_deref(), Some(file_path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn closed_pins_restore_only_before_the_clipboard_changes() {
+        assert!(should_restore_pin(Some(7), 7));
+        assert!(!should_restore_pin(Some(7), 8));
+        assert!(!should_restore_pin(None, 7));
     }
 }

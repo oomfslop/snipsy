@@ -124,6 +124,10 @@ pub fn get_clipboard_paths() -> Vec<PathBuf> {
         .collect();
 }
 
+pub fn get_clipboard_change_count() -> i64 {
+    return NSPasteboard::generalPasteboard().changeCount() as i64;
+}
+
 pub fn get_capture_bounds() -> Result<Rect, String> {
     if !CGPreflightScreenCaptureAccess() {
         CGRequestScreenCaptureAccess();
@@ -192,6 +196,15 @@ pub fn is_window_under_pointer(window: &gpui::Window) -> bool {
 
 pub fn set_window_click_through(window: &gpui::Window, enabled: bool) {
     get_native_window(window).setIgnoresMouseEvents(enabled);
+}
+
+pub fn set_window_visible(window: &gpui::Window, visible: bool) {
+    let window = get_native_window(window);
+    if visible {
+        window.orderFrontRegardless();
+    } else {
+        window.orderOut(None);
+    }
 }
 
 pub fn configure_overlay(window: &gpui::Window, bounds: Rect, resizable: bool) {

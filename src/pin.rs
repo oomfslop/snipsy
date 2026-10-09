@@ -17,6 +17,9 @@ fn open_pin_with_text(
     text: Option<Arc<str>>,
     cx: &mut App,
 ) {
+    if cx.global::<app::AppState>().pins_hidden {
+        app::set_pins_visible(true, cx);
+    }
     let logical_size = bounds
         .map(|bounds| size(px(bounds.size.x), px(bounds.size.y)))
         .unwrap_or_else(|| {
@@ -31,6 +34,17 @@ fn open_pin_with_text(
     let bounds = bounds
         .map(|bounds| Bounds::new(point(px(bounds.pos.x), px(bounds.pos.y)), logical_size))
         .unwrap_or_else(|| Bounds::centered(None, logical_size, cx));
+    open_pin_window(image, bounds, logical_size, 1.0, text, cx);
+}
+
+fn open_pin_window(
+    image: Arc<RgbaImage>,
+    bounds: Bounds<Pixels>,
+    original_size: Size<Pixels>,
+    opacity: f32,
+    text: Option<Arc<str>>,
+    cx: &mut App,
+) {
     match cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -61,9 +75,9 @@ fn open_pin_with_text(
                 Pin {
                     preview: raster::create_render_image(&image),
                     image,
-                    opacity: 1.0,
+                    opacity,
                     focus,
-                    original_size: logical_size,
+                    original_size,
                     click_through: false,
                     text,
                 }
@@ -73,6 +87,33 @@ fn open_pin_with_text(
         Ok(handle) => cx.global_mut::<app::AppState>().pins.push(handle),
         Err(error) => app::show_error(error.to_string(), cx),
     }
+}
+
+pub struct ClosedPin {
+    image: Arc<RgbaImage>,
+    bounds: Bounds<Pixels>,
+    opacity: f32,
+    original_size: Size<Pixels>,
+    text: Option<Arc<str>>,
+    clipboard_change_count: i64,
+}
+
+impl ClosedPin {
+    pub fn clipboard_change_count(&self) -> i64 {
+        return self.clipboard_change_count;
+    }
+}
+
+pub fn restore_pin(pin: ClosedPin, cx: &mut App) {
+    app::set_pins_visible(true, cx);
+    open_pin_window(
+        pin.image,
+        pin.bounds,
+        pin.original_size,
+        pin.opacity,
+        pin.text,
+        cx,
+    );
 }
 
 pub struct Pin {
@@ -86,6 +127,22 @@ pub struct Pin {
 }
 
 impl Pin {
+    fn close(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let state = cx.global_mut::<app::AppState>();
+        state.closed_pins.push(ClosedPin {
+            image: self.image.clone(),
+            bounds: window.bounds(),
+            opacity: self.opacity,
+            original_size: self.original_size,
+            text: self.text.clone(),
+            clipboard_change_count: platform::get_clipboard_change_count(),
+        });
+        if state.closed_pins.len() > 10 {
+            state.closed_pins.remove(0);
+        }
+        window.remove_window();
+    }
+
     pub fn toggle_click_through(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.click_through = !self.click_through;
         platform::set_window_click_through(window, self.click_through);
@@ -100,7 +157,9 @@ impl Pin {
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
-            "escape" => window.remove_window(),
+            "escape" if event.keystroke.modifiers.shift => window.remove_window(),
+            "escape" => self.close(window, cx),
+            "w" if event.keystroke.modifiers.platform => self.close(window, cx),
             "c" if event.keystroke.modifiers.platform && event.keystroke.modifiers.shift => {
                 if let Some(text) = &self.text {
                     cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
@@ -180,7 +239,16 @@ impl Render for Pin {
             .opacity(self.opacity)
             .cursor(CursorStyle::OpenHand)
             .on_key_down(cx.listener(Self::handle_key))
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|state, event: &MouseDownEvent, window, cx| {
+                    if event.click_count >= 2 {
+                        state.close(window, cx);
+                    } else {
+                        window.start_window_move();
+                    }
+                }),
+            )
             .on_drop(cx.listener(|_, paths: &ExternalPaths, _, cx| {
                 app::open_paths(paths.paths().to_vec(), cx)
             }))
@@ -237,7 +305,7 @@ impl Render for Pin {
                                         }
                                     }
                                     1 => app::save_image(state.image.clone(), cx),
-                                    _ => window.remove_window(),
+                                    _ => state.close(window, cx),
                                 }))
                         },
                     )),
