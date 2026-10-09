@@ -12,10 +12,11 @@ use objc2_app_kit::{
     NSPopUpMenuWindowLevel, NSSavePanel, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView,
     NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
-use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType};
+use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType, CGPoint};
 use objc2_core_graphics::{
     CGImage, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
-    CGWindowListCopyWindowInfo, CGWindowListOption, kCGColorSpaceSRGB, kCGWindowNumber,
+    CGWarpMouseCursorPosition, CGWindowListCopyWindowInfo, CGWindowListOption, kCGColorSpaceSRGB,
+    kCGWindowNumber,
 };
 use objc2_foundation::{
     NSArray, NSError, NSFileManager, NSObject, NSObjectProtocol, NSOperationQueue, NSPoint, NSRect,
@@ -230,6 +231,14 @@ pub fn move_window(window: &gpui::Window, x: f32, y: f32) {
     let window = get_native_window(window);
     let origin = window.frame().origin;
     window.setFrameOrigin(NSPoint::new(origin.x + x as f64, origin.y - y as f64));
+}
+
+pub fn move_pointer(position: glam::Vec2) -> Result<(), String> {
+    let error = CGWarpMouseCursorPosition(CGPoint::new(position.x as f64, position.y as f64));
+    if error == objc2_core_graphics::CGError::Success {
+        return Ok(());
+    }
+    return Err(format!("Could not move pointer: {}", error.0));
 }
 
 pub fn configure_overlay(window: &gpui::Window, bounds: Rect, resizable: bool) {

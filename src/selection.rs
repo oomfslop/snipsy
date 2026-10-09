@@ -706,6 +706,20 @@ impl SelectionState {
             }
             return;
         }
+        if self.selection.is_none() && matches!(key, "w" | "a" | "s" | "d") {
+            let delta = match key {
+                "w" => vec2(0.0, -1.0),
+                "a" => vec2(-1.0, 0.0),
+                "s" => vec2(0.0, 1.0),
+                _ => vec2(1.0, 0.0),
+            };
+            self.pointer = create_moved_pointer(self.pointer, delta, self.bounds.size);
+            if let Err(error) = crate::platform::move_pointer(self.bounds.pos + self.pointer) {
+                self.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
         let tool = match key {
             "v" => Some(Tool::Select),
             "r" => Some(Tool::Rectangle),
@@ -2687,8 +2701,25 @@ fn get_capture_history_index(
     return None;
 }
 
+fn create_moved_pointer(pointer: Vec2, delta: Vec2, bounds: Vec2) -> Vec2 {
+    return (pointer + delta).clamp(Vec2::ZERO, bounds.max(Vec2::ZERO));
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn keyboard_pointer_movement_stays_on_screen() {
+        let bounds = vec2(100.0, 80.0);
+        assert_eq!(
+            super::create_moved_pointer(vec2(0.0, 0.0), vec2(-1.0, -1.0), bounds),
+            vec2(0.0, 0.0)
+        );
+        assert_eq!(
+            super::create_moved_pointer(bounds, vec2(1.0, 1.0), bounds),
+            bounds
+        );
+    }
+
     #[test]
     fn capture_history_wraps_and_skips_other_displays() {
         let display = Rect {
