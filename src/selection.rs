@@ -762,19 +762,32 @@ impl SelectionState {
             }
             "left" | "right" | "up" | "down" => {
                 if let Some(selection) = self.selection {
-                    let step = if modifiers.shift { 10.0 } else { 1.0 };
-                    let delta = match key {
-                        "left" => vec2(-step, 0.0),
-                        "right" => vec2(step, 0.0),
-                        "up" => vec2(0.0, -step),
-                        _ => vec2(0.0, step),
-                    };
                     if let Some(index) = self.editor.selected {
+                        let step = if modifiers.shift { 10.0 } else { 1.0 };
+                        let delta = match key {
+                            "left" => vec2(-step, 0.0),
+                            "right" => vec2(step, 0.0),
+                            "up" => vec2(0.0, -step),
+                            _ => vec2(0.0, step),
+                        };
                         self.editor.record_change();
                         for point in &mut self.editor.layers[index].points {
                             *point += delta;
                         }
+                    } else if modifiers.platform || modifiers.shift {
+                        self.selection = Some(create_keyboard_resized_selection(
+                            selection,
+                            key,
+                            modifiers.platform,
+                            self.bounds.size,
+                        ));
                     } else {
+                        let delta = match key {
+                            "left" => vec2(-1.0, 0.0),
+                            "right" => vec2(1.0, 0.0),
+                            "up" => vec2(0.0, -1.0),
+                            _ => vec2(0.0, 1.0),
+                        };
                         self.selection = Some(create_moved_selection(
                             selection,
                             Vec2::ZERO,
@@ -2705,6 +2718,38 @@ fn create_moved_pointer(pointer: Vec2, delta: Vec2, bounds: Vec2) -> Vec2 {
     return (pointer + delta).clamp(Vec2::ZERO, bounds.max(Vec2::ZERO));
 }
 
+fn create_keyboard_resized_selection(
+    mut selection: Rect,
+    key: &str,
+    grow: bool,
+    bounds: Vec2,
+) -> Rect {
+    let amount = if grow { 1.0 } else { -1.0 };
+    match key {
+        "left" => {
+            let next =
+                (selection.pos.x - amount).clamp(0.0, selection.pos.x + selection.size.x - 2.0);
+            selection.size.x += selection.pos.x - next;
+            selection.pos.x = next;
+        }
+        "right" => {
+            selection.size.x =
+                (selection.size.x + amount).clamp(2.0, (bounds.x - selection.pos.x).max(2.0));
+        }
+        "up" => {
+            let next =
+                (selection.pos.y - amount).clamp(0.0, selection.pos.y + selection.size.y - 2.0);
+            selection.size.y += selection.pos.y - next;
+            selection.pos.y = next;
+        }
+        _ => {
+            selection.size.y =
+                (selection.size.y + amount).clamp(2.0, (bounds.y - selection.pos.y).max(2.0));
+        }
+    }
+    return selection;
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2717,6 +2762,34 @@ mod tests {
         assert_eq!(
             super::create_moved_pointer(bounds, vec2(1.0, 1.0), bounds),
             bounds
+        );
+    }
+
+    #[test]
+    fn keyboard_selection_resize_grows_and_shrinks_requested_edges() {
+        let selection = Rect {
+            pos: vec2(10.0, 20.0),
+            size: vec2(30.0, 40.0),
+        };
+        assert_eq!(
+            super::create_keyboard_resized_selection(selection, "left", true, vec2(100.0, 100.0)),
+            Rect {
+                pos: vec2(9.0, 20.0),
+                size: vec2(31.0, 40.0)
+            }
+        );
+        assert_eq!(
+            super::create_keyboard_resized_selection(selection, "down", false, vec2(100.0, 100.0))
+                .size,
+            vec2(30.0, 39.0)
+        );
+        let minimum = Rect {
+            pos: vec2(0.0, 0.0),
+            size: vec2(2.0, 2.0),
+        };
+        assert_eq!(
+            super::create_keyboard_resized_selection(minimum, "right", false, vec2(2.0, 2.0)),
+            minimum
         );
     }
 

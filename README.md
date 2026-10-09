@@ -40,7 +40,8 @@ Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When
 | Previous / next capture | `,` / `.` |
 | Copy magnifier color / show RGB | `C` / hold `Shift` while selecting a capture region |
 | Move pointer before selecting | `W` / `A` / `S` / `D` |
-| Move selection or selected annotation | Arrow keys; `Shift` for 10 points |
+| Move / grow / shrink selection | Arrow keys / `⌘`+arrows / `⇧`+arrows |
+| Move selected annotation | Arrow keys; `⇧` for 10 points |
 | Constrain square, circle, or arrow angle | Hold `Shift` while drawing |
 | Stroke width | `[` / `]` |
 | Commit text / new line | `Enter` / `Shift+Enter` |
