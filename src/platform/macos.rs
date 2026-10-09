@@ -18,8 +18,8 @@ use objc2_core_graphics::{
     CGWindowListCopyWindowInfo, CGWindowListOption, kCGColorSpaceSRGB, kCGWindowNumber,
 };
 use objc2_foundation::{
-    NSArray, NSError, NSObject, NSObjectProtocol, NSOperationQueue, NSPoint, NSRect, NSSize,
-    NSString, NSURL,
+    NSArray, NSError, NSFileManager, NSObject, NSObjectProtocol, NSOperationQueue, NSPoint, NSRect,
+    NSSearchPathDirectory, NSSearchPathDomainMask, NSSize, NSString, NSURL,
 };
 use objc2_screen_capture_kit::{
     SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
@@ -126,6 +126,25 @@ pub fn get_clipboard_paths() -> Vec<PathBuf> {
 
 pub fn get_clipboard_change_count() -> i64 {
     return NSPasteboard::generalPasteboard().changeCount() as i64;
+}
+
+pub fn get_app_data_dir() -> Result<PathBuf, String> {
+    let base = NSFileManager::defaultManager()
+        .URLsForDirectory_inDomains(
+            NSSearchPathDirectory::ApplicationSupportDirectory,
+            NSSearchPathDomainMask::UserDomainMask,
+        )
+        .firstObject()
+        .ok_or("Application Support directory is unavailable")?;
+    let url = base
+        .URLByAppendingPathComponent_isDirectory(&NSString::from_str("Snipsy"), true)
+        .ok_or("Could not create the Snipsy data path")?;
+    let path = url
+        .path()
+        .map(|path| PathBuf::from(path.to_string()))
+        .ok_or("Snipsy data path is not a file URL")?;
+    std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+    return Ok(path);
 }
 
 pub fn get_capture_bounds() -> Result<Rect, String> {

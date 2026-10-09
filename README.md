@@ -48,7 +48,7 @@ Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When
 
 Pins: drag to move or drop files to open them; arrow keys move by one point (`⇧` for ten); scroll or `+`/`-` to resize; `⌘`+scroll, `⌘`+`+`/`-`, or `[`/`]` for opacity; `1`/`2` rotate; `3`/`4` flip; `0` or middle-click restores size and opacity; `⇧`+double-click toggles thumbnail mode; hold `⌥` to sample a pixel and press `C` to copy it (`⇧C` for RGB); `⌘⇧X` toggles click-through for the pin under the pointer (or restores all pins); `⌘C` copies; `⌘⇧C` copies source text; `⌘S` saves; `Escape`, `⌘W`, or double-click closes recoverably; `⇧Escape` destroys. Hover a pin for its controls.
 
-PNG and JPEG exports use an atomic file replacement. The last ten screen captures can be replayed while snipping, and the last ten finished selections are available from the History menu. History does not persist after quitting; settings are deferred.
+PNG and JPEG exports use an atomic file replacement. The last ten screen captures can be replayed while snipping, and the last ten finished selections persist in Application Support and are available from the History menu. Settings are deferred.
 
 Google Lens remains available in the editor toolbar. It submits the edited PNG directly from the default browser, via a temporary local handoff page deleted after 30 seconds. The Lens endpoint is undocumented and may change.
 

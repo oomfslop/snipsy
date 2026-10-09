@@ -25,6 +25,7 @@ pub struct AppState {
     pub pins_hidden: bool,
     pub capture_history: Vec<Screenshot>,
     pub history: Vec<(Arc<RgbaImage>, Arc<RenderImage>)>,
+    history_persist: async_channel::Sender<Arc<RgbaImage>>,
     pub error: Option<String>,
 }
 impl Global for AppState {}
@@ -54,8 +55,12 @@ pub fn run() {
         platform::initialize_app();
         let mut fonts = resvg::usvg::fontdb::Database::new();
         fonts.load_system_fonts();
+        let (history_directory, mut hotkey_error) = match platform::get_app_data_dir() {
+            Ok(directory) => (Some(directory.join("history")), None),
+            Err(error) => (None, Some(error)),
+        };
+        let (history_persist, history_receiver) = async_channel::unbounded();
         let hotkeys = GlobalHotKeyManager::new().expect("could not create global shortcuts");
-        let mut hotkey_error = None;
         let capture = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
         let lens = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyL);
         let paste = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyP);
@@ -100,8 +105,46 @@ pub fn run() {
             pins_hidden: false,
             capture_history: Vec::new(),
             history: Vec::new(),
+            history_persist,
             error: hotkey_error,
         });
+        if let Some(directory) = history_directory {
+            let persist_directory = directory.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    while let Ok(image) = history_receiver.recv().await {
+                        if let Err(error) = write_history(&persist_directory, &image) {
+                            eprintln!("could not persist history: {error}");
+                        }
+                    }
+                })
+                .detach();
+            let load = cx
+                .background_executor()
+                .spawn(async move { load_history(&directory) });
+            cx.spawn(async move |cx| {
+                let loaded = load.await;
+                let _ = cx.update(|cx| {
+                    let state = cx.global_mut::<AppState>();
+                    match loaded {
+                        Ok(images) => {
+                            for image in images {
+                                if state.history.len() == 10 {
+                                    break;
+                                }
+                                let preview = raster::create_render_image(
+                                    &image::imageops::thumbnail(&*image, 220, 140),
+                                );
+                                state.history.push((image, preview));
+                            }
+                        }
+                        Err(error) => eprintln!("could not load history: {error}"),
+                    }
+                    cx.refresh_windows();
+                });
+            })
+            .detach();
+        }
         cx.on_action(|_: &CaptureScreen, cx| start_capture(cx));
         cx.on_action(|_: &PinClipboard, cx| paste_image(cx));
         cx.on_action(|_: &ShowHistory, cx| show_history(cx));
@@ -480,6 +523,7 @@ pub fn copy_image(image: &RgbaImage, cx: &mut App) -> Result<(), String> {
 pub fn remember_capture(image: Arc<RgbaImage>, cx: &mut App) {
     let preview = raster::create_render_image(&image::imageops::thumbnail(&*image, 220, 140));
     let state = cx.global_mut::<AppState>();
+    let _ = state.history_persist.try_send(image.clone());
     state.history.insert(0, (image, preview));
     let removed = if state.history.len() > 10 {
         state.history.pop()
@@ -569,6 +613,52 @@ fn write_image(image: &RgbaImage, path: &Path) -> Result<(), String> {
     return Ok(());
 }
 
+fn write_history(directory: &Path, image: &RgbaImage) -> Result<(), String> {
+    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let mut id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    while directory.join(format!("{id}.png")).exists() {
+        id += 1;
+    }
+    write_image(image, &directory.join(format!("{id}.png")))?;
+    for (_, path) in get_history_paths(directory)?.into_iter().skip(10) {
+        std::fs::remove_file(path).map_err(|error| error.to_string())?;
+    }
+    return Ok(());
+}
+
+fn load_history(directory: &Path) -> Result<Vec<Arc<RgbaImage>>, String> {
+    let mut images = Vec::new();
+    for (_, path) in get_history_paths(directory)?.into_iter().take(10) {
+        match image::open(&path) {
+            Ok(image) => images.push(Arc::new(image.to_rgba8())),
+            Err(error) => eprintln!("could not load history entry {}: {error}", path.display()),
+        }
+    }
+    return Ok(images);
+}
+
+fn get_history_paths(directory: &Path) -> Result<Vec<(u128, PathBuf)>, String> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let id = path.file_stem()?.to_str()?.parse::<u128>().ok()?;
+            (path.extension().and_then(|extension| extension.to_str()) == Some("png"))
+                .then_some((id, path))
+        })
+        .collect::<Vec<_>>();
+    paths.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+    return Ok(paths);
+}
+
 pub fn show_error(error: String, cx: &mut App) {
     eprintln!("{error}");
     cx.global_mut::<AppState>().error = Some(error.clone());
@@ -577,7 +667,10 @@ pub fn show_error(error: String, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{insert_capture_history, load_path, parse_color, should_restore_pin, write_image};
+    use super::{
+        get_history_paths, insert_capture_history, load_history, load_path, parse_color,
+        should_restore_pin, write_history, write_image,
+    };
     use crate::{editor::Screenshot, geometry::Rect};
     use glam::{Vec2, vec2};
     use image::{Rgba, RgbaImage};
@@ -679,5 +772,26 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn persistent_history_round_trips_and_removes_stale_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = RgbaImage::from_pixel(2, 1, Rgba([1, 2, 3, 255]));
+        let second = RgbaImage::from_pixel(1, 2, Rgba([4, 5, 6, 255]));
+        write_history(directory.path(), &first).unwrap();
+        write_history(directory.path(), &second).unwrap();
+        let loaded = load_history(directory.path()).unwrap();
+        assert_eq!(&*loaded[0], &second);
+        assert_eq!(&*loaded[1], &first);
+
+        for value in 0..10 {
+            write_history(
+                directory.path(),
+                &RgbaImage::from_pixel(1, 1, Rgba([value, 0, 0, 255])),
+            )
+            .unwrap();
+        }
+        assert_eq!(get_history_paths(directory.path()).unwrap().len(), 10);
     }
 }
