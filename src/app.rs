@@ -1235,6 +1235,10 @@ pub fn copy_image(image: &RgbaImage, cx: &mut App) -> Result<(), String> {
     return Ok(());
 }
 
+pub fn print_image(image: &RgbaImage) -> Result<(), String> {
+    return platform::print_png(&raster::encode_png(image)?);
+}
+
 pub fn remember_capture(image: Arc<RgbaImage>, cx: &mut App) {
     let preview = raster::create_render_image(&image::imageops::thumbnail(&*image, 220, 140));
     let state = cx.global_mut::<AppState>();

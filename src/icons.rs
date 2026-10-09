@@ -38,6 +38,7 @@ impl AssetSource for Icons {
             "search" => "M11 3a8 8 0 1 0 0 16 8 8 0 0 0 0-16M21 21l-5-5",
             "capture" => "M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5M7 7h10v10H7Z",
             "apply" => "m4 12 5 5L20 6",
+            "print" => "M6 9V3h12v6M6 18H3v-7h18v7h-3M6 15h12v6H6Z",
             _ => return Ok(None),
         };
         return Ok(Some(Cow::Owned(format!("<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'><path d='{path}' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/></svg>").into_bytes())));
@@ -86,6 +87,7 @@ mod tests {
             "search",
             "capture",
             "apply",
+            "print",
         ] {
             let svg = Icons.load(name).unwrap().unwrap();
             let tree = resvg::usvg::Tree::from_data(&svg, &Default::default()).unwrap();

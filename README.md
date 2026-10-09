@@ -37,7 +37,8 @@ Global capture, paste, click-through, and pin-visibility shortcuts are configura
 | Select / rectangle / ellipse / arrow | `V` / `R` / `O` / `A` |
 | Straight line | `L` |
 | Pen / highlighter / text / mosaic / eraser | `B` / `H` / `T` / `M` / `E` |
-| Copy / save / pin selection | `Enter` or `⌘C` / `⌘S` / `⌘P` |
+| Copy / save / pin selection | `Enter` or `⌘C` / `⌘S` / `⌘T` |
+| Print selection or pin | `⌘P` |
 | Quick-save selection | `⌘⇧S` |
 | Undo / redo | `⌘Z` / `⌘⇧Z` |
 | Select full display | `⌘A` or `Space` before selecting |

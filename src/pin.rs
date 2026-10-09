@@ -422,6 +422,11 @@ impl Pin {
             "escape" => self.close(window, cx),
             "w" if event.keystroke.modifiers.platform => self.close(window, cx),
             "v" if event.keystroke.modifiers.platform => self.replace_from_clipboard(window, cx),
+            "p" if event.keystroke.modifiers.platform => {
+                if let Err(error) = app::print_image(&self.image) {
+                    app::show_error(error, cx);
+                }
+            }
             "space" => {
                 if let Some(target) = window.window_handle().downcast::<Pin>() {
                     if selection::open_pin_editor(

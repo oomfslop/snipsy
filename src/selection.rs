@@ -62,6 +62,7 @@ enum Action {
     Save,
     QuickSave,
     Apply,
+    Print,
     Copy,
     Variant(Tool),
     Filled(bool),
@@ -692,6 +693,7 @@ impl SelectionState {
                     | Action::Pin
                     | Action::Search
                     | Action::Apply
+                    | Action::Print
             )
         {
             self.pending_action = Some(action);
@@ -743,7 +745,8 @@ impl SelectionState {
             | Action::QuickSave
             | Action::Pin
             | Action::Search
-            | Action::Apply => match self.get_image(cx) {
+            | Action::Apply
+            | Action::Print => match self.get_image(cx) {
                 Ok(image) => {
                     let image = Arc::new(image);
                     match action {
@@ -771,6 +774,11 @@ impl SelectionState {
                             }
                             self.dismiss(window, cx);
                             return;
+                        }
+                        Action::Print => {
+                            if let Err(error) = app::print_image(&image) {
+                                self.error = Some(error);
+                            }
                         }
                         Action::Pin => {
                             if let Some(screenshot) = self.screenshot.clone() {
@@ -866,7 +874,8 @@ impl SelectionState {
                     window,
                     cx,
                 ),
-                "p" => self.perform_action(Action::Pin, window, cx),
+                "p" => self.perform_action(Action::Print, window, cx),
+                "t" => self.perform_action(Action::Pin, window, cx),
                 "a" => {
                     self.selection = Some(Rect {
                         pos: Vec2::ZERO,
@@ -1869,8 +1878,9 @@ impl Render for SelectionState {
                         true,
                         cx,
                     ))
-                    .child(self.build_button("pin", "Pin (⌘P)", Action::Pin, false, true, cx))
+                    .child(self.build_button("pin", "Pin (⌘T)", Action::Pin, false, true, cx))
                     .child(self.build_button("save", "Save (⌘S)", Action::Save, false, true, cx))
+                    .child(self.build_button("print", "Print (⌘P)", Action::Print, false, true, cx))
                     .child(self.build_button(
                         "layers",
                         "Layers",

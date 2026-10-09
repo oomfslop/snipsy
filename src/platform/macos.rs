@@ -8,10 +8,10 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlert, NSApplication, NSApplicationActivationPolicy, NSColor, NSColorPanel, NSColorSpace,
-    NSEvent, NSMenu, NSMenuItem, NSModalResponseCancel, NSModalResponseOK, NSPasteboard,
-    NSPasteboardTypeFileURL, NSPopUpMenuWindowLevel, NSSavePanel, NSScreen,
-    NSSquareStatusItemLength, NSStatusBar, NSStatusItem, NSTrackingArea, NSTrackingAreaOptions,
-    NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSEvent, NSImage, NSImageView, NSMenu, NSMenuItem, NSModalResponseCancel, NSModalResponseOK,
+    NSPasteboard, NSPasteboardTypeFileURL, NSPopUpMenuWindowLevel, NSPrintOperation, NSSavePanel,
+    NSScreen, NSSquareStatusItemLength, NSStatusBar, NSStatusItem, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType, CGPoint};
 use objc2_core_graphics::{
@@ -20,8 +20,8 @@ use objc2_core_graphics::{
     kCGWindowNumber,
 };
 use objc2_foundation::{
-    NSArray, NSError, NSFileManager, NSObject, NSObjectProtocol, NSOperationQueue, NSPoint, NSRect,
-    NSSearchPathDirectory, NSSearchPathDomainMask, NSSize, NSString, NSURL,
+    NSArray, NSData, NSError, NSFileManager, NSObject, NSObjectProtocol, NSOperationQueue, NSPoint,
+    NSRect, NSSearchPathDirectory, NSSearchPathDomainMask, NSSize, NSString, NSURL,
 };
 use objc2_screen_capture_kit::{
     SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
@@ -435,6 +435,24 @@ pub fn show_error(error: &str) {
     unsafe {
         NSOperationQueue::mainQueue().addOperationWithBlock(&block);
     }
+}
+
+pub fn print_png(bytes: &[u8]) -> Result<(), String> {
+    let mtm = MainThreadMarker::new().expect("printing starts on the main thread");
+    // SAFETY: NSData copies the provided bytes before returning.
+    let data = unsafe { NSData::dataWithBytes_length(bytes.as_ptr().cast(), bytes.len()) };
+    let image = NSImage::initWithData(NSImage::alloc(), &data).ok_or("Could not decode image")?;
+    let size = image.size();
+    let view = NSImageView::initWithFrame(
+        NSImageView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), size),
+    );
+    view.setImage(Some(&image));
+    let operation = NSPrintOperation::printOperationWithView(&view);
+    operation.setShowsPrintPanel(true);
+    operation.setShowsProgressPanel(true);
+    operation.runOperation();
+    return Ok(());
 }
 
 struct PendingCapture {
