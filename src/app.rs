@@ -522,6 +522,50 @@ pub fn paste_image(cx: &mut App) {
     }
 }
 
+pub struct PinContent {
+    pub image: Arc<RgbaImage>,
+    pub text: Option<String>,
+}
+
+pub fn load_clipboard_content(cx: &mut App) -> Result<Task<Result<PinContent, String>>, String> {
+    let fonts = cx.global::<AppState>().fonts.clone();
+    if let Some(path) = platform::get_clipboard_paths().into_iter().next() {
+        return Ok(cx.background_executor().spawn(async move {
+            return load_path(&path, &fonts).map(|(image, text)| PinContent { image, text });
+        }));
+    }
+    let item = cx.read_from_clipboard().ok_or("Clipboard is empty")?;
+    if let Some(image) = item.entries().iter().find_map(|entry| {
+        if let ClipboardEntry::Image(image) = entry {
+            Some(image.clone())
+        } else {
+            None
+        }
+    }) {
+        return Ok(cx.background_executor().spawn(async move {
+            return image::load_from_memory(&image.bytes)
+                .map(|image| PinContent {
+                    image: Arc::new(image.to_rgba8()),
+                    text: None,
+                })
+                .map_err(|error| error.to_string());
+        }));
+    }
+    let text = item.text().ok_or("Clipboard has no supported content")?;
+    return Ok(cx.background_executor().spawn(async move {
+        if let Some(color) = parse_color(&text) {
+            return Ok(PinContent {
+                image: Arc::new(RgbaImage::from_pixel(240, 160, Rgba(color))),
+                text: None,
+            });
+        }
+        return raster::render_text_image(&text, &fonts).map(|image| PinContent {
+            image: Arc::new(image),
+            text: Some(text),
+        });
+    }));
+}
+
 fn pin_text(text: String, cx: &mut App) {
     if let Some(color) = parse_color(&text) {
         pin::open_pin(

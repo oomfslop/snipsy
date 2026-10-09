@@ -30,15 +30,7 @@ fn open_pin_with_text(
     }
     let logical_size = bounds
         .map(|bounds| size(px(bounds.size.x), px(bounds.size.y)))
-        .unwrap_or_else(|| {
-            let scale = (image.width() as f32 / 800.0)
-                .max(image.height() as f32 / 600.0)
-                .max(1.0);
-            size(
-                px(image.width() as f32 / scale),
-                px(image.height() as f32 / scale),
-            )
-        });
+        .unwrap_or_else(|| get_logical_size(&image));
     let bounds = bounds
         .map(|bounds| Bounds::new(point(px(bounds.pos.x), px(bounds.pos.y)), logical_size))
         .unwrap_or_else(|| Bounds::centered(None, logical_size, cx));
@@ -105,6 +97,7 @@ fn open_pin_window(
                     text,
                     id,
                     backup_task: None,
+                    replace_task: None,
                 }
             })
         },
@@ -198,6 +191,7 @@ pub struct Pin {
     text: Option<Arc<str>>,
     id: u128,
     backup_task: Option<Task<()>>,
+    replace_task: Option<Task<()>>,
 }
 
 impl Pin {
@@ -217,6 +211,35 @@ impl Pin {
                     }),
                     cx,
                 );
+            });
+        }));
+    }
+
+    fn replace_from_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let load = match app::load_clipboard_content(cx) {
+            Ok(load) => load,
+            Err(error) => {
+                app::show_error(error, cx);
+                return;
+            }
+        };
+        self.replace_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = load.await;
+            let _ = this.update_in(cx, |state, window, cx| match result {
+                Ok(content) => {
+                    let previous = std::mem::replace(
+                        &mut state.preview,
+                        raster::create_render_image(&content.image),
+                    );
+                    cx.drop_image(previous, Some(window));
+                    state.original_size = get_logical_size(&content.image);
+                    state.thumbnail_size = None;
+                    state.image = content.image;
+                    state.text = content.text.map(Into::into);
+                    state.schedule_backup(window, cx);
+                    cx.notify();
+                }
+                Err(error) => app::show_error(error, cx),
             });
         }));
     }
@@ -281,6 +304,7 @@ impl Pin {
             "escape" if event.keystroke.modifiers.shift => self.destroy(window, cx),
             "escape" => self.close(window, cx),
             "w" if event.keystroke.modifiers.platform => self.close(window, cx),
+            "v" if event.keystroke.modifiers.platform => self.replace_from_clipboard(window, cx),
             "c" if event.keystroke.modifiers.alt => {
                 if let Some((_, _, color)) =
                     sample_pin_pixel(&self.image, window.viewport_size(), window.mouse_position())
@@ -380,6 +404,16 @@ fn transform_image(image: &RgbaImage, key: &str) -> RgbaImage {
         "4" => image::imageops::flip_vertical(image),
         _ => unreachable!(),
     };
+}
+
+fn get_logical_size(image: &RgbaImage) -> Size<Pixels> {
+    let scale = (image.width() as f32 / 800.0)
+        .max(image.height() as f32 / 600.0)
+        .max(1.0);
+    return size(
+        px(image.width() as f32 / scale),
+        px(image.height() as f32 / scale),
+    );
 }
 
 fn create_thumbnail_size(width: f32, height: f32) -> (f32, f32) {
@@ -577,7 +611,9 @@ impl Render for Pin {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_pin_id, create_thumbnail_size, sample_pin_pixel, transform_image};
+    use super::{
+        create_pin_id, create_thumbnail_size, get_logical_size, sample_pin_pixel, transform_image,
+    };
     use gpui::{point, px, size};
     use image::{Rgba, RgbaImage};
 
@@ -625,5 +661,19 @@ mod tests {
     #[test]
     fn pin_ids_are_unique_without_clock_progress() {
         assert_ne!(create_pin_id(), create_pin_id());
+    }
+
+    #[test]
+    fn logical_pin_size_caps_large_images_without_upscaling() {
+        let small = get_logical_size(&RgbaImage::new(100, 50));
+        assert_eq!(
+            (f32::from(small.width), f32::from(small.height)),
+            (100.0, 50.0)
+        );
+        let large = get_logical_size(&RgbaImage::new(1600, 1200));
+        assert_eq!(
+            (f32::from(large.width), f32::from(large.height)),
+            (800.0, 600.0)
+        );
     }
 }
