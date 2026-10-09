@@ -42,7 +42,7 @@ pub struct AppState {
     pub capture_cursor: bool,
     pub last_capture_selection: Option<(Rect, Rect)>,
     pub history: Vec<(Arc<RgbaImage>, Arc<RenderImage>)>,
-    history_persist: async_channel::Sender<Arc<RgbaImage>>,
+    history_persist: async_channel::Sender<HistoryCommand>,
     pin_persist: async_channel::Sender<pin::PinBackupCommand>,
     hotkeys: HotkeySettings,
     hotkey_commands: Arc<Mutex<HashMap<u32, Command>>>,
@@ -59,6 +59,11 @@ enum Command {
     Paste,
     ToggleClickThrough,
     TogglePins,
+}
+
+enum HistoryCommand {
+    Save(Arc<RgbaImage>),
+    Clear,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +135,7 @@ actions!(
         CaptureScreen,
         PinClipboard,
         ShowHistory,
+        ClearHistory,
         ShowWhiteboard,
         ShowPreferences,
         ShowGroups,
@@ -663,8 +669,14 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
             let persist_directory = history_directory.clone();
             cx.background_executor()
                 .spawn(async move {
-                    while let Ok(image) = history_receiver.recv().await {
-                        if let Err(error) = write_history(&persist_directory, &image) {
+                    while let Ok(command) = history_receiver.recv().await {
+                        let result = match command {
+                            HistoryCommand::Save(image) => {
+                                write_history(&persist_directory, &image)
+                            }
+                            HistoryCommand::Clear => clear_history_files(&persist_directory),
+                        };
+                        if let Err(error) = result {
                             eprintln!("could not persist history: {error}");
                         }
                     }
@@ -746,6 +758,7 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
         cx.on_action(|_: &CaptureScreen, cx| start_capture(cx));
         cx.on_action(|_: &PinClipboard, cx| paste_image(cx));
         cx.on_action(|_: &ShowHistory, cx| show_history(cx));
+        cx.on_action(|_: &ClearHistory, cx| clear_history(cx));
         cx.on_action(|_: &ShowWhiteboard, cx| start_whiteboard([255; 4], cx));
         cx.on_action(|_: &ShowPreferences, cx| show_preferences(cx));
         cx.on_action(|_: &ShowGroups, cx| show_groups(cx));
@@ -758,6 +771,7 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
                 MenuItem::action("New screenshot", CaptureScreen),
                 MenuItem::action("Pin clipboard", PinClipboard),
                 MenuItem::action("History", ShowHistory),
+                MenuItem::action("Clear History…", ClearHistory),
                 MenuItem::action("Whiteboard", ShowWhiteboard),
                 MenuItem::action("Preferences…", ShowPreferences),
                 MenuItem::action("Image Groups…", ShowGroups),
@@ -791,6 +805,7 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
                     platform::StatusCommand::Capture => start_capture(cx),
                     platform::StatusCommand::Paste => paste_image(cx),
                     platform::StatusCommand::History => show_history(cx),
+                    platform::StatusCommand::ClearHistory => clear_history(cx),
                     platform::StatusCommand::Whiteboard => start_whiteboard([255; 4], cx),
                     platform::StatusCommand::Preferences => show_preferences(cx),
                     platform::StatusCommand::Groups => show_groups(cx),
@@ -875,6 +890,20 @@ fn show_history(cx: &mut App) {
         Ok(handle) => cx.global_mut::<AppState>().history_window = Some(handle),
         Err(error) => show_error(error.to_string(), cx),
     }
+}
+
+pub fn clear_history(cx: &mut App) {
+    if !platform::confirm("Clear Snipsy history?") {
+        return;
+    }
+    let state = cx.global_mut::<AppState>();
+    let history = std::mem::take(&mut state.history);
+    state.capture_history.clear();
+    let _ = state.history_persist.try_send(HistoryCommand::Clear);
+    for (_, preview) in history {
+        cx.drop_image(preview, None);
+    }
+    cx.refresh_windows();
 }
 
 fn show_preferences(cx: &mut App) {
@@ -1504,7 +1533,9 @@ pub fn print_image(image: &RgbaImage) -> Result<(), String> {
 pub fn remember_capture(image: Arc<RgbaImage>, cx: &mut App) {
     let preview = raster::create_render_image(&image::imageops::thumbnail(&*image, 220, 140));
     let state = cx.global_mut::<AppState>();
-    let _ = state.history_persist.try_send(image.clone());
+    let _ = state
+        .history_persist
+        .try_send(HistoryCommand::Save(image.clone()));
     state.history.insert(0, (image, preview));
     let removed = if state.history.len() > 10 {
         state.history.pop()
@@ -1711,6 +1742,13 @@ fn get_history_paths(directory: &Path) -> Result<Vec<(u128, PathBuf)>, String> {
     return Ok(paths);
 }
 
+fn clear_history_files(directory: &Path) -> Result<(), String> {
+    for (_, path) in get_history_paths(directory)? {
+        std::fs::remove_file(path).map_err(|error| error.to_string())?;
+    }
+    return Ok(());
+}
+
 fn write_pin_backup(
     directory: &Path,
     pin: &pin::PinBackup,
@@ -1883,12 +1921,12 @@ pub fn show_error(error: String, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        HotkeySettings, StartupAction, collect_animation_frames, create_quick_save_path,
-        decode_startup_action, encode_startup_action, get_history_paths, insert_capture_history,
-        load_groups, load_history, load_hotkey_settings, load_path, load_pin_backups, parse_color,
-        parse_pin_backup, parse_startup_action, remove_pin_backup, should_restore_pin,
-        validate_hotkey_settings, write_groups, write_history, write_hotkey_settings, write_image,
-        write_pin_backup,
+        HotkeySettings, StartupAction, clear_history_files, collect_animation_frames,
+        create_quick_save_path, decode_startup_action, encode_startup_action, get_history_paths,
+        insert_capture_history, load_groups, load_history, load_hotkey_settings, load_path,
+        load_pin_backups, parse_color, parse_pin_backup, parse_startup_action, remove_pin_backup,
+        should_restore_pin, validate_hotkey_settings, write_groups, write_history,
+        write_hotkey_settings, write_image, write_pin_backup,
     };
     use crate::{editor::Screenshot, geometry::Rect, pin::PinBackup};
     use glam::{Vec2, vec2};
@@ -2023,6 +2061,8 @@ mod tests {
             .unwrap();
         }
         assert_eq!(get_history_paths(directory.path()).unwrap().len(), 10);
+        clear_history_files(directory.path()).unwrap();
+        assert!(get_history_paths(directory.path()).unwrap().is_empty());
     }
 
     #[test]

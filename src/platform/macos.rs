@@ -7,11 +7,12 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSAlert, NSApplication, NSApplicationActivationPolicy, NSColor, NSColorPanel, NSColorSpace,
-    NSEvent, NSImage, NSImageView, NSMenu, NSMenuItem, NSModalResponseCancel, NSModalResponseOK,
-    NSPasteboard, NSPasteboardTypeFileURL, NSPopUpMenuWindowLevel, NSPrintOperation, NSSavePanel,
-    NSScreen, NSSquareStatusItemLength, NSStatusBar, NSStatusItem, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSColor,
+    NSColorPanel, NSColorSpace, NSEvent, NSImage, NSImageView, NSMenu, NSMenuItem,
+    NSModalResponseCancel, NSModalResponseOK, NSPasteboard, NSPasteboardTypeFileURL,
+    NSPopUpMenuWindowLevel, NSPrintOperation, NSSavePanel, NSScreen, NSSquareStatusItemLength,
+    NSStatusBar, NSStatusItem, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType, CGPoint};
 use objc2_core_graphics::{
@@ -69,6 +70,7 @@ pub enum StatusCommand {
     Capture,
     Paste,
     History,
+    ClearHistory,
     Whiteboard,
     Preferences,
     Groups,
@@ -94,10 +96,11 @@ define_class!(
                 0 => StatusCommand::Capture,
                 1 => StatusCommand::Paste,
                 2 => StatusCommand::History,
-                3 => StatusCommand::Whiteboard,
-                4 => StatusCommand::TogglePins,
-                5 => StatusCommand::Preferences,
-                6 => StatusCommand::Groups,
+                3 => StatusCommand::ClearHistory,
+                4 => StatusCommand::Whiteboard,
+                5 => StatusCommand::TogglePins,
+                6 => StatusCommand::Preferences,
+                7 => StatusCommand::Groups,
                 _ => StatusCommand::Quit,
             };
             let _ = self.ivars().sender.try_send(command);
@@ -121,10 +124,11 @@ pub fn create_status_item(sender: Sender<StatusCommand>) -> StatusItem {
         ("New screenshot", 0),
         ("Pin clipboard", 1),
         ("History", 2),
-        ("Whiteboard", 3),
-        ("Show/hide pins", 4),
-        ("Preferences…", 5),
-        ("Image Groups…", 6),
+        ("Clear History…", 3),
+        ("Whiteboard", 4),
+        ("Show/hide pins", 5),
+        ("Preferences…", 6),
+        ("Image Groups…", 7),
     ] {
         // SAFETY: command: is implemented by the retained target.
         let item = unsafe {
@@ -150,7 +154,7 @@ pub fn create_status_item(sender: Sender<StatusCommand>) -> StatusItem {
             &NSString::new(),
         )
     };
-    quit.setTag(7);
+    quit.setTag(8);
     // SAFETY: The target implements command: and outlives the menu.
     unsafe { quit.setTarget(Some(&target)) };
     menu.addItem(&quit);
@@ -438,6 +442,16 @@ pub fn show_error(error: &str) {
     unsafe {
         NSOperationQueue::mainQueue().addOperationWithBlock(&block);
     }
+}
+
+pub fn confirm(message: &str) -> bool {
+    let mtm = MainThreadMarker::new().expect("confirmation opens on the main thread");
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(message));
+    alert.addButtonWithTitle(&NSString::from_str("Clear"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    alert.window().setLevel(NSPopUpMenuWindowLevel + 1);
+    return alert.runModal() == NSAlertFirstButtonReturn;
 }
 
 pub fn print_png(bytes: &[u8]) -> Result<(), String> {
