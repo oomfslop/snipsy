@@ -207,6 +207,12 @@ pub fn set_window_visible(window: &gpui::Window, visible: bool) {
     }
 }
 
+pub fn move_window(window: &gpui::Window, x: f32, y: f32) {
+    let window = get_native_window(window);
+    let origin = window.frame().origin;
+    window.setFrameOrigin(NSPoint::new(origin.x + x as f64, origin.y - y as f64));
+}
+
 pub fn configure_overlay(window: &gpui::Window, bounds: Rect, resizable: bool) {
     let native = get_native_window(window);
     native.setStyleMask(if resizable {

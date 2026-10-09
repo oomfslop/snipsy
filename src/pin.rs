@@ -160,6 +160,13 @@ impl Pin {
         window.resize(size(px(target.0), px(target.1)));
     }
 
+    fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.opacity = 1.0;
+        self.thumbnail_size = None;
+        window.resize(self.original_size);
+        cx.notify();
+    }
+
     pub fn toggle_click_through(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.click_through = !self.click_through;
         platform::set_window_click_through(window, self.click_through);
@@ -177,6 +184,16 @@ impl Pin {
             "escape" if event.keystroke.modifiers.shift => window.remove_window(),
             "escape" => self.close(window, cx),
             "w" if event.keystroke.modifiers.platform => self.close(window, cx),
+            "c" if event.keystroke.modifiers.alt => {
+                if let Some((_, _, color)) =
+                    sample_pin_pixel(&self.image, window.viewport_size(), window.mouse_position())
+                {
+                    cx.write_to_clipboard(ClipboardItem::new_string(create_color_label(
+                        color,
+                        event.keystroke.modifiers.shift,
+                    )));
+                }
+            }
             "c" if event.keystroke.modifiers.platform && event.keystroke.modifiers.shift => {
                 if let Some(text) = &self.text {
                     cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
@@ -188,10 +205,7 @@ impl Pin {
                 }
             }
             "s" if event.keystroke.modifiers.platform => app::save_image(self.image.clone(), cx),
-            "0" => {
-                self.thumbnail_size = None;
-                window.resize(self.original_size);
-            }
+            "0" => self.reset(window, cx),
             "1" | "2" | "3" | "4" => {
                 let swap_dimensions = matches!(event.keystroke.key.as_str(), "1" | "2");
                 let image = transform_image(&self.image, &event.keystroke.key);
@@ -236,6 +250,20 @@ impl Pin {
                 self.opacity = (self.opacity + 0.1).min(1.0);
                 cx.notify();
             }
+            "left" | "right" | "up" | "down" => {
+                let step = if event.keystroke.modifiers.shift {
+                    10.0
+                } else {
+                    1.0
+                };
+                let (x, y) = match event.keystroke.key.as_str() {
+                    "left" => (-step, 0.0),
+                    "right" => (step, 0.0),
+                    "up" => (0.0, -step),
+                    _ => (0.0, step),
+                };
+                platform::move_window(window, x, y);
+            }
             _ => {}
         }
     }
@@ -259,8 +287,55 @@ fn create_thumbnail_size(width: f32, height: f32) -> (f32, f32) {
     return (width / scale, height / scale);
 }
 
+fn sample_pin_pixel(
+    image: &RgbaImage,
+    viewport: Size<Pixels>,
+    pointer: Point<Pixels>,
+) -> Option<(u32, u32, crate::geometry::Color)> {
+    let viewport = glam::vec2(viewport.width.into(), viewport.height.into());
+    let pointer = glam::vec2(pointer.x.into(), pointer.y.into());
+    if image.width() == 0 || image.height() == 0 || viewport.min_element() <= 0.0 {
+        return None;
+    }
+    let image_size = glam::vec2(image.width() as f32, image.height() as f32);
+    let scale = (viewport.x / image_size.x).min(viewport.y / image_size.y);
+    let displayed = image_size * scale;
+    let point = pointer - (viewport - displayed) / 2.0;
+    if point.cmplt(glam::Vec2::ZERO).any() || point.cmpge(displayed).any() {
+        return None;
+    }
+    let x = (point.x / scale).floor() as u32;
+    let y = (point.y / scale).floor() as u32;
+    let pixel = image.get_pixel(x, y);
+    return Some((
+        x,
+        y,
+        crate::geometry::Color::from_rgb(pixel[0], pixel[1], pixel[2]),
+    ));
+}
+
+fn create_color_label(color: crate::geometry::Color, rgb_format: bool) -> String {
+    return if rgb_format {
+        format!(
+            "{}, {}, {}",
+            color.0 >> 16 & 255,
+            color.0 >> 8 & 255,
+            color.0 & 255
+        )
+    } else {
+        format!("#{:06x}", color.0)
+    };
+}
+
 impl Render for Pin {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pointer = window.mouse_position();
+        let viewport = window.viewport_size();
+        let sample = window
+            .modifiers()
+            .alt
+            .then(|| sample_pin_pixel(&self.image, viewport, pointer))
+            .flatten();
         div()
             .id("pin")
             .group("pin")
@@ -270,6 +345,12 @@ impl Render for Pin {
             .opacity(self.opacity)
             .cursor(CursorStyle::OpenHand)
             .on_key_down(cx.listener(Self::handle_key))
+            .on_modifiers_changed(cx.listener(|_, _, _, cx| cx.notify()))
+            .on_mouse_move(cx.listener(|_, _, window, cx| {
+                if window.modifiers().alt {
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|state, event: &MouseDownEvent, window, cx| {
@@ -287,6 +368,13 @@ impl Render for Pin {
             .on_drop(cx.listener(|_, paths: &ExternalPaths, _, cx| {
                 app::open_paths(paths.paths().to_vec(), cx)
             }))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|state, _, window, cx| {
+                    cx.stop_propagation();
+                    state.reset(window, cx);
+                }),
+            )
             .on_scroll_wheel(cx.listener(|state, event: &ScrollWheelEvent, window, cx| {
                 let delta: f32 = event.delta.pixel_delta(px(16.0)).y.into();
                 if event.modifiers.platform {
@@ -306,6 +394,29 @@ impl Render for Pin {
                     .size_full()
                     .object_fit(ObjectFit::Contain),
             )
+            .when_some(sample, |root, (x, y, color)| {
+                let left = (f32::from(pointer.x) + 12.0)
+                    .clamp(4.0, (f32::from(viewport.width) - 128.0).max(4.0));
+                let top = (f32::from(pointer.y) + 12.0)
+                    .clamp(4.0, (f32::from(viewport.height) - 48.0).max(4.0));
+                root.child(
+                    div()
+                        .absolute()
+                        .left(px(left))
+                        .top(px(top))
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(rgba(0x17171bee))
+                        .text_color(rgb(0xffffff))
+                        .font_family("Menlo")
+                        .text_size(px(11.0))
+                        .child(format!(
+                            "({x}, {y})  {}",
+                            create_color_label(color, window.modifiers().shift)
+                        )),
+                )
+            })
             .child(
                 div()
                     .absolute()
@@ -362,7 +473,8 @@ impl Render for Pin {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_thumbnail_size, transform_image};
+    use super::{create_thumbnail_size, sample_pin_pixel, transform_image};
+    use gpui::{point, px, size};
     use image::{Rgba, RgbaImage};
 
     #[test]
@@ -381,5 +493,28 @@ mod tests {
         assert_eq!(create_thumbnail_size(90.0, 60.0), (90.0, 60.0));
         assert_eq!(create_thumbnail_size(360.0, 120.0), (180.0, 60.0));
         assert_eq!(create_thumbnail_size(100.0, 400.0), (40.0, 160.0));
+    }
+
+    #[test]
+    fn pin_sampling_accounts_for_contain_letterboxing() {
+        let image = RgbaImage::from_fn(2, 1, |x, _| Rgba([x as u8, 2, 3, 255]));
+        assert_eq!(
+            sample_pin_pixel(
+                &image,
+                size(px(100.0), px(100.0)),
+                point(px(75.0), px(50.0))
+            )
+            .unwrap()
+            .0,
+            1
+        );
+        assert!(
+            sample_pin_pixel(
+                &image,
+                size(px(100.0), px(100.0)),
+                point(px(50.0), px(10.0))
+            )
+            .is_none()
+        );
     }
 }
