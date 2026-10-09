@@ -884,7 +884,7 @@ pub fn start_screen_recording(
                         ));
                         config.setWidth(width);
                         config.setHeight(height);
-                        config.setMinimumFrameInterval(CMTime::new(1, 30));
+                        config.setMinimumFrameInterval(CMTime::new(1, 60));
                         config.setQueueDepth(6);
                         config.setColorSpaceName(kCGColorSpaceSRGB);
                         config.setShowsCursor(true);
