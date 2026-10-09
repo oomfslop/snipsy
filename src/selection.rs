@@ -61,6 +61,7 @@ enum Action {
     Pin,
     Save,
     QuickSave,
+    Apply,
     Copy,
     Variant(Tool),
     Filled(bool),
@@ -100,6 +101,55 @@ pub struct SelectionState {
     intensity_drag: bool,
     capture_history_index: usize,
     capture_history: Vec<Screenshot>,
+    edit_target: Option<WindowHandle<pin::Pin>>,
+}
+
+pub fn open_pin_editor(
+    image: Arc<RgbaImage>,
+    bounds: Bounds<Pixels>,
+    target: WindowHandle<pin::Pin>,
+    cx: &mut App,
+) -> bool {
+    if let Some(handle) = cx.global::<AppState>().pin_editor {
+        if handle
+            .update(cx, |state, window, cx| state.activate(window, cx))
+            .is_ok()
+        {
+            return false;
+        }
+    }
+    let rect = Rect {
+        pos: vec2(bounds.origin.x.into(), bounds.origin.y.into()),
+        size: vec2(bounds.size.width.into(), bounds.size.height.into()),
+    };
+    match cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: None,
+            kind: WindowKind::Normal,
+            show: false,
+            focus: false,
+            window_background: WindowBackgroundAppearance::Transparent,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            ..Default::default()
+        },
+        |window, cx| {
+            crate::platform::configure_overlay(window, rect, false);
+            cx.new(|cx| SelectionState::new_for_pin(image, rect, target, window, cx))
+        },
+    ) {
+        Ok(handle) => {
+            cx.global_mut::<AppState>().pin_editor = Some(handle);
+            let _ = handle.update(cx, |state, window, cx| state.activate(window, cx));
+            return true;
+        }
+        Err(error) => {
+            app::show_error(error.to_string(), cx);
+            return false;
+        }
+    }
 }
 
 impl SelectionState {
@@ -139,7 +189,30 @@ impl SelectionState {
             intensity_drag: false,
             capture_history_index: 0,
             capture_history: Vec::new(),
+            edit_target: None,
         };
+    }
+
+    fn new_for_pin(
+        image: Arc<RgbaImage>,
+        bounds: Rect,
+        target: WindowHandle<pin::Pin>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut state = Self::new(bounds, window, cx);
+        state.background = Some(raster::create_render_image(&image));
+        state.screenshot = Some(Screenshot {
+            image,
+            bounds,
+            windows: Vec::new(),
+        });
+        state.selection = Some(Rect {
+            pos: Vec2::ZERO,
+            size: bounds.size,
+        });
+        state.edit_target = Some(target);
+        return state;
     }
 
     pub fn activate(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -152,6 +225,14 @@ impl SelectionState {
     }
 
     pub fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(target) = self.edit_target.take() {
+            let _ = target.update(cx, |_, window, _| {
+                crate::platform::set_window_visible(window, true)
+            });
+            cx.global_mut::<AppState>().pin_editor = None;
+            window.remove_window();
+            return;
+        }
         if cx.global::<AppState>().selection.map(AnyWindowHandle::from)
             == Some(window.window_handle())
         {
@@ -576,7 +657,12 @@ impl SelectionState {
             && self.selection.is_some()
             && matches!(
                 action,
-                Action::Copy | Action::Save | Action::QuickSave | Action::Pin | Action::Search
+                Action::Copy
+                    | Action::Save
+                    | Action::QuickSave
+                    | Action::Pin
+                    | Action::Search
+                    | Action::Apply
             )
         {
             self.pending_action = Some(action);
@@ -623,63 +709,75 @@ impl SelectionState {
                 self.dismiss(window, cx);
                 return;
             }
-            Action::Copy | Action::Save | Action::QuickSave | Action::Pin | Action::Search => {
-                match self.get_image(cx) {
-                    Ok(image) => {
-                        let image = Arc::new(image);
-                        match action {
-                            Action::Copy => {
-                                if let Err(error) = app::copy_image(&image, cx) {
-                                    self.error = Some(error);
-                                    cx.notify();
-                                    return;
-                                }
+            Action::Copy
+            | Action::Save
+            | Action::QuickSave
+            | Action::Pin
+            | Action::Search
+            | Action::Apply => match self.get_image(cx) {
+                Ok(image) => {
+                    let image = Arc::new(image);
+                    match action {
+                        Action::Copy => {
+                            if let Err(error) = app::copy_image(&image, cx) {
+                                self.error = Some(error);
+                                cx.notify();
+                                return;
+                            }
+                            if let Some(screenshot) = self.screenshot.clone() {
+                                app::remember_capture_frame(screenshot, cx);
+                            }
+                            app::remember_capture(image, cx);
+                            self.dismiss(window, cx);
+                        }
+                        Action::Save => app::save_image(image, self.screenshot.clone(), cx),
+                        Action::QuickSave => {
+                            app::quick_save_image(image, self.screenshot.clone(), cx)
+                        }
+                        Action::Apply => {
+                            if let Some(target) = self.edit_target {
+                                let _ = target.update(cx, |state, window, cx| {
+                                    state.replace_image(image, window, cx)
+                                });
+                            }
+                            self.dismiss(window, cx);
+                            return;
+                        }
+                        Action::Pin => {
+                            if let Some(screenshot) = self.screenshot.clone() {
+                                app::remember_capture_frame(screenshot, cx);
+                            }
+                            app::remember_capture(image.clone(), cx);
+                            let selection = self.selection.unwrap();
+                            let bounds = Rect {
+                                pos: self.bounds.pos + selection.pos,
+                                size: selection.size,
+                            };
+                            cx.spawn(async move |_, cx| {
+                                let _ = cx.update(|cx| pin::open_pin(image, Some(bounds), cx));
+                            })
+                            .detach();
+                            self.dismiss(window, cx);
+                        }
+                        Action::Search => match raster::encode_png(&image)
+                            .and_then(|image| lens::create_handoff(&image))
+                        {
+                            Ok(path) => {
                                 if let Some(screenshot) = self.screenshot.clone() {
                                     app::remember_capture_frame(screenshot, cx);
                                 }
                                 app::remember_capture(image, cx);
+                                cx.open_with_system(&path);
+                                lens::schedule_cleanup(path);
                                 self.dismiss(window, cx);
                             }
-                            Action::Save => app::save_image(image, self.screenshot.clone(), cx),
-                            Action::QuickSave => {
-                                app::quick_save_image(image, self.screenshot.clone(), cx)
-                            }
-                            Action::Pin => {
-                                if let Some(screenshot) = self.screenshot.clone() {
-                                    app::remember_capture_frame(screenshot, cx);
-                                }
-                                app::remember_capture(image.clone(), cx);
-                                let selection = self.selection.unwrap();
-                                let bounds = Rect {
-                                    pos: self.bounds.pos + selection.pos,
-                                    size: selection.size,
-                                };
-                                cx.spawn(async move |_, cx| {
-                                    let _ = cx.update(|cx| pin::open_pin(image, Some(bounds), cx));
-                                })
-                                .detach();
-                                self.dismiss(window, cx);
-                            }
-                            Action::Search => match raster::encode_png(&image)
-                                .and_then(|image| lens::create_handoff(&image))
-                            {
-                                Ok(path) => {
-                                    if let Some(screenshot) = self.screenshot.clone() {
-                                        app::remember_capture_frame(screenshot, cx);
-                                    }
-                                    app::remember_capture(image, cx);
-                                    cx.open_with_system(&path);
-                                    lens::schedule_cleanup(path);
-                                    self.dismiss(window, cx);
-                                }
-                                Err(error) => self.error = Some(error),
-                            },
-                            _ => {}
-                        }
+                            Err(error) => self.error = Some(error),
+                        },
+                        _ => {}
                     }
-                    Err(error) => self.error = Some(error),
                 }
-            }
+                Err(error) => self.error = Some(error),
+            },
         }
         if self.editor.draft.is_none() {
             self.marked_range = None;
@@ -790,7 +888,15 @@ impl SelectionState {
         match key {
             "," => self.navigate_capture_history(1, window, cx),
             "." => self.navigate_capture_history(-1, window, cx),
-            "enter" => self.perform_action(Action::Copy, window, cx),
+            "enter" => self.perform_action(
+                if self.edit_target.is_some() {
+                    Action::Apply
+                } else {
+                    Action::Copy
+                },
+                window,
+                cx,
+            ),
             "backspace" | "delete" => {
                 self.editor.delete_selected();
                 cx.notify();
@@ -1737,6 +1843,16 @@ impl Render for SelectionState {
                         true,
                         cx,
                     ))
+                    .when(self.edit_target.is_some(), |bar| {
+                        bar.child(self.build_button(
+                            "apply",
+                            "Apply (Enter)",
+                            Action::Apply,
+                            false,
+                            true,
+                            cx,
+                        ))
+                    })
                     .child(self.build_button(
                         "copy",
                         "Copy (Enter / ⌘C)",

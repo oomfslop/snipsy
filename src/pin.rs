@@ -1,4 +1,4 @@
-use crate::{app, geometry::Rect, platform, raster};
+use crate::{app, geometry::Rect, platform, raster, selection};
 use gpui::{prelude::*, *};
 use image::RgbaImage;
 use std::{
@@ -226,22 +226,36 @@ impl Pin {
         self.replace_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = load.await;
             let _ = this.update_in(cx, |state, window, cx| match result {
-                Ok(content) => {
-                    let previous = std::mem::replace(
-                        &mut state.preview,
-                        raster::create_render_image(&content.image),
-                    );
-                    cx.drop_image(previous, Some(window));
-                    state.original_size = get_logical_size(&content.image);
-                    state.thumbnail_size = None;
-                    state.image = content.image;
-                    state.text = content.text.map(Into::into);
-                    state.schedule_backup(window, cx);
-                    cx.notify();
-                }
+                Ok(content) => state.replace_content(content.image, content.text, window, cx),
                 Err(error) => app::show_error(error, cx),
             });
         }));
+    }
+
+    fn replace_content(
+        &mut self,
+        image: Arc<RgbaImage>,
+        text: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let previous = std::mem::replace(&mut self.preview, raster::create_render_image(&image));
+        cx.drop_image(previous, Some(window));
+        self.original_size = get_logical_size(&image);
+        self.thumbnail_size = None;
+        self.image = image;
+        self.text = text.map(Into::into);
+        self.schedule_backup(window, cx);
+        cx.notify();
+    }
+
+    pub fn replace_image(
+        &mut self,
+        image: Arc<RgbaImage>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.replace_content(image, None, window, cx);
     }
 
     fn close(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -305,6 +319,18 @@ impl Pin {
             "escape" => self.close(window, cx),
             "w" if event.keystroke.modifiers.platform => self.close(window, cx),
             "v" if event.keystroke.modifiers.platform => self.replace_from_clipboard(window, cx),
+            "space" => {
+                if let Some(target) = window.window_handle().downcast::<Pin>() {
+                    if selection::open_pin_editor(
+                        self.image.clone(),
+                        get_image_bounds(&self.image, window.bounds()),
+                        target,
+                        cx,
+                    ) {
+                        platform::set_window_visible(window, false);
+                    }
+                }
+            }
             "c" if event.keystroke.modifiers.alt => {
                 if let Some((_, _, color)) =
                     sample_pin_pixel(&self.image, window.viewport_size(), window.mouse_position())
@@ -452,6 +478,21 @@ fn sample_pin_pixel(
         y,
         crate::geometry::Color::from_rgb(pixel[0], pixel[1], pixel[2]),
     ));
+}
+
+fn get_image_bounds(image: &RgbaImage, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+    if image.width() == 0 || image.height() == 0 {
+        return bounds;
+    }
+    let viewport = glam::vec2(bounds.size.width.into(), bounds.size.height.into());
+    let image_size = glam::vec2(image.width() as f32, image.height() as f32);
+    let scale = (viewport.x / image_size.x).min(viewport.y / image_size.y);
+    let displayed = image_size * scale;
+    let offset = (viewport - displayed) / 2.0;
+    return Bounds::new(
+        bounds.origin + point(px(offset.x), px(offset.y)),
+        size(px(displayed.x), px(displayed.y)),
+    );
 }
 
 fn create_color_label(color: crate::geometry::Color, rgb_format: bool) -> String {
@@ -615,9 +656,10 @@ impl Render for Pin {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_pin_id, create_thumbnail_size, get_logical_size, sample_pin_pixel, transform_image,
+        create_pin_id, create_thumbnail_size, get_image_bounds, get_logical_size, sample_pin_pixel,
+        transform_image,
     };
-    use gpui::{point, px, size};
+    use gpui::{Bounds, point, px, size};
     use image::{Rgba, RgbaImage};
 
     #[test]
@@ -677,6 +719,23 @@ mod tests {
         assert_eq!(
             (f32::from(large.width), f32::from(large.height)),
             (800.0, 600.0)
+        );
+    }
+
+    #[test]
+    fn pin_editor_uses_visible_image_bounds() {
+        let bounds = get_image_bounds(
+            &RgbaImage::new(200, 100),
+            Bounds::new(point(px(10.0), px(20.0)), size(px(100.0), px(100.0))),
+        );
+        assert_eq!(
+            (
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height)
+            ),
+            (10.0, 45.0, 100.0, 50.0)
         );
     }
 }
