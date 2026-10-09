@@ -1444,13 +1444,17 @@ fn get_history_paths(directory: &Path) -> Result<Vec<(u128, PathBuf)>, String> {
 fn write_pin_backup(
     directory: &Path,
     pin: &pin::PinBackup,
-    images: &mut HashMap<u128, Arc<RgbaImage>>,
+    images: &mut HashMap<u128, (Arc<RgbaImage>, Option<Arc<Vec<Frame>>>)>,
 ) -> Result<(), String> {
     std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
-    if images
-        .get(&pin.id)
-        .is_none_or(|image| !Arc::ptr_eq(image, &pin.image))
-    {
+    if images.get(&pin.id).is_none_or(|(image, frames)| {
+        !Arc::ptr_eq(image, &pin.image)
+            || match (frames, &pin.frames) {
+                (Some(previous), Some(current)) => !Arc::ptr_eq(previous, current),
+                (None, None) => false,
+                _ => true,
+            }
+    }) {
         if let Some(frames) = &pin.frames {
             write_animation(frames, &directory.join(format!("{}.gif", pin.id)))?;
             let _ = std::fs::remove_file(directory.join(format!("{}.png", pin.id)));
@@ -1458,7 +1462,7 @@ fn write_pin_backup(
             write_image(&pin.image, &directory.join(format!("{}.png", pin.id)))?;
             let _ = std::fs::remove_file(directory.join(format!("{}.gif", pin.id)));
         }
-        images.insert(pin.id, pin.image.clone());
+        images.insert(pin.id, (pin.image.clone(), pin.frames.clone()));
     }
     let thumbnail = pin
         .thumbnail_size

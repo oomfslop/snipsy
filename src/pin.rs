@@ -125,6 +125,7 @@ fn open_pin_window(
                     click_through: false,
                     text,
                     frames,
+                    animation_frame: None,
                     id,
                     backup_task: None,
                     replace_task: None,
@@ -224,6 +225,7 @@ pub struct Pin {
     click_through: bool,
     text: Option<Arc<str>>,
     frames: Option<Arc<Vec<image::Frame>>>,
+    animation_frame: Option<usize>,
     id: u128,
     backup_task: Option<Task<()>>,
     replace_task: Option<Task<()>>,
@@ -289,6 +291,7 @@ impl Pin {
         self.image = image;
         self.text = text.map(Into::into);
         self.frames = frames;
+        self.animation_frame = None;
         self.schedule_backup(window, cx);
         cx.notify();
     }
@@ -343,6 +346,7 @@ impl Pin {
         self.opacity = 1.0;
         self.thumbnail_size = None;
         window.resize(self.original_size);
+        self.resume_animation(window, cx);
         self.schedule_backup(window, cx);
         cx.notify();
     }
@@ -357,6 +361,59 @@ impl Pin {
         if self.click_through {
             self.toggle_click_through(window, cx);
         }
+    }
+
+    fn show_animation_frame(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(frames) = &self.frames else {
+            return;
+        };
+        let index = index % frames.len();
+        let previous = std::mem::replace(
+            &mut self.preview,
+            raster::create_render_frames(std::slice::from_ref(&frames[index])),
+        );
+        cx.drop_image(previous, Some(window));
+        self.animation_frame = Some(index);
+        cx.notify();
+    }
+
+    fn resume_animation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(frames) = &self.frames else {
+            return;
+        };
+        if self.animation_frame.take().is_some() {
+            let previous =
+                std::mem::replace(&mut self.preview, raster::create_render_frames(frames));
+            cx.drop_image(previous, Some(window));
+            cx.notify();
+        }
+    }
+
+    fn adjust_animation_speed(
+        &mut self,
+        faster: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(frames) = &self.frames else {
+            return;
+        };
+        let factor = if faster { 0.9 } else { 1.1 };
+        let frames = Arc::new(
+            frames
+                .iter()
+                .map(|frame| scale_frame_delay(frame, factor))
+                .collect::<Vec<_>>(),
+        );
+        self.frames = Some(frames);
+        self.animation_frame = None;
+        if let Some(frames) = &self.frames {
+            let previous =
+                std::mem::replace(&mut self.preview, raster::create_render_frames(frames));
+            cx.drop_image(previous, Some(window));
+        }
+        self.schedule_backup(window, cx);
+        cx.notify();
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -404,6 +461,23 @@ impl Pin {
                 app::save_image(self.image.clone(), None, cx)
             }
             "0" => self.reset(window, cx),
+            "p" if self.frames.is_some() => {
+                if self.animation_frame.is_some() {
+                    self.resume_animation(window, cx);
+                } else {
+                    self.show_animation_frame(0, window, cx);
+                }
+            }
+            "1" | "2" if self.frames.is_some() => {
+                let length = self.frames.as_ref().unwrap().len();
+                let index = self.animation_frame.unwrap_or(0);
+                let index = if event.keystroke.key == "1" {
+                    (index + length - 1) % length
+                } else {
+                    (index + 1) % length
+                };
+                self.show_animation_frame(index, window, cx);
+            }
             "1" | "2" | "3" | "4" => {
                 let swap_dimensions = matches!(event.keystroke.key.as_str(), "1" | "2");
                 let (image, frames, preview) = if let Some(frames) = &self.frames {
@@ -424,6 +498,7 @@ impl Pin {
                 let previous = std::mem::replace(&mut self.preview, preview);
                 self.image = image;
                 self.frames = frames;
+                self.animation_frame = None;
                 cx.drop_image(previous, Some(window));
                 if swap_dimensions {
                     let viewport = window.viewport_size();
@@ -487,8 +562,8 @@ impl Pin {
 
 fn transform_image(image: &RgbaImage, key: &str) -> RgbaImage {
     return match key {
-        "1" => image::imageops::rotate270(image),
-        "2" => image::imageops::rotate90(image),
+        "1" => image::imageops::rotate90(image),
+        "2" => image::imageops::rotate270(image),
         "3" => image::imageops::flip_horizontal(image),
         "4" => image::imageops::flip_vertical(image),
         _ => unreachable!(),
@@ -497,6 +572,17 @@ fn transform_image(image: &RgbaImage, key: &str) -> RgbaImage {
 
 fn transform_frame(frame: &image::Frame, key: &str) -> image::Frame {
     return image::Frame::from_parts(transform_image(frame.buffer(), key), 0, 0, frame.delay());
+}
+
+fn scale_frame_delay(frame: &image::Frame, factor: f64) -> image::Frame {
+    let (numerator, denominator) = frame.delay().numer_denom_ms();
+    let milliseconds = (numerator as f64 / denominator as f64 * factor).clamp(10.0, 10_000.0);
+    return image::Frame::from_parts(
+        frame.buffer().clone(),
+        frame.left(),
+        frame.top(),
+        image::Delay::from_saturating_duration(Duration::from_secs_f64(milliseconds / 1000.0)),
+    );
 }
 
 fn get_logical_size(image: &RgbaImage) -> Size<Pixels> {
@@ -622,7 +708,9 @@ impl Render for Pin {
             )
             .on_scroll_wheel(cx.listener(|state, event: &ScrollWheelEvent, window, cx| {
                 let delta: f32 = event.delta.pixel_delta(px(16.0)).y.into();
-                if event.modifiers.platform {
+                if event.modifiers.alt && state.frames.is_some() {
+                    state.adjust_animation_speed(delta > 0.0, window, cx);
+                } else if event.modifiers.platform {
                     state.opacity = (state.opacity + delta * 0.002).clamp(0.2, 1.0);
                     state.schedule_backup(window, cx);
                     cx.notify();
@@ -780,7 +868,7 @@ impl Render for Pin {
 mod tests {
     use super::{
         create_pin_id, create_thumbnail_size, get_image_bounds, get_logical_size, sample_pin_pixel,
-        transform_frame, transform_image,
+        scale_frame_delay, transform_frame, transform_image,
     };
     use gpui::{Bounds, point, px, size};
     use image::{Rgba, RgbaImage};
@@ -791,6 +879,7 @@ mod tests {
 
         let rotated = transform_image(&image, "1");
         assert_eq!(rotated.dimensions(), (3, 2));
+        assert_eq!(rotated.get_pixel(2, 0), image.get_pixel(0, 0));
         assert_eq!(transform_image(&rotated, "2"), image);
         assert_eq!(transform_image(&transform_image(&image, "3"), "3"), image);
         assert_eq!(transform_image(&transform_image(&image, "4"), "4"), image);
@@ -803,6 +892,24 @@ mod tests {
         let transformed = transform_frame(&frame, "2");
         assert_eq!(transformed.buffer().dimensions(), (3, 2));
         assert_eq!(transformed.delay(), delay);
+    }
+
+    #[test]
+    fn animation_speed_stays_within_safe_delay_bounds() {
+        let frame = image::Frame::from_parts(
+            RgbaImage::new(1, 1),
+            0,
+            0,
+            image::Delay::from_numer_denom_ms(100, 1),
+        );
+        assert_eq!(
+            scale_frame_delay(&frame, 0.5).delay().numer_denom_ms(),
+            (50, 1)
+        );
+        assert_eq!(
+            scale_frame_delay(&frame, 0.0).delay().numer_denom_ms(),
+            (10, 1)
+        );
     }
 
     #[test]
