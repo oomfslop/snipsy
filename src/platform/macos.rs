@@ -8,9 +8,10 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlert, NSApplication, NSApplicationActivationPolicy, NSColor, NSColorPanel, NSColorSpace,
-    NSEvent, NSModalResponseCancel, NSModalResponseOK, NSPasteboard, NSPasteboardTypeFileURL,
-    NSPopUpMenuWindowLevel, NSSavePanel, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView,
-    NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSEvent, NSMenu, NSMenuItem, NSModalResponseCancel, NSModalResponseOK, NSPasteboard,
+    NSPasteboardTypeFileURL, NSPopUpMenuWindowLevel, NSSavePanel, NSScreen,
+    NSSquareStatusItemLength, NSStatusBar, NSStatusItem, NSTrackingArea, NSTrackingAreaOptions,
+    NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType, CGPoint};
 use objc2_core_graphics::{
@@ -62,6 +63,103 @@ define_class!(
         }
     }
 );
+
+#[derive(Clone, Copy, Debug)]
+pub enum StatusCommand {
+    Capture,
+    Paste,
+    History,
+    Whiteboard,
+    TogglePins,
+    Quit,
+}
+
+struct StatusItemIvars {
+    sender: Sender<StatusCommand>,
+}
+define_class!(
+    #[unsafe(super = NSObject)]
+    #[name = "SnipsyStatusItemTarget"]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = StatusItemIvars]
+    struct StatusItemTarget;
+    // SAFETY: NSObjectProtocol has no additional requirements.
+    unsafe impl NSObjectProtocol for StatusItemTarget {}
+    impl StatusItemTarget {
+        #[unsafe(method(command:))]
+        fn command(&self, item: &NSMenuItem) {
+            let command = match item.tag() {
+                0 => StatusCommand::Capture,
+                1 => StatusCommand::Paste,
+                2 => StatusCommand::History,
+                3 => StatusCommand::Whiteboard,
+                4 => StatusCommand::TogglePins,
+                _ => StatusCommand::Quit,
+            };
+            let _ = self.ivars().sender.try_send(command);
+        }
+    }
+);
+
+pub struct StatusItem {
+    _item: Retained<NSStatusItem>,
+    _menu: Retained<NSMenu>,
+    _target: Retained<StatusItemTarget>,
+}
+
+pub fn create_status_item(sender: Sender<StatusCommand>) -> StatusItem {
+    let mtm = MainThreadMarker::new().expect("status item opens on the main thread");
+    let allocated = StatusItemTarget::alloc(mtm).set_ivars(StatusItemIvars { sender });
+    // SAFETY: NSObject init initializes this allocated subclass with its ivars already installed.
+    let target: Retained<StatusItemTarget> = unsafe { msg_send![super(allocated), init] };
+    let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Snipsy"));
+    for (title, tag) in [
+        ("New screenshot", 0),
+        ("Pin clipboard", 1),
+        ("History", 2),
+        ("Whiteboard", 3),
+        ("Show/hide pins", 4),
+    ] {
+        // SAFETY: command: is implemented by the retained target.
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                Some(sel!(command:)),
+                &NSString::new(),
+            )
+        };
+        item.setTag(tag);
+        // SAFETY: The target implements command: and outlives the menu.
+        unsafe { item.setTarget(Some(&target)) };
+        menu.addItem(&item);
+    }
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    // SAFETY: command: is implemented by the retained target.
+    let quit = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Quit Snipsy"),
+            Some(sel!(command:)),
+            &NSString::new(),
+        )
+    };
+    quit.setTag(5);
+    // SAFETY: The target implements command: and outlives the menu.
+    unsafe { quit.setTarget(Some(&target)) };
+    menu.addItem(&quit);
+    let status_bar = NSStatusBar::systemStatusBar();
+    let item = status_bar.statusItemWithLength(NSSquareStatusItemLength);
+    if let Some(button) = item.button(mtm) {
+        button.setTitle(&NSString::from_str("✂︎"));
+    }
+    item.setMenu(Some(&menu));
+    return StatusItem {
+        _item: item,
+        _menu: menu,
+        _target: target,
+    };
+}
 
 pub struct ColorPicker {
     panel: Retained<NSColorPanel>,

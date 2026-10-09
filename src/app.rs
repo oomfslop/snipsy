@@ -27,6 +27,7 @@ use std::{
 
 pub struct AppState {
     _hotkeys: GlobalHotKeyManager,
+    _status_item: platform::StatusItem,
     pub fonts: Arc<resvg::usvg::fontdb::Database>,
     pub selection: Option<WindowHandle<SelectionState>>,
     pub cached_selection: Option<WindowHandle<SelectionState>>,
@@ -287,6 +288,8 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
     application.on_reopen(start_capture);
     application.run(move |cx| {
         platform::initialize_app();
+        let (status_sender, status_receiver) = async_channel::unbounded();
+        let status_item = platform::create_status_item(status_sender);
         let mut fonts = resvg::usvg::fontdb::Database::new();
         fonts.load_system_fonts();
         let (data_directory, mut hotkey_error) = match platform::get_app_data_dir() {
@@ -331,6 +334,7 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
         }));
         cx.set_global(AppState {
             _hotkeys: hotkeys,
+            _status_item: status_item,
             fonts: Arc::new(fonts),
             selection: None,
             cached_selection: None,
@@ -455,6 +459,19 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
         cx.spawn(async move |cx| {
             while let Ok(action) = instance_commands.recv().await {
                 let _ = cx.update(|cx| dispatch_startup(action, cx));
+            }
+        })
+        .detach();
+        cx.spawn(async move |cx| {
+            while let Ok(command) = status_receiver.recv().await {
+                let _ = cx.update(|cx| match command {
+                    platform::StatusCommand::Capture => start_capture(cx),
+                    platform::StatusCommand::Paste => paste_image(cx),
+                    platform::StatusCommand::History => show_history(cx),
+                    platform::StatusCommand::Whiteboard => start_whiteboard([255; 4], cx),
+                    platform::StatusCommand::TogglePins => toggle_pins(cx),
+                    platform::StatusCommand::Quit => cx.quit(),
+                });
             }
         })
         .detach();

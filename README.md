@@ -24,6 +24,8 @@ Run `scripts/prepare_vendor.py` once per checkout, or again after changing the p
 
 Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When launched through a terminal, macOS may attribute permission to that terminal instead. Snipsy starts in the background with no default window. Capture overlaps graphics setup, and the editor stays hidden between captures to reuse its GPU resources. Use a global shortcut to capture or pin an image. Reopening the app starts a capture. Quit with `⌘Q` while an editor or pin is focused.
 
+The menu-bar item provides capture, clipboard pinning, history, whiteboard, pin visibility, and quit actions.
+
 ## Shortcuts
 
 | Action | Shortcut |
