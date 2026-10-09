@@ -1,6 +1,6 @@
 use crate::{
-    editor::Screenshot, history::History, icons::Icons, pin, platform, raster,
-    selection::SelectionState,
+    editor::Screenshot, history::History, icons::Icons, pin, platform, preferences::Preferences,
+    raster, selection::SelectionState,
 };
 use base64::Engine;
 use global_hotkey::{
@@ -21,7 +21,7 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -33,6 +33,7 @@ pub struct AppState {
     pub cached_selection: Option<WindowHandle<SelectionState>>,
     pub history_window: Option<WindowHandle<History>>,
     pub pin_editor: Option<WindowHandle<SelectionState>>,
+    pub preferences_window: Option<WindowHandle<Preferences>>,
     pub pins: Vec<WindowHandle<pin::Pin>>,
     pub closed_pins: Vec<pin::ClosedPin>,
     pub pins_hidden: bool,
@@ -41,6 +42,9 @@ pub struct AppState {
     pub history: Vec<(Arc<RgbaImage>, Arc<RenderImage>)>,
     history_persist: async_channel::Sender<Arc<RgbaImage>>,
     pin_persist: async_channel::Sender<pin::PinBackupCommand>,
+    hotkeys: HotkeySettings,
+    hotkey_commands: Arc<Mutex<HashMap<u32, Command>>>,
+    settings_path: Option<PathBuf>,
     pub error: Option<String>,
 }
 impl Global for AppState {}
@@ -50,6 +54,53 @@ enum Command {
     Paste,
     ToggleClickThrough,
     TogglePins,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HotkeyKind {
+    Capture,
+    Paste,
+    ClickThrough,
+    TogglePins,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HotkeySettings {
+    pub capture: HotKey,
+    pub paste: HotKey,
+    pub click_through: HotKey,
+    pub toggle_pins: HotKey,
+}
+
+impl Default for HotkeySettings {
+    fn default() -> Self {
+        return Self {
+            capture: HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA),
+            paste: HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyP),
+            click_through: HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyX),
+            toggle_pins: HotKey::new(Some(Modifiers::SHIFT), Code::F3),
+        };
+    }
+}
+
+impl HotkeySettings {
+    pub fn get(self, kind: HotkeyKind) -> HotKey {
+        return match kind {
+            HotkeyKind::Capture => self.capture,
+            HotkeyKind::Paste => self.paste,
+            HotkeyKind::ClickThrough => self.click_through,
+            HotkeyKind::TogglePins => self.toggle_pins,
+        };
+    }
+
+    fn set(&mut self, kind: HotkeyKind, hotkey: HotKey) {
+        match kind {
+            HotkeyKind::Capture => self.capture = hotkey,
+            HotkeyKind::Paste => self.paste = hotkey,
+            HotkeyKind::ClickThrough => self.click_through = hotkey,
+            HotkeyKind::TogglePins => self.toggle_pins = hotkey,
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -71,6 +122,7 @@ actions!(
         PinClipboard,
         ShowHistory,
         ShowWhiteboard,
+        ShowPreferences,
         TogglePinnedImages,
         QuitSnipsy
     ]
@@ -280,6 +332,135 @@ fn connect_instance(
     return Ok(Some(receiver));
 }
 
+fn load_hotkey_settings(path: &Path) -> Result<HotkeySettings, String> {
+    let input = match std::fs::read_to_string(path) {
+        Ok(input) => input,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HotkeySettings::default());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut settings = HotkeySettings::default();
+    for line in input.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            return Err("Invalid hotkey settings".into());
+        };
+        let hotkey = value.parse::<HotKey>().map_err(|error| error.to_string())?;
+        match key {
+            "capture" => settings.capture = hotkey,
+            "paste" => settings.paste = hotkey,
+            "click_through" => settings.click_through = hotkey,
+            "toggle_pins" => settings.toggle_pins = hotkey,
+            _ => return Err("Unknown hotkey setting".into()),
+        }
+    }
+    validate_hotkey_settings(settings)?;
+    return Ok(settings);
+}
+
+fn validate_hotkey_settings(settings: HotkeySettings) -> Result<(), String> {
+    let hotkeys = [
+        settings.capture,
+        settings.paste,
+        settings.click_through,
+        settings.toggle_pins,
+    ];
+    if hotkeys
+        .iter()
+        .enumerate()
+        .any(|(index, hotkey)| hotkeys[index + 1..].contains(hotkey))
+    {
+        return Err("Global shortcuts must be unique".into());
+    }
+    let lens = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyL);
+    if [settings.paste, settings.click_through, settings.toggle_pins].contains(&lens) {
+        return Err("⌘⇧L is reserved for capture".into());
+    }
+    return Ok(());
+}
+
+fn write_hotkey_settings(path: &Path, settings: HotkeySettings) -> Result<(), String> {
+    let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))
+        .map_err(|error| error.to_string())?;
+    write!(
+        file,
+        "capture={}\npaste={}\nclick_through={}\ntoggle_pins={}\n",
+        settings.capture, settings.paste, settings.click_through, settings.toggle_pins
+    )
+    .map_err(|error| error.to_string())?;
+    file.as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    file.persist(path).map_err(|error| error.to_string())?;
+    return Ok(());
+}
+
+fn get_hotkey_entries(settings: HotkeySettings) -> [(HotKey, Command); 4] {
+    return [
+        (settings.capture, Command::Capture),
+        (settings.paste, Command::Paste),
+        (settings.click_through, Command::ToggleClickThrough),
+        (settings.toggle_pins, Command::TogglePins),
+    ];
+}
+
+pub fn get_hotkey_settings(cx: &App) -> HotkeySettings {
+    return cx.global::<AppState>().hotkeys;
+}
+
+pub fn set_hotkey(kind: HotkeyKind, hotkey: HotKey, cx: &mut App) -> Result<(), String> {
+    let state = cx.global_mut::<AppState>();
+    let old = state.hotkeys.get(kind);
+    if old == hotkey {
+        return Ok(());
+    }
+    let mut settings = state.hotkeys;
+    settings.set(kind, hotkey);
+    validate_hotkey_settings(settings)?;
+    let lens = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyL);
+    if old != lens {
+        state
+            ._hotkeys
+            .unregister(old)
+            .map_err(|error| error.to_string())?;
+    }
+    if hotkey != lens {
+        if let Err(error) = state._hotkeys.register(hotkey) {
+            if old != lens {
+                let _ = state._hotkeys.register(old);
+            }
+            return Err(error.to_string());
+        }
+    }
+    if let Some(path) = &state.settings_path {
+        if let Err(error) = write_hotkey_settings(path, settings) {
+            if hotkey != lens {
+                let _ = state._hotkeys.unregister(hotkey);
+            }
+            if old != lens {
+                let _ = state._hotkeys.register(old);
+            }
+            return Err(error);
+        }
+    }
+    let mut commands = state.hotkey_commands.lock().unwrap();
+    if old != lens {
+        commands.remove(&old.id());
+    }
+    commands.insert(
+        hotkey.id(),
+        match kind {
+            HotkeyKind::Capture => Command::Capture,
+            HotkeyKind::Paste => Command::Paste,
+            HotkeyKind::ClickThrough => Command::ToggleClickThrough,
+            HotkeyKind::TogglePins => Command::TogglePins,
+        },
+    );
+    drop(commands);
+    state.hotkeys = settings;
+    return Ok(());
+}
+
 pub fn run(startup: StartupAction) -> Result<(), String> {
     let Some(instance_commands) = connect_instance(&startup)? else {
         return Ok(());
@@ -296,34 +477,40 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
             Ok(directory) => (Some(directory), None),
             Err(error) => (None, Some(error)),
         };
+        let settings_path = data_directory
+            .as_ref()
+            .map(|directory| directory.join("hotkeys.conf"));
+        let hotkey_settings = match settings_path.as_deref().map(load_hotkey_settings) {
+            Some(Ok(settings)) => settings,
+            Some(Err(error)) => {
+                hotkey_error = Some(format!("Could not load shortcuts: {error}"));
+                HotkeySettings::default()
+            }
+            None => HotkeySettings::default(),
+        };
         let (history_persist, history_receiver) = async_channel::unbounded();
         let (pin_persist, pin_receiver) = async_channel::unbounded();
         let hotkeys = GlobalHotKeyManager::new().expect("could not create global shortcuts");
-        let capture = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
         let lens = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyL);
-        let paste = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyP);
-        let click_through = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyX);
-        let toggle_pins_hotkey = HotKey::new(Some(Modifiers::SHIFT), Code::F3);
-        for hotkey in [&capture, &lens, &paste, &click_through, &toggle_pins_hotkey] {
-            if let Err(error) = hotkeys.register(*hotkey) {
+        let hotkey_commands = Arc::new(Mutex::new(HashMap::new()));
+        for (hotkey, command) in get_hotkey_entries(hotkey_settings)
+            .into_iter()
+            .chain((lens != hotkey_settings.capture).then_some((lens, Command::Capture)))
+        {
+            if let Err(error) = hotkeys.register(hotkey) {
                 eprintln!("could not register shortcut: {error}");
                 hotkey_error = Some(format!("Could not register a shortcut: {error}"));
+            } else {
+                hotkey_commands.lock().unwrap().insert(hotkey.id(), command);
             }
         }
         let (sender, receiver) = async_channel::unbounded();
+        let event_hotkeys = hotkey_commands.clone();
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
             if event.state != HotKeyState::Pressed {
                 return;
             }
-            let command = if event.id == capture.id() || event.id == lens.id() {
-                Command::Capture
-            } else if event.id == paste.id() {
-                Command::Paste
-            } else if event.id == click_through.id() {
-                Command::ToggleClickThrough
-            } else if event.id == toggle_pins_hotkey.id() {
-                Command::TogglePins
-            } else {
+            let Some(command) = event_hotkeys.lock().unwrap().get(&event.id).copied() else {
                 return;
             };
             #[cfg(debug_assertions)]
@@ -340,6 +527,7 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
             cached_selection: None,
             history_window: None,
             pin_editor: None,
+            preferences_window: None,
             pins: Vec::new(),
             closed_pins: Vec::new(),
             pins_hidden: false,
@@ -348,6 +536,9 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
             history: Vec::new(),
             history_persist,
             pin_persist,
+            hotkeys: hotkey_settings,
+            hotkey_commands,
+            settings_path,
             error: hotkey_error,
         });
         if let Some(directory) = data_directory {
@@ -428,6 +619,7 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
         cx.on_action(|_: &PinClipboard, cx| paste_image(cx));
         cx.on_action(|_: &ShowHistory, cx| show_history(cx));
         cx.on_action(|_: &ShowWhiteboard, cx| start_whiteboard([255; 4], cx));
+        cx.on_action(|_: &ShowPreferences, cx| show_preferences(cx));
         cx.on_action(|_: &TogglePinnedImages, cx| toggle_pins(cx));
         cx.on_action(|_: &QuitSnipsy, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", QuitSnipsy, None)]);
@@ -438,6 +630,7 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
                 MenuItem::action("Pin clipboard", PinClipboard),
                 MenuItem::action("History", ShowHistory),
                 MenuItem::action("Whiteboard", ShowWhiteboard),
+                MenuItem::action("Preferences…", ShowPreferences),
                 MenuItem::action("Show/hide pins", TogglePinnedImages),
                 MenuItem::separator(),
                 MenuItem::action("Quit Snipsy", QuitSnipsy),
@@ -469,6 +662,7 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
                     platform::StatusCommand::Paste => paste_image(cx),
                     platform::StatusCommand::History => show_history(cx),
                     platform::StatusCommand::Whiteboard => start_whiteboard([255; 4], cx),
+                    platform::StatusCommand::Preferences => show_preferences(cx),
                     platform::StatusCommand::TogglePins => toggle_pins(cx),
                     platform::StatusCommand::Quit => cx.quit(),
                 });
@@ -525,6 +719,40 @@ fn show_history(cx: &mut App) {
         |window, cx| cx.new(|cx| History::new(window, cx)),
     ) {
         Ok(handle) => cx.global_mut::<AppState>().history_window = Some(handle),
+        Err(error) => show_error(error.to_string(), cx),
+    }
+}
+
+fn show_preferences(cx: &mut App) {
+    if let Some(handle) = cx.global::<AppState>().preferences_window {
+        if handle
+            .update(cx, |_, window, cx| {
+                cx.activate(true);
+                window.activate_window();
+            })
+            .is_ok()
+        {
+            return;
+        }
+    }
+    cx.activate(true);
+    match cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(430.0), px(300.0)),
+                cx,
+            ))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Preferences".into()),
+                ..Default::default()
+            }),
+            window_min_size: Some(size(px(360.0), px(260.0))),
+            ..Default::default()
+        },
+        |window, cx| cx.new(|cx| Preferences::new(window, cx)),
+    ) {
+        Ok(handle) => cx.global_mut::<AppState>().preferences_window = Some(handle),
         Err(error) => show_error(error.to_string(), cx),
     }
 }
@@ -1371,10 +1599,12 @@ pub fn show_error(error: String, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        StartupAction, collect_animation_frames, create_quick_save_path, decode_startup_action,
-        encode_startup_action, get_history_paths, insert_capture_history, load_history, load_path,
-        load_pin_backups, parse_color, parse_pin_backup, parse_startup_action, remove_pin_backup,
-        should_restore_pin, write_history, write_image, write_pin_backup,
+        HotkeySettings, StartupAction, collect_animation_frames, create_quick_save_path,
+        decode_startup_action, encode_startup_action, get_history_paths, insert_capture_history,
+        load_history, load_hotkey_settings, load_path, load_pin_backups, parse_color,
+        parse_pin_backup, parse_startup_action, remove_pin_backup, should_restore_pin,
+        validate_hotkey_settings, write_history, write_hotkey_settings, write_image,
+        write_pin_backup,
     };
     use crate::{editor::Screenshot, geometry::Rect, pin::PinBackup};
     use glam::{Vec2, vec2};
@@ -1647,5 +1877,20 @@ mod tests {
             create_quick_save_path(directory.path(), 7),
             directory.path().join("Snipsy-8.png")
         );
+    }
+
+    #[test]
+    fn hotkey_settings_round_trip_and_reject_conflicts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hotkeys.conf");
+        let settings = HotkeySettings::default();
+        write_hotkey_settings(&path, settings).unwrap();
+        assert_eq!(load_hotkey_settings(&path).unwrap(), settings);
+        let mut duplicate = settings;
+        duplicate.paste = duplicate.capture;
+        assert!(validate_hotkey_settings(duplicate).is_err());
+        let mut reserved = settings;
+        reserved.paste = "super+shift+KeyL".parse().unwrap();
+        assert!(validate_hotkey_settings(reserved).is_err());
     }
 }

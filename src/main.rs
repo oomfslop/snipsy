@@ -6,6 +6,7 @@ mod icons;
 mod lens;
 mod pin;
 mod platform;
+mod preferences;
 mod raster;
 mod selection;
 

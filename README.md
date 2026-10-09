@@ -25,6 +25,7 @@ Run `scripts/prepare_vendor.py` once per checkout, or again after changing the p
 Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When launched through a terminal, macOS may attribute permission to that terminal instead. Snipsy starts in the background with no default window. Capture overlaps graphics setup, and the editor stays hidden between captures to reuse its GPU resources. Use a global shortcut to capture or pin an image. Reopening the app starts a capture. Quit with `⌘Q` while an editor or pin is focused.
 
 The menu-bar item provides capture, clipboard pinning, history, whiteboard, pin visibility, and quit actions.
+Global capture, paste, click-through, and pin-visibility shortcuts are configurable from Preferences.
 
 ## Shortcuts
 
@@ -59,7 +60,7 @@ Open pins, including animated GIFs, are backed up in Application Support and res
 Startup commands: `snipsy snip`, `snipsy paste`, `snipsy paste --plain TEXT`, `snipsy paste --files FILE...`, `snipsy history`, `snipsy whiteboard [--color COLOR]`, and `snipsy transparent-whiteboard`.
 Commands are forwarded to the resident Snipsy process; a command starts the resident process when needed.
 
-PNG, JPEG, WebP, BMP, TIFF, TGA, ICO, and static GIF exports use an atomic file replacement. The last ten screen captures can be replayed while snipping, and the last ten finished selections persist in Application Support and are available from the History menu. Settings are deferred.
+PNG, JPEG, WebP, BMP, TIFF, TGA, ICO, and static GIF exports use an atomic file replacement. The last ten screen captures can be replayed while snipping, and the last ten finished selections persist in Application Support and are available from the History menu.
 
 Google Lens remains available in the editor toolbar. It submits the edited PNG directly from the default browser, via a temporary local handoff page deleted after 30 seconds. The Lens endpoint is undocumented and may change.
 
