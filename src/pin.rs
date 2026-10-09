@@ -34,13 +34,14 @@ fn open_pin_with_text(
     let bounds = bounds
         .map(|bounds| Bounds::new(point(px(bounds.pos.x), px(bounds.pos.y)), logical_size))
         .unwrap_or_else(|| Bounds::centered(None, logical_size, cx));
-    open_pin_window(image, bounds, logical_size, 1.0, text, cx);
+    open_pin_window(image, bounds, logical_size, None, 1.0, text, cx);
 }
 
 fn open_pin_window(
     image: Arc<RgbaImage>,
     bounds: Bounds<Pixels>,
     original_size: Size<Pixels>,
+    thumbnail_size: Option<Size<Pixels>>,
     opacity: f32,
     text: Option<Arc<str>>,
     cx: &mut App,
@@ -78,6 +79,7 @@ fn open_pin_window(
                     opacity,
                     focus,
                     original_size,
+                    thumbnail_size,
                     click_through: false,
                     text,
                 }
@@ -94,6 +96,7 @@ pub struct ClosedPin {
     bounds: Bounds<Pixels>,
     opacity: f32,
     original_size: Size<Pixels>,
+    thumbnail_size: Option<Size<Pixels>>,
     text: Option<Arc<str>>,
     clipboard_change_count: i64,
 }
@@ -110,6 +113,7 @@ pub fn restore_pin(pin: ClosedPin, cx: &mut App) {
         pin.image,
         pin.bounds,
         pin.original_size,
+        pin.thumbnail_size,
         pin.opacity,
         pin.text,
         cx,
@@ -122,6 +126,7 @@ pub struct Pin {
     opacity: f32,
     focus: FocusHandle,
     original_size: Size<Pixels>,
+    thumbnail_size: Option<Size<Pixels>>,
     click_through: bool,
     text: Option<Arc<str>>,
 }
@@ -134,6 +139,7 @@ impl Pin {
             bounds: window.bounds(),
             opacity: self.opacity,
             original_size: self.original_size,
+            thumbnail_size: self.thumbnail_size,
             text: self.text.clone(),
             clipboard_change_count: platform::get_clipboard_change_count(),
         });
@@ -141,6 +147,17 @@ impl Pin {
             state.closed_pins.remove(0);
         }
         window.remove_window();
+    }
+
+    fn toggle_thumbnail(&mut self, window: &mut Window) {
+        if let Some(size) = self.thumbnail_size.take() {
+            window.resize(size);
+            return;
+        }
+        let viewport = window.viewport_size();
+        let target = create_thumbnail_size(viewport.width.into(), viewport.height.into());
+        self.thumbnail_size = Some(viewport);
+        window.resize(size(px(target.0), px(target.1)));
     }
 
     pub fn toggle_click_through(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -171,7 +188,10 @@ impl Pin {
                 }
             }
             "s" if event.keystroke.modifiers.platform => app::save_image(self.image.clone(), cx),
-            "0" => window.resize(self.original_size),
+            "0" => {
+                self.thumbnail_size = None;
+                window.resize(self.original_size);
+            }
             "1" | "2" | "3" | "4" => {
                 let swap_dimensions = matches!(event.keystroke.key.as_str(), "1" | "2");
                 let image = transform_image(&self.image, &event.keystroke.key);
@@ -183,6 +203,9 @@ impl Pin {
                     let viewport = window.viewport_size();
                     window.resize(size(viewport.height, viewport.width));
                     self.original_size = size(self.original_size.height, self.original_size.width);
+                    self.thumbnail_size = self
+                        .thumbnail_size
+                        .map(|size| gpui::size(size.height, size.width));
                 }
                 cx.notify();
             }
@@ -228,6 +251,14 @@ fn transform_image(image: &RgbaImage, key: &str) -> RgbaImage {
     };
 }
 
+fn create_thumbnail_size(width: f32, height: f32) -> (f32, f32) {
+    let scale = (width / 180.0)
+        .max(height / 120.0)
+        .max(1.0)
+        .min((width / 40.0).min(height / 40.0).max(1.0));
+    return (width / scale, height / scale);
+}
+
 impl Render for Pin {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -243,7 +274,11 @@ impl Render for Pin {
                 MouseButton::Left,
                 cx.listener(|state, event: &MouseDownEvent, window, cx| {
                     if event.click_count >= 2 {
-                        state.close(window, cx);
+                        if event.modifiers.shift {
+                            state.toggle_thumbnail(window);
+                        } else {
+                            state.close(window, cx);
+                        }
                     } else {
                         window.start_window_move();
                     }
@@ -327,7 +362,7 @@ impl Render for Pin {
 
 #[cfg(test)]
 mod tests {
-    use super::transform_image;
+    use super::{create_thumbnail_size, transform_image};
     use image::{Rgba, RgbaImage};
 
     #[test]
@@ -339,5 +374,12 @@ mod tests {
         assert_eq!(transform_image(&rotated, "2"), image);
         assert_eq!(transform_image(&transform_image(&image, "3"), "3"), image);
         assert_eq!(transform_image(&transform_image(&image, "4"), "4"), image);
+    }
+
+    #[test]
+    fn thumbnails_fit_without_upscaling() {
+        assert_eq!(create_thumbnail_size(90.0, 60.0), (90.0, 60.0));
+        assert_eq!(create_thumbnail_size(360.0, 120.0), (180.0, 60.0));
+        assert_eq!(create_thumbnail_size(100.0, 400.0), (40.0, 160.0));
     }
 }
