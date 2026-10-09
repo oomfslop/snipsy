@@ -60,6 +60,7 @@ enum Action {
     Cancel,
     Pin,
     Save,
+    QuickSave,
     Copy,
     Variant(Tool),
     Filled(bool),
@@ -575,7 +576,7 @@ impl SelectionState {
             && self.selection.is_some()
             && matches!(
                 action,
-                Action::Copy | Action::Save | Action::Pin | Action::Search
+                Action::Copy | Action::Save | Action::QuickSave | Action::Pin | Action::Search
             )
         {
             self.pending_action = Some(action);
@@ -622,7 +623,7 @@ impl SelectionState {
                 self.dismiss(window, cx);
                 return;
             }
-            Action::Copy | Action::Save | Action::Pin | Action::Search => {
+            Action::Copy | Action::Save | Action::QuickSave | Action::Pin | Action::Search => {
                 match self.get_image(cx) {
                     Ok(image) => {
                         let image = Arc::new(image);
@@ -640,6 +641,9 @@ impl SelectionState {
                                 self.dismiss(window, cx);
                             }
                             Action::Save => app::save_image(image, self.screenshot.clone(), cx),
+                            Action::QuickSave => {
+                                app::quick_save_image(image, self.screenshot.clone(), cx)
+                            }
                             Action::Pin => {
                                 if let Some(screenshot) = self.screenshot.clone() {
                                     app::remember_capture_frame(screenshot, cx);
@@ -719,7 +723,15 @@ impl SelectionState {
                 ),
                 "y" => self.perform_action(Action::Redo, window, cx),
                 "c" => self.perform_action(Action::Copy, window, cx),
-                "s" => self.perform_action(Action::Save, window, cx),
+                "s" => self.perform_action(
+                    if modifiers.shift {
+                        Action::QuickSave
+                    } else {
+                        Action::Save
+                    },
+                    window,
+                    cx,
+                ),
                 "p" => self.perform_action(Action::Pin, window, cx),
                 "a" => {
                     self.selection = Some(Rect {

@@ -325,6 +325,9 @@ impl Pin {
                     app::show_error(error, cx);
                 }
             }
+            "s" if event.keystroke.modifiers.platform && event.keystroke.modifiers.shift => {
+                app::quick_save_image(self.image.clone(), None, cx)
+            }
             "s" if event.keystroke.modifiers.platform => {
                 app::save_image(self.image.clone(), None, cx)
             }

@@ -744,6 +744,45 @@ pub fn save_image(image: Arc<RgbaImage>, capture: Option<Screenshot>, cx: &mut A
     .detach();
 }
 
+pub fn quick_save_image(image: Arc<RgbaImage>, capture: Option<Screenshot>, cx: &mut App) {
+    let directory = match platform::get_quick_save_dir() {
+        Ok(directory) => directory,
+        Err(error) => {
+            show_error(error, cx);
+            return;
+        }
+    };
+    let id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = create_quick_save_path(&directory, id);
+    let saved_image = image.clone();
+    let save = cx
+        .background_executor()
+        .spawn(async move { write_image(&image, &path) });
+    cx.spawn(async move |cx| {
+        let result = save.await;
+        let _ = cx.update(|cx| match result {
+            Ok(()) => {
+                if let Some(capture) = capture {
+                    remember_capture_frame(capture, cx);
+                }
+                remember_capture(saved_image, cx);
+            }
+            Err(error) => show_error(error, cx),
+        });
+    })
+    .detach();
+}
+
+fn create_quick_save_path(directory: &Path, mut id: u128) -> PathBuf {
+    while directory.join(format!("Snipsy-{id}.png")).exists() {
+        id += 1;
+    }
+    return directory.join(format!("Snipsy-{id}.png"));
+}
+
 fn write_image(image: &RgbaImage, path: &Path) -> Result<(), String> {
     let path = if path.extension().is_none() {
         path.with_extension("png")
@@ -976,9 +1015,10 @@ pub fn show_error(error: String, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        StartupAction, get_history_paths, insert_capture_history, load_history, load_path,
-        load_pin_backups, parse_color, parse_pin_backup, parse_startup_action, remove_pin_backup,
-        should_restore_pin, write_history, write_image, write_pin_backup,
+        StartupAction, create_quick_save_path, get_history_paths, insert_capture_history,
+        load_history, load_path, load_pin_backups, parse_color, parse_pin_backup,
+        parse_startup_action, remove_pin_backup, should_restore_pin, write_history, write_image,
+        write_pin_backup,
     };
     use crate::{editor::Screenshot, geometry::Rect, pin::PinBackup};
     use glam::{Vec2, vec2};
@@ -1164,5 +1204,15 @@ mod tests {
             StartupAction::Files(vec![PathBuf::from("image.png")])
         );
         assert!(parse_startup_action(["paste".into(), "--files".into()]).is_err());
+    }
+
+    #[test]
+    fn quick_save_paths_do_not_replace_existing_captures() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("Snipsy-7.png"), b"existing").unwrap();
+        assert_eq!(
+            create_quick_save_path(directory.path(), 7),
+            directory.path().join("Snipsy-8.png")
+        );
     }
 }

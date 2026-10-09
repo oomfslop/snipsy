@@ -130,15 +130,20 @@ pub fn get_clipboard_change_count() -> i64 {
 }
 
 pub fn get_app_data_dir() -> Result<PathBuf, String> {
+    return get_user_directory(NSSearchPathDirectory::ApplicationSupportDirectory, "Snipsy");
+}
+
+pub fn get_quick_save_dir() -> Result<PathBuf, String> {
+    return get_user_directory(NSSearchPathDirectory::PicturesDirectory, "Snipsy");
+}
+
+fn get_user_directory(directory: NSSearchPathDirectory, child: &str) -> Result<PathBuf, String> {
     let base = NSFileManager::defaultManager()
-        .URLsForDirectory_inDomains(
-            NSSearchPathDirectory::ApplicationSupportDirectory,
-            NSSearchPathDomainMask::UserDomainMask,
-        )
+        .URLsForDirectory_inDomains(directory, NSSearchPathDomainMask::UserDomainMask)
         .firstObject()
-        .ok_or("Application Support directory is unavailable")?;
+        .ok_or("Requested user directory is unavailable")?;
     let url = base
-        .URLByAppendingPathComponent_isDirectory(&NSString::from_str("Snipsy"), true)
+        .URLByAppendingPathComponent_isDirectory(&NSString::from_str(child), true)
         .ok_or("Could not create the Snipsy data path")?;
     let path = url
         .path()
