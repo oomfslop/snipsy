@@ -56,6 +56,7 @@ pub enum StartupAction {
     Plain(String),
     Files(Vec<PathBuf>),
     History,
+    Whiteboard([u8; 4]),
 }
 
 actions!(
@@ -64,6 +65,7 @@ actions!(
         CaptureScreen,
         PinClipboard,
         ShowHistory,
+        ShowWhiteboard,
         TogglePinnedImages,
         QuitSnipsy
     ]
@@ -105,9 +107,22 @@ pub fn parse_startup_action(
         .then(|| StartupAction::Files(args[2..].iter().map(PathBuf::from).collect()))
         .ok_or("Usage: snipsy paste --files FILE...".into()),
         "history" if args.len() == 1 => Ok(StartupAction::History),
+        "whiteboard" if args.len() == 1 => Ok(StartupAction::Whiteboard([255; 4])),
+        "whiteboard"
+            if args.len() == 3
+                && args.get(1).and_then(|arg| arg.to_str()) == Some("--color") =>
+        {
+            args[2]
+                .to_str()
+                .and_then(parse_color)
+                .map(StartupAction::Whiteboard)
+                .ok_or("Invalid whiteboard color".into())
+        }
+        "transparent-whiteboard" if args.len() == 1 => {
+            Ok(StartupAction::Whiteboard([0, 0, 0, 0]))
+        }
         _ => Err(
-            "Usage: snipsy [snip | paste [--clipboard | --plain TEXT | --files FILE...] | history]"
-                .into(),
+            "Usage: snipsy [snip | paste [--clipboard | --plain TEXT | --files FILE...] | history | whiteboard [--color COLOR] | transparent-whiteboard]".into(),
         ),
     };
 }
@@ -255,6 +270,7 @@ pub fn run(startup: StartupAction) {
         cx.on_action(|_: &CaptureScreen, cx| start_capture(cx));
         cx.on_action(|_: &PinClipboard, cx| paste_image(cx));
         cx.on_action(|_: &ShowHistory, cx| show_history(cx));
+        cx.on_action(|_: &ShowWhiteboard, cx| start_whiteboard([255; 4], cx));
         cx.on_action(|_: &TogglePinnedImages, cx| toggle_pins(cx));
         cx.on_action(|_: &QuitSnipsy, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", QuitSnipsy, None)]);
@@ -264,6 +280,7 @@ pub fn run(startup: StartupAction) {
                 MenuItem::action("New screenshot", CaptureScreen),
                 MenuItem::action("Pin clipboard", PinClipboard),
                 MenuItem::action("History", ShowHistory),
+                MenuItem::action("Whiteboard", ShowWhiteboard),
                 MenuItem::action("Show/hide pins", TogglePinnedImages),
                 MenuItem::separator(),
                 MenuItem::action("Quit Snipsy", QuitSnipsy),
@@ -289,6 +306,7 @@ pub fn run(startup: StartupAction) {
             StartupAction::Plain(text) => pin_text(text, cx),
             StartupAction::Files(paths) => open_paths(paths, cx),
             StartupAction::History => show_history(cx),
+            StartupAction::Whiteboard(color) => start_whiteboard(color, cx),
         });
         if let Some(error) = cx.global::<AppState>().error.clone() {
             cx.defer(move |cx| show_error(error, cx));
@@ -328,6 +346,62 @@ fn show_history(cx: &mut App) {
         Ok(handle) => cx.global_mut::<AppState>().history_window = Some(handle),
         Err(error) => show_error(error.to_string(), cx),
     }
+}
+
+fn start_whiteboard(color: [u8; 4], cx: &mut App) {
+    let bounds = match platform::get_desktop_bounds() {
+        Ok(bounds) => bounds,
+        Err(error) => {
+            show_error(error, cx);
+            return;
+        }
+    };
+    let scale = platform::get_desktop_scale();
+    if let Some(handle) = cx.global::<AppState>().selection {
+        let _ = handle.update(cx, |state, window, cx| state.dismiss(window, cx));
+    }
+    let cached = cx.global::<AppState>().cached_selection.filter(|handle| {
+        handle
+            .update(cx, |state, window, cx| {
+                platform::configure_overlay(window, bounds, false);
+                *state = SelectionState::new_whiteboard(bounds, color, scale, window, cx);
+            })
+            .is_ok()
+    });
+    let handle = if let Some(handle) = cached {
+        handle
+    } else {
+        match cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    point(px(bounds.pos.x), px(bounds.pos.y)),
+                    size(px(bounds.size.x), px(bounds.size.y)),
+                ))),
+                titlebar: None,
+                kind: WindowKind::Normal,
+                show: false,
+                focus: false,
+                window_background: WindowBackgroundAppearance::Transparent,
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                ..Default::default()
+            },
+            |window, cx| {
+                platform::configure_overlay(window, bounds, false);
+                cx.new(|cx| SelectionState::new_whiteboard(bounds, color, scale, window, cx))
+            },
+        ) {
+            Ok(handle) => handle,
+            Err(error) => {
+                show_error(error.to_string(), cx);
+                return;
+            }
+        }
+    };
+    cx.global_mut::<AppState>().selection = Some(handle);
+    cx.global_mut::<AppState>().cached_selection = Some(handle);
+    let _ = handle.update(cx, |state, window, cx| state.activate(window, cx));
 }
 
 fn toggle_pins(cx: &mut App) {
@@ -691,6 +765,15 @@ fn collect_animation_frames(
 
 fn parse_color(text: &str) -> Option<[u8; 4]> {
     let text = text.trim();
+    match text.to_ascii_lowercase().as_str() {
+        "black" => return Some([0, 0, 0, 255]),
+        "white" => return Some([255, 255, 255, 255]),
+        "red" => return Some([255, 0, 0, 255]),
+        "green" => return Some([0, 128, 0, 255]),
+        "blue" => return Some([0, 0, 255, 255]),
+        "transparent" => return Some([0, 0, 0, 0]),
+        _ => {}
+    }
     if let Some(hex) = text.strip_prefix('#') {
         let mut color = [0, 0, 0, 255];
         match hex.len() {
@@ -1143,6 +1226,8 @@ mod tests {
 
     #[test]
     fn clipboard_colors_accept_hex_integer_and_unit_rgb() {
+        assert_eq!(parse_color("transparent"), Some([0, 0, 0, 0]));
+        assert_eq!(parse_color("red"), Some([255, 0, 0, 255]));
         assert_eq!(parse_color("#0f8"), Some([0, 255, 136, 255]));
         assert_eq!(parse_color("#0102ff80"), Some([1, 2, 255, 128]));
         assert_eq!(parse_color("rgb(255, 2, 3)"), Some([255, 2, 3, 255]));
@@ -1342,6 +1427,15 @@ mod tests {
             StartupAction::Files(vec![PathBuf::from("image.png")])
         );
         assert!(parse_startup_action(["paste".into(), "--files".into()]).is_err());
+        assert_eq!(
+            parse_startup_action(["whiteboard".into(), "--color".into(), "#01020380".into()])
+                .unwrap(),
+            StartupAction::Whiteboard([1, 2, 3, 128])
+        );
+        assert_eq!(
+            parse_startup_action(["transparent-whiteboard".into()]).unwrap(),
+            StartupAction::Whiteboard([0, 0, 0, 0])
+        );
     }
 
     #[test]

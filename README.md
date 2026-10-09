@@ -54,7 +54,7 @@ Pins: drag to move or drop files to open them; arrow keys move by one point (`â‡
 
 Open pins, including animated GIFs, are backed up in Application Support and restored after relaunch with their position, size, opacity, orientation, thumbnail state, and source text.
 
-Startup commands: `snipsy snip`, `snipsy paste`, `snipsy paste --plain TEXT`, `snipsy paste --files FILE...`, and `snipsy history`.
+Startup commands: `snipsy snip`, `snipsy paste`, `snipsy paste --plain TEXT`, `snipsy paste --files FILE...`, `snipsy history`, `snipsy whiteboard [--color COLOR]`, and `snipsy transparent-whiteboard`.
 
 PNG, JPEG, WebP, BMP, TIFF, TGA, ICO, and static GIF exports use an atomic file replacement. The last ten screen captures can be replayed while snipping, and the last ten finished selections persist in Application Support and are available from the History menu. Settings are deferred.
 

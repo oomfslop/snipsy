@@ -162,6 +162,10 @@ pub fn get_capture_bounds() -> Result<Rect, String> {
         CGRequestScreenCaptureAccess();
         return Err("Enable Screen Recording for Snipsy (or its terminal) in System Settings, then capture again.".into());
     }
+    return get_desktop_bounds();
+}
+
+pub fn get_desktop_bounds() -> Result<Rect, String> {
     let mtm = MainThreadMarker::new().expect("capture starts on the main thread");
     let screens = NSScreen::screens(mtm);
     let primary = screens.firstObject().ok_or("No display available")?;
@@ -177,6 +181,14 @@ pub fn get_capture_bounds() -> Result<Rect, String> {
         })
         .reduce(create_rect_union)
         .ok_or_else(|| "No display available".into());
+}
+
+pub fn get_desktop_scale() -> f32 {
+    let mtm = MainThreadMarker::new().expect("display scale reads on the main thread");
+    return NSScreen::screens(mtm)
+        .iter()
+        .map(|screen| screen.backingScaleFactor() as f32)
+        .fold(1.0, f32::max);
 }
 
 fn create_rect_union(left: Rect, right: Rect) -> Rect {

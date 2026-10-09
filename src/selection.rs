@@ -102,6 +102,7 @@ pub struct SelectionState {
     capture_history_index: usize,
     capture_history: Vec<Screenshot>,
     edit_target: Option<WindowHandle<pin::Pin>>,
+    is_whiteboard: bool,
 }
 
 pub fn open_pin_editor(
@@ -190,6 +191,7 @@ impl SelectionState {
             capture_history_index: 0,
             capture_history: Vec::new(),
             edit_target: None,
+            is_whiteboard: false,
         };
     }
 
@@ -212,6 +214,33 @@ impl SelectionState {
             size: bounds.size,
         });
         state.edit_target = Some(target);
+        return state;
+    }
+
+    pub fn new_whiteboard(
+        bounds: Rect,
+        color: [u8; 4],
+        scale: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let image = Arc::new(RgbaImage::from_pixel(
+            (bounds.size.x * scale).round().max(1.0) as u32,
+            (bounds.size.y * scale).round().max(1.0) as u32,
+            image::Rgba(color),
+        ));
+        let mut state = Self::new(bounds, window, cx);
+        state.background = Some(raster::create_render_image(&image));
+        state.screenshot = Some(Screenshot {
+            image,
+            bounds,
+            windows: Vec::new(),
+        });
+        state.selection = Some(Rect {
+            pos: Vec2::ZERO,
+            size: bounds.size,
+        });
+        state.is_whiteboard = true;
         return state;
     }
 
@@ -808,7 +837,7 @@ impl SelectionState {
             self.handle_text_key(event, window, cx);
             return;
         }
-        if key == "`" && self.edit_target.is_none() {
+        if key == "`" && self.edit_target.is_none() && !self.is_whiteboard {
             let state = cx.global_mut::<AppState>();
             state.capture_cursor = !state.capture_cursor;
             self.dismiss(window, cx);
