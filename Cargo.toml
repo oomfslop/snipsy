@@ -25,6 +25,8 @@ objc2-foundation = "0.3"
 objc2-core-foundation = "0.3"
 objc2-screen-capture-kit = "0.3"
 objc2-core-graphics = "0.3"
+objc2-core-media = { version = "0.3", default-features = false, features = ["CMSampleBuffer", "CMTime", "objc2"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["AVAssetWriter", "AVAssetWriterInput", "AVMediaFormat", "AVVideoSettings", "block2", "objc2-core-media"] }
 objc2-uniform-type-identifiers = "0.3"
 
 [profile.dev]

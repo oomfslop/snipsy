@@ -4,6 +4,7 @@ use glam::vec2;
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
     rc::{Retained, autoreleasepool},
+    runtime::{AnyObject, ProtocolObject},
     sel,
 };
 use objc2_app_kit::{
@@ -14,25 +15,35 @@ use objc2_app_kit::{
     NSStatusBar, NSStatusItem, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
     NSWindowCollectionBehavior, NSWindowStyleMask,
 };
-use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType, CGPoint};
+use objc2_av_foundation::{
+    AVAssetWriter, AVAssetWriterInput, AVAssetWriterStatus, AVFileTypeMPEG4, AVMediaTypeVideo,
+    AVVideoCodecKey, AVVideoCodecTypeH264, AVVideoHeightKey, AVVideoWidthKey,
+};
+use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGImage, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
     CGWarpMouseCursorPosition, CGWindowListCopyWindowInfo, CGWindowListOption, kCGColorSpaceSRGB,
     kCGWindowNumber,
 };
+use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_foundation::{
-    NSArray, NSData, NSError, NSFileManager, NSObject, NSObjectProtocol, NSOperationQueue, NSPoint,
-    NSRect, NSSearchPathDirectory, NSSearchPathDomainMask, NSSize, NSString, NSURL,
+    NSArray, NSData, NSDictionary, NSError, NSFileManager, NSNumber, NSObject, NSObjectProtocol,
+    NSOperationQueue, NSPoint, NSRect, NSSearchPathDirectory, NSSearchPathDomainMask, NSSize,
+    NSString, NSURL,
 };
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
+    SCContentFilter, SCScreenshotManager, SCShareableContent, SCStream, SCStreamConfiguration,
+    SCStreamDelegate, SCStreamOutput, SCStreamOutputType,
 };
-use objc2_uniform_type_identifiers::UTType;
+use objc2_uniform_type_identifiers::{UTType, UTTypeMPEG4Movie};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crate::{
@@ -65,9 +76,88 @@ define_class!(
     }
 );
 
+struct RecordingOutputIvars {
+    writer: Retained<AVAssetWriter>,
+    input: Retained<AVAssetWriterInput>,
+    started: Mutex<bool>,
+    failed: AtomicBool,
+    errors: Sender<String>,
+}
+define_class!(
+    #[unsafe(super = NSObject)]
+    #[thread_kind = AnyThread]
+    #[name = "SnipsyRecordingOutput"]
+    #[ivars = RecordingOutputIvars]
+    struct RecordingOutput;
+    unsafe impl NSObjectProtocol for RecordingOutput {}
+    unsafe impl SCStreamOutput for RecordingOutput {
+        #[allow(non_snake_case)]
+        #[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
+        unsafe fn stream_didOutputSampleBuffer_ofType(
+            &self,
+            _: &SCStream,
+            sample_buffer: &CMSampleBuffer,
+            output_type: SCStreamOutputType,
+        ) {
+            if output_type != SCStreamOutputType::Screen
+                || self.ivars().failed.load(Ordering::Acquire)
+                || !unsafe { sample_buffer.is_valid() }
+                || !unsafe { sample_buffer.data_is_ready() }
+            {
+                return;
+            }
+            let mut started = self.ivars().started.lock().expect("video writer poisoned");
+            if !unsafe { self.ivars().input.isReadyForMoreMediaData() } {
+                return;
+            }
+            if !*started {
+                unsafe {
+                    self.ivars()
+                        .writer
+                        .startSessionAtSourceTime(sample_buffer.presentation_time_stamp())
+                };
+                *started = true;
+            }
+            if !unsafe { self.ivars().input.appendSampleBuffer(sample_buffer) } {
+                self.report_error(get_writer_error(&self.ivars().writer));
+            }
+        }
+    }
+    unsafe impl SCStreamDelegate for RecordingOutput {
+        #[allow(non_snake_case)]
+        #[unsafe(method(stream:didStopWithError:))]
+        unsafe fn stream_didStopWithError(&self, _: &SCStream, error: &NSError) {
+            self.report_error(error.localizedDescription().to_string());
+        }
+    }
+);
+
+impl RecordingOutput {
+    fn report_error(&self, error: String) {
+        if !self.ivars().failed.swap(true, Ordering::AcqRel) {
+            let _ = self.ivars().errors.try_send(error);
+        }
+    }
+}
+
+pub struct ScreenRecorder {
+    stream: Retained<SCStream>,
+    output: Retained<RecordingOutput>,
+    _temporary_directory: tempfile::TempDir,
+    temporary_path: PathBuf,
+    destination: PathBuf,
+}
+
+fn get_writer_error(writer: &AVAssetWriter) -> String {
+    return unsafe { writer.error() }
+        .map(|error| error.localizedDescription().to_string())
+        .unwrap_or_else(|| "Could not encode screen recording".into());
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum StatusCommand {
     Capture,
+    ToggleRecording,
     Paste,
     History,
     ClearHistory,
@@ -94,13 +184,14 @@ define_class!(
         fn command(&self, item: &NSMenuItem) {
             let command = match item.tag() {
                 0 => StatusCommand::Capture,
-                1 => StatusCommand::Paste,
-                2 => StatusCommand::History,
-                3 => StatusCommand::ClearHistory,
-                4 => StatusCommand::Whiteboard,
-                5 => StatusCommand::TogglePins,
-                6 => StatusCommand::Preferences,
-                7 => StatusCommand::Groups,
+                1 => StatusCommand::ToggleRecording,
+                2 => StatusCommand::Paste,
+                3 => StatusCommand::History,
+                4 => StatusCommand::ClearHistory,
+                5 => StatusCommand::Whiteboard,
+                6 => StatusCommand::TogglePins,
+                7 => StatusCommand::Preferences,
+                8 => StatusCommand::Groups,
                 _ => StatusCommand::Quit,
             };
             let _ = self.ivars().sender.try_send(command);
@@ -112,6 +203,7 @@ pub struct StatusItem {
     _item: Retained<NSStatusItem>,
     _menu: Retained<NSMenu>,
     _target: Retained<StatusItemTarget>,
+    recording_item: Retained<NSMenuItem>,
 }
 
 pub fn create_status_item(sender: Sender<StatusCommand>) -> StatusItem {
@@ -122,13 +214,14 @@ pub fn create_status_item(sender: Sender<StatusCommand>) -> StatusItem {
     let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Snipsy"));
     for (title, tag) in [
         ("New screenshot", 0),
-        ("Pin clipboard", 1),
-        ("History", 2),
-        ("Clear History…", 3),
-        ("Whiteboard", 4),
-        ("Show/hide pins", 5),
-        ("Preferences…", 6),
-        ("Image Groups…", 7),
+        ("Start Recording…", 1),
+        ("Pin clipboard", 2),
+        ("History", 3),
+        ("Clear History…", 4),
+        ("Whiteboard", 5),
+        ("Show/hide pins", 6),
+        ("Preferences…", 7),
+        ("Image Groups…", 8),
     ] {
         // SAFETY: command: is implemented by the retained target.
         let item = unsafe {
@@ -154,7 +247,7 @@ pub fn create_status_item(sender: Sender<StatusCommand>) -> StatusItem {
             &NSString::new(),
         )
     };
-    quit.setTag(8);
+    quit.setTag(9);
     // SAFETY: The target implements command: and outlives the menu.
     unsafe { quit.setTarget(Some(&target)) };
     menu.addItem(&quit);
@@ -164,11 +257,24 @@ pub fn create_status_item(sender: Sender<StatusCommand>) -> StatusItem {
         button.setTitle(&NSString::from_str("✂︎"));
     }
     item.setMenu(Some(&menu));
+    let recording_item = menu.itemWithTag(1).expect("recording item exists");
     return StatusItem {
         _item: item,
         _menu: menu,
         _target: target,
+        recording_item,
     };
+}
+
+impl StatusItem {
+    pub fn set_recording(&self, recording: bool) {
+        self.recording_item
+            .setTitle(&NSString::from_str(if recording {
+                "Stop Recording"
+            } else {
+                "Start Recording…"
+            }));
+    }
 }
 
 pub struct ColorPicker {
@@ -686,6 +792,263 @@ pub fn capture_screen(
     }
 }
 
+pub fn start_screen_recording(
+    bounds: Rect,
+    destination: PathBuf,
+    sender: Sender<Result<ScreenRecorder, String>>,
+    errors: Sender<String>,
+) {
+    let files = (|| {
+        if bounds.pos.min_element().is_nan()
+            || bounds.size.min_element() <= 0.0
+            || !bounds.pos.is_finite()
+            || !bounds.size.is_finite()
+        {
+            return Err("Invalid recording region".into());
+        }
+        let parent = destination.parent().ok_or("Invalid recording path")?;
+        let temporary_directory = tempfile::Builder::new()
+            .prefix(".snipsy-recording-")
+            .tempdir_in(parent)
+            .map_err(|error| error.to_string())?;
+        let temporary_path = temporary_directory.path().join("recording.mp4");
+        Ok((temporary_directory, temporary_path, destination))
+    })();
+    let files = match files {
+        Ok(files) => Arc::new(Mutex::new(Some(files))),
+        Err(error) => {
+            let _ = sender.try_send(Err(error));
+            return;
+        }
+    };
+    let mtm = MainThreadMarker::new().expect("recording starts on the main thread");
+    let own_window_ids: Vec<u32> = NSApplication::sharedApplication(mtm)
+        .windows()
+        .iter()
+        .filter(|window| window.isVisible())
+        .filter_map(|window| u32::try_from(window.windowNumber()).ok())
+        .collect();
+    let callback = RcBlock::new(
+        move |content: *mut SCShareableContent, error: *mut NSError| {
+            autoreleasepool(|_| {
+                let result = unsafe {
+                    (|| {
+                        let Some(content) = content.as_ref() else {
+                            return Err(error
+                                .as_ref()
+                                .map(|error| error.localizedDescription().to_string())
+                                .unwrap_or_else(|| "Could not enumerate displays".into()));
+                        };
+                        let Some((display, region)) =
+                            content.displays().iter().find_map(|display| {
+                                let frame = display.frame();
+                                get_recording_region(
+                                    Rect {
+                                        pos: vec2(frame.origin.x as f32, frame.origin.y as f32),
+                                        size: vec2(
+                                            frame.size.width as f32,
+                                            frame.size.height as f32,
+                                        ),
+                                    },
+                                    bounds,
+                                )
+                                .map(|region| (display, region))
+                            })
+                        else {
+                            return Err("Select an area within one display".into());
+                        };
+                        let excluded_windows = NSArray::from_retained_slice(
+                            &content
+                                .windows()
+                                .iter()
+                                .filter(|window| {
+                                    is_own_window(
+                                        window.windowID(),
+                                        window.owningApplication().map(|app| app.processID()),
+                                        &own_window_ids,
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        );
+                        let filter = SCContentFilter::initWithDisplay_excludingWindows(
+                            SCContentFilter::alloc(),
+                            &display,
+                            &excluded_windows,
+                        );
+                        let scale = filter.pointPixelScale() as f32;
+                        let (width, height) = get_recording_size(region.size, scale)?;
+                        let config = SCStreamConfiguration::new();
+                        config.setSourceRect(CGRect::new(
+                            CGPoint::new(region.pos.x as f64, region.pos.y as f64),
+                            CGSize::new(region.size.x as f64, region.size.y as f64),
+                        ));
+                        config.setWidth(width);
+                        config.setHeight(height);
+                        config.setMinimumFrameInterval(CMTime::new(1, 30));
+                        config.setQueueDepth(6);
+                        config.setColorSpaceName(kCGColorSpaceSRGB);
+                        config.setShowsCursor(true);
+                        config.setCapturesAudio(false);
+
+                        let (temporary_directory, temporary_path, destination) = files
+                            .lock()
+                            .expect("recording path poisoned")
+                            .take()
+                            .ok_or("Recording already started")?;
+                        let url = NSURL::from_file_path(&temporary_path)
+                            .ok_or("Invalid temporary recording path")?;
+                        let writer = AVAssetWriter::initWithURL_fileType_error(
+                            AVAssetWriter::alloc(),
+                            &url,
+                            AVFileTypeMPEG4.ok_or("MPEG-4 recording is unavailable")?,
+                        )
+                        .map_err(|error| error.localizedDescription().to_string())?;
+                        let width_number = NSNumber::new_usize(width);
+                        let height_number = NSNumber::new_usize(height);
+                        let settings = NSDictionary::<NSString, AnyObject>::from_slices(
+                            &[
+                                AVVideoCodecKey.ok_or("H.264 recording is unavailable")?,
+                                AVVideoWidthKey.ok_or("H.264 recording is unavailable")?,
+                                AVVideoHeightKey.ok_or("H.264 recording is unavailable")?,
+                            ],
+                            &[
+                                AVVideoCodecTypeH264
+                                    .ok_or("H.264 recording is unavailable")?
+                                    .as_ref(),
+                                width_number.as_ref(),
+                                height_number.as_ref(),
+                            ],
+                        );
+                        let input =
+                            AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(
+                                AVMediaTypeVideo.ok_or("Video recording is unavailable")?,
+                                Some(&settings),
+                            );
+                        input.setExpectsMediaDataInRealTime(true);
+                        if !writer.canAddInput(&input) {
+                            return Err("Could not configure the video encoder".into());
+                        }
+                        writer.addInput(&input);
+                        writer.setShouldOptimizeForNetworkUse(true);
+                        let allocated = RecordingOutput::alloc().set_ivars(RecordingOutputIvars {
+                            writer: writer.clone(),
+                            input,
+                            started: Mutex::new(false),
+                            failed: AtomicBool::new(false),
+                            errors: errors.clone(),
+                        });
+                        let output: Retained<RecordingOutput> = msg_send![super(allocated), init];
+                        let stream = SCStream::initWithFilter_configuration_delegate(
+                            SCStream::alloc(),
+                            &filter,
+                            &config,
+                            Some(ProtocolObject::from_ref(&*output)),
+                        );
+                        stream
+                            .addStreamOutput_type_sampleHandlerQueue_error(
+                                ProtocolObject::from_ref(&*output),
+                                SCStreamOutputType::Screen,
+                                None,
+                            )
+                            .map_err(|error| error.localizedDescription().to_string())?;
+                        if !writer.startWriting() {
+                            return Err(get_writer_error(&writer));
+                        }
+                        Ok(ScreenRecorder {
+                            stream,
+                            output,
+                            _temporary_directory: temporary_directory,
+                            temporary_path,
+                            destination,
+                        })
+                    })()
+                };
+                let recorder = match result {
+                    Ok(recorder) => Arc::new(Mutex::new(Some(recorder))),
+                    Err(error) => {
+                        let _ = sender.try_send(Err(error));
+                        return;
+                    }
+                };
+                let stream = recorder
+                    .lock()
+                    .expect("recorder poisoned")
+                    .as_ref()
+                    .unwrap()
+                    .stream
+                    .clone();
+                let callback_recorder = recorder.clone();
+                let callback_sender = sender.clone();
+                let callback = RcBlock::new(move |error: *mut NSError| {
+                    let recorder = callback_recorder
+                        .lock()
+                        .expect("recorder poisoned")
+                        .take()
+                        .expect("start callback runs once");
+                    let result = unsafe {
+                        error.as_ref().map(|error| {
+                            recorder.output.ivars().writer.cancelWriting();
+                            error.localizedDescription().to_string()
+                        })
+                    };
+                    let _ = callback_sender.try_send(match result {
+                        Some(error) => Err(error),
+                        None => Ok(recorder),
+                    });
+                });
+                unsafe { stream.startCaptureWithCompletionHandler(Some(&callback)) };
+            });
+        },
+    );
+    unsafe {
+        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
+            true, true, &callback,
+        );
+    }
+}
+
+pub fn stop_screen_recording(recorder: ScreenRecorder, sender: Sender<Result<PathBuf, String>>) {
+    let ScreenRecorder {
+        stream,
+        output,
+        _temporary_directory: temporary_directory,
+        temporary_path,
+        destination,
+    } = recorder;
+    let temporary_directory = Arc::new(temporary_directory);
+    let callback_stream = stream.clone();
+    let callback = RcBlock::new(move |error: *mut NSError| {
+        let stop_error = unsafe {
+            error
+                .as_ref()
+                .map(|error| error.localizedDescription().to_string())
+        };
+        unsafe { output.ivars().input.markAsFinished() };
+        let writer = output.ivars().writer.clone();
+        let callback_writer = writer.clone();
+        let sender = sender.clone();
+        let callback_stream = callback_stream.clone();
+        let temporary_directory = temporary_directory.clone();
+        let temporary_path = temporary_path.clone();
+        let destination = destination.clone();
+        let finish = RcBlock::new(move || {
+            let result = if unsafe { callback_writer.status() } == AVAssetWriterStatus::Completed {
+                std::fs::rename(&temporary_path, &destination)
+                    .map(|_| destination.clone())
+                    .map_err(|error| error.to_string())
+                    .and_then(|path| stop_error.clone().map_or(Ok(path), Err))
+            } else {
+                Err(get_writer_error(&callback_writer))
+            };
+            let _ = sender.try_send(result);
+            let _ = temporary_directory.path();
+            let _ = &callback_stream;
+        });
+        unsafe { writer.finishWritingWithCompletionHandler(&finish) };
+    });
+    unsafe { stream.stopCaptureWithCompletionHandler(Some(&callback)) };
+}
+
 fn stitch_capture_images(
     bounds: Rect,
     captures: Vec<(Rect, f32, image::RgbaImage)>,
@@ -753,13 +1116,37 @@ fn get_scaled_size(size: glam::Vec2, scale: f32) -> Result<(u32, u32), String> {
     return Ok((width as u32, height as u32));
 }
 
+fn get_recording_region(display: Rect, bounds: Rect) -> Option<Rect> {
+    let region = Rect {
+        pos: bounds.pos - display.pos,
+        size: bounds.size,
+    };
+    return (region.pos.min_element() >= 0.0
+        && (region.pos + region.size).cmple(display.size).all())
+    .then_some(region);
+}
+
+fn get_recording_size(size: glam::Vec2, scale: f32) -> Result<(usize, usize), String> {
+    let (width, height) = get_scaled_size(size, scale)?;
+    let width = width
+        .checked_add(width % 2)
+        .ok_or("Recording is too large")?;
+    let height = height
+        .checked_add(height % 2)
+        .ok_or("Recording is too large")?;
+    return Ok((width.max(2) as usize, height.max(2) as usize));
+}
+
 fn is_own_window(id: u32, owner: Option<i32>, own_ids: &[u32]) -> bool {
     return own_ids.contains(&id) || owner == Some(std::process::id() as i32);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{create_rect_union, get_scaled_size, is_own_window, stitch_capture_images};
+    use super::{
+        create_rect_union, get_recording_region, get_recording_size, get_scaled_size,
+        is_own_window, stitch_capture_images,
+    };
     use crate::geometry::Rect;
     use glam::vec2;
     use image::{Rgba, RgbaImage};
@@ -809,6 +1196,41 @@ mod tests {
         assert!(get_scaled_size(vec2(f32::MAX, 100.0), 2.0).is_err());
         assert!(get_scaled_size(vec2(100.0, 100.0), f32::NAN).is_err());
     }
+
+    #[test]
+    fn recording_regions_stay_within_one_display_and_use_even_pixels() {
+        let display = Rect {
+            pos: vec2(100.0, 50.0),
+            size: vec2(800.0, 600.0),
+        };
+        assert_eq!(
+            get_recording_region(
+                display,
+                Rect {
+                    pos: vec2(150.0, 75.0),
+                    size: vec2(200.0, 100.0),
+                }
+            ),
+            Some(Rect {
+                pos: vec2(50.0, 25.0),
+                size: vec2(200.0, 100.0),
+            })
+        );
+        assert!(
+            get_recording_region(
+                display,
+                Rect {
+                    pos: vec2(850.0, 75.0),
+                    size: vec2(100.0, 100.0),
+                }
+            )
+            .is_none()
+        );
+        assert_eq!(
+            get_recording_size(vec2(100.5, 50.5), 2.0).unwrap(),
+            (202, 102)
+        );
+    }
 }
 
 pub fn prompt_save_image(suggested_name: &str) -> Receiver<Result<Option<PathBuf>, String>> {
@@ -839,6 +1261,32 @@ pub fn prompt_save_image(suggested_name: &str) -> Receiver<Result<Option<PathBuf
             Ok(None)
         } else {
             Err("Could not open the save dialog".into())
+        };
+        let _ = sender.try_send(result);
+    });
+    panel.beginWithCompletionHandler(&callback);
+    return receiver;
+}
+
+pub fn prompt_save_recording() -> Receiver<Result<Option<PathBuf>, String>> {
+    let (sender, receiver) = async_channel::bounded(1);
+    let mtm = MainThreadMarker::new().expect("dialogs open on the main thread");
+    let panel = NSSavePanel::savePanel(mtm);
+    panel.setNameFieldStringValue(&NSString::from_str("Snipsy Recording.mp4"));
+    panel.setCanCreateDirectories(true);
+    panel.setAllowsOtherFileTypes(false);
+    panel.setAllowedContentTypes(&NSArray::from_slice(&[unsafe { UTTypeMPEG4Movie }]));
+    panel.setLevel(NSPopUpMenuWindowLevel + 1);
+    let callback_panel = panel.clone();
+    let callback = RcBlock::new(move |response: isize| {
+        let result = if response == NSModalResponseOK {
+            callback_panel
+                .URL()
+                .and_then(|url| url.to_file_path())
+                .map(Some)
+                .ok_or_else(|| "Selected recording path is not a file".into())
+        } else {
+            Ok(None)
         };
         let _ = sender.try_send(result);
     });
