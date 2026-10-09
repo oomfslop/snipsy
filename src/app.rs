@@ -8,11 +8,14 @@ use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
 };
 use gpui::{prelude::*, *};
-use image::{Rgba, RgbaImage};
+use image::{
+    AnimationDecoder, Frame, Rgba, RgbaImage,
+    codecs::gif::{GifDecoder, GifEncoder, Repeat},
+};
 use std::{
     collections::HashMap,
     ffi::OsString,
-    io::Write,
+    io::{BufReader, Cursor, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -498,42 +501,34 @@ pub fn paste_image(cx: &mut App) {
         open_paths(paths, cx);
         return;
     }
-    let Some(item) = cx.read_from_clipboard() else {
-        show_error("Clipboard is empty".into(), cx);
-        return;
+    let load = match load_clipboard_content(cx) {
+        Ok(load) => load,
+        Err(error) => {
+            show_error(error, cx);
+            return;
+        }
     };
-    let image = item.entries().iter().find_map(|entry| {
-        if let ClipboardEntry::Image(image) = entry {
-            Some(image.clone())
-        } else {
-            None
-        }
-    });
-    match image {
-        Some(image) => match image::load_from_memory(&image.bytes) {
-            Ok(image) => pin::open_pin(Arc::new(image.to_rgba8()), None, cx),
-            Err(error) => show_error(error.to_string(), cx),
-        },
-        None => {
-            let Some(text) = item.text() else {
-                show_error("Clipboard has no supported content".into(), cx);
-                return;
-            };
-            pin_text(text, cx);
-        }
-    }
+    cx.spawn(async move |cx| {
+        let result = load.await;
+        let _ = cx.update(|cx| match result {
+            Ok(content) => pin::open_content(content, cx),
+            Err(error) => show_error(error, cx),
+        });
+    })
+    .detach();
 }
 
 pub struct PinContent {
     pub image: Arc<RgbaImage>,
     pub text: Option<String>,
+    pub frames: Option<Arc<Vec<Frame>>>,
 }
 
 pub fn load_clipboard_content(cx: &mut App) -> Result<Task<Result<PinContent, String>>, String> {
     let fonts = cx.global::<AppState>().fonts.clone();
     if let Some(path) = platform::get_clipboard_paths().into_iter().next() {
         return Ok(cx.background_executor().spawn(async move {
-            return load_path(&path, &fonts).map(|(image, text)| PinContent { image, text });
+            return load_path(&path, &fonts);
         }));
     }
     let item = cx.read_from_clipboard().ok_or("Clipboard is empty")?;
@@ -545,12 +540,7 @@ pub fn load_clipboard_content(cx: &mut App) -> Result<Task<Result<PinContent, St
         }
     }) {
         return Ok(cx.background_executor().spawn(async move {
-            return image::load_from_memory(&image.bytes)
-                .map(|image| PinContent {
-                    image: Arc::new(image.to_rgba8()),
-                    text: None,
-                })
-                .map_err(|error| error.to_string());
+            return load_image_bytes(&image.bytes);
         }));
     }
     let text = item.text().ok_or("Clipboard has no supported content")?;
@@ -559,11 +549,13 @@ pub fn load_clipboard_content(cx: &mut App) -> Result<Task<Result<PinContent, St
             return Ok(PinContent {
                 image: Arc::new(RgbaImage::from_pixel(240, 160, Rgba(color))),
                 text: None,
+                frames: None,
             });
         }
         return raster::render_text_image(&text, &fonts).map(|image| PinContent {
             image: Arc::new(image),
             text: Some(text),
+            frames: None,
         });
     }));
 }
@@ -602,8 +594,7 @@ pub fn open_paths(paths: Vec<PathBuf>, cx: &mut App) {
             let mut errors = Vec::new();
             for result in results {
                 match result {
-                    Ok((image, Some(text))) => pin::open_text_pin(image, text, cx),
-                    Ok((image, None)) => pin::open_pin(image, None, cx),
+                    Ok(content) => pin::open_content(content, cx),
                     Err(error) => errors.push(error),
                 }
             }
@@ -618,14 +609,82 @@ pub fn open_paths(paths: Vec<PathBuf>, cx: &mut App) {
 fn load_path(
     path: &Path,
     fonts: &Arc<resvg::usvg::fontdb::Database>,
-) -> Result<(Arc<RgbaImage>, Option<String>), String> {
-    if let Ok(image) = image::open(path) {
-        return Ok((Arc::new(image.to_rgba8()), None));
+) -> Result<PinContent, String> {
+    if let Ok(content) = load_image_path(path) {
+        return Ok(content);
     }
     let text = path.to_string_lossy().into_owned();
     return raster::render_text_image(&text, fonts)
-        .map(|image| (Arc::new(image), Some(text)))
+        .map(|image| PinContent {
+            image: Arc::new(image),
+            text: Some(text),
+            frames: None,
+        })
         .map_err(|error| format!("{}: {error}", path.display()));
+}
+
+fn load_image_path(path: &Path) -> Result<PinContent, String> {
+    let reader = image::ImageReader::open(path)
+        .map_err(|error| error.to_string())?
+        .with_guessed_format()
+        .map_err(|error| error.to_string())?;
+    if reader.format() == Some(image::ImageFormat::Gif) {
+        let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+        let decoder = GifDecoder::new(BufReader::new(file)).map_err(|error| error.to_string())?;
+        return collect_animation_frames(decoder.into_frames());
+    }
+    return reader
+        .decode()
+        .map(|image| PinContent {
+            image: Arc::new(image.to_rgba8()),
+            text: None,
+            frames: None,
+        })
+        .map_err(|error| error.to_string());
+}
+
+fn load_image_bytes(bytes: &[u8]) -> Result<PinContent, String> {
+    if image::guess_format(bytes).map_err(|error| error.to_string())? == image::ImageFormat::Gif {
+        let decoder = GifDecoder::new(Cursor::new(bytes)).map_err(|error| error.to_string())?;
+        return collect_animation_frames(decoder.into_frames());
+    }
+    return image::load_from_memory(bytes)
+        .map(|image| PinContent {
+            image: Arc::new(image.to_rgba8()),
+            text: None,
+            frames: None,
+        })
+        .map_err(|error| error.to_string());
+}
+
+fn collect_animation_frames(
+    frames: impl Iterator<Item = image::ImageResult<Frame>>,
+) -> Result<PinContent, String> {
+    let mut decoded = Vec::new();
+    let mut bytes = 0_u64;
+    for frame in frames {
+        if decoded.len() == 500 {
+            return Err("Animation has too many frames".into());
+        }
+        let frame = frame.map_err(|error| error.to_string())?;
+        bytes = bytes
+            .checked_add(frame.buffer().len() as u64)
+            .ok_or("Animation is too large")?;
+        if bytes > 256 * 1024 * 1024 {
+            return Err("Animation is too large".into());
+        }
+        decoded.push(frame);
+    }
+    let image = decoded
+        .first()
+        .map(|frame| Arc::new(frame.buffer().clone()))
+        .ok_or("Animation has no frames")?;
+    let frames = (decoded.len() > 1).then(|| Arc::new(decoded));
+    return Ok(PinContent {
+        image,
+        text: None,
+        frames,
+    });
 }
 
 fn parse_color(text: &str) -> Option<[u8; 4]> {
@@ -824,6 +883,24 @@ fn write_image(image: &RgbaImage, path: &Path) -> Result<(), String> {
     return Ok(());
 }
 
+fn write_animation(frames: &[Frame], path: &Path) -> Result<(), String> {
+    let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))
+        .map_err(|error| error.to_string())?;
+    let mut encoder = GifEncoder::new(file.as_file_mut());
+    encoder
+        .set_repeat(Repeat::Infinite)
+        .map_err(|error| error.to_string())?;
+    encoder
+        .encode_frames(frames.iter().cloned())
+        .map_err(|error| error.to_string())?;
+    drop(encoder);
+    file.as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    file.persist(path).map_err(|error| error.to_string())?;
+    return Ok(());
+}
+
 fn write_history(directory: &Path, image: &RgbaImage) -> Result<(), String> {
     std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
     let mut id = SystemTime::now()
@@ -880,7 +957,13 @@ fn write_pin_backup(
         .get(&pin.id)
         .is_none_or(|image| !Arc::ptr_eq(image, &pin.image))
     {
-        write_image(&pin.image, &directory.join(format!("{}.png", pin.id)))?;
+        if let Some(frames) = &pin.frames {
+            write_animation(frames, &directory.join(format!("{}.gif", pin.id)))?;
+            let _ = std::fs::remove_file(directory.join(format!("{}.png", pin.id)));
+        } else {
+            write_image(&pin.image, &directory.join(format!("{}.png", pin.id)))?;
+            let _ = std::fs::remove_file(directory.join(format!("{}.gif", pin.id)));
+        }
         images.insert(pin.id, pin.image.clone());
     }
     let thumbnail = pin
@@ -893,7 +976,7 @@ fn write_pin_backup(
         .map(|text| base64::engine::general_purpose::STANDARD.encode(text.as_bytes()))
         .unwrap_or_default();
     let metadata = format!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         f32::from(pin.bounds.origin.x),
         f32::from(pin.bounds.origin.y),
         f32::from(pin.bounds.size.width),
@@ -904,6 +987,7 @@ fn write_pin_backup(
         thumbnail.0,
         thumbnail.1,
         text,
+        u8::from(pin.frames.is_some()),
     );
     let mut file = tempfile::NamedTempFile::new_in(directory).map_err(|error| error.to_string())?;
     file.write_all(metadata.as_bytes())
@@ -917,7 +1001,7 @@ fn write_pin_backup(
 }
 
 fn remove_pin_backup(directory: &Path, id: u128) -> Result<(), String> {
-    for extension in ["png", "meta"] {
+    for extension in ["png", "gif", "meta"] {
         match std::fs::remove_file(directory.join(format!("{id}.{extension}"))) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -957,8 +1041,8 @@ fn load_pin_backups(directory: &Path) -> Result<Vec<pin::PinBackup>, String> {
 }
 
 fn parse_pin_backup(id: u128, metadata: &str, directory: &Path) -> Result<pin::PinBackup, String> {
-    let fields = metadata.splitn(10, '\t').collect::<Vec<_>>();
-    if fields.len() != 10 {
+    let fields = metadata.splitn(11, '\t').collect::<Vec<_>>();
+    if !matches!(fields.len(), 10 | 11) {
         return Err("invalid metadata".into());
     }
     let numbers = fields[..9]
@@ -975,12 +1059,15 @@ fn parse_pin_backup(id: u128, metadata: &str, directory: &Path) -> Result<pin::P
     {
         return Err("invalid dimensions or opacity".into());
     }
-    let image = image::open(directory.join(format!("{id}.png")))
-        .map_err(|error| error.to_string())?
-        .to_rgba8();
-    if image.width() == 0 || image.height() == 0 {
-        return Err("empty image".into());
+    let animated = fields.get(10).is_some_and(|value| *value == "1");
+    if fields
+        .get(10)
+        .is_some_and(|value| !matches!(*value, "0" | "1"))
+    {
+        return Err("invalid animation flag".into());
     }
+    let content =
+        load_image_path(&directory.join(format!("{id}.{}", if animated { "gif" } else { "png" })))?;
     let text = if fields[9].is_empty() {
         None
     } else {
@@ -996,7 +1083,7 @@ fn parse_pin_backup(id: u128, metadata: &str, directory: &Path) -> Result<pin::P
     };
     return Ok(pin::PinBackup {
         id,
-        image: Arc::new(image),
+        image: content.image,
         bounds: Bounds::new(
             point(px(numbers[0]), px(numbers[1])),
             size(px(numbers[2]), px(numbers[3])),
@@ -1005,6 +1092,7 @@ fn parse_pin_backup(id: u128, metadata: &str, directory: &Path) -> Result<pin::P
         original_size: size(px(numbers[5]), px(numbers[6])),
         thumbnail_size: (numbers[7] > 0.0).then_some(size(px(numbers[7]), px(numbers[8]))),
         text,
+        frames: content.frames,
     });
 }
 
@@ -1017,15 +1105,15 @@ pub fn show_error(error: String, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        StartupAction, create_quick_save_path, get_history_paths, insert_capture_history,
-        load_history, load_path, load_pin_backups, parse_color, parse_pin_backup,
-        parse_startup_action, remove_pin_backup, should_restore_pin, write_history, write_image,
-        write_pin_backup,
+        StartupAction, collect_animation_frames, create_quick_save_path, get_history_paths,
+        insert_capture_history, load_history, load_path, load_pin_backups, parse_color,
+        parse_pin_backup, parse_startup_action, remove_pin_backup, should_restore_pin,
+        write_history, write_image, write_pin_backup,
     };
     use crate::{editor::Screenshot, geometry::Rect, pin::PinBackup};
     use glam::{Vec2, vec2};
     use gpui::{Bounds, point, px, size};
-    use image::{Rgba, RgbaImage};
+    use image::{Delay, Frame, Rgba, RgbaImage};
     use std::path::PathBuf;
 
     #[test]
@@ -1071,16 +1159,16 @@ mod tests {
             .save(&image_path)
             .unwrap();
         let fonts = std::sync::Arc::new(resvg::usvg::fontdb::Database::new());
-        let (image, text) = load_path(&image_path, &fonts).unwrap();
-        assert_eq!(image.dimensions(), (2, 3));
-        assert_eq!(text, None);
+        let content = load_path(&image_path, &fonts).unwrap();
+        assert_eq!(content.image.dimensions(), (2, 3));
+        assert_eq!(content.text, None);
 
         let file_path = directory.path().join("notes.txt");
         std::fs::write(&file_path, "notes").unwrap();
         let mut fonts = resvg::usvg::fontdb::Database::new();
         fonts.load_system_fonts();
-        let (_, text) = load_path(&file_path, &std::sync::Arc::new(fonts)).unwrap();
-        assert_eq!(text.as_deref(), Some(file_path.to_str().unwrap()));
+        let content = load_path(&file_path, &std::sync::Arc::new(fonts)).unwrap();
+        assert_eq!(content.text.as_deref(), Some(file_path.to_str().unwrap()));
     }
 
     #[test]
@@ -1166,6 +1254,7 @@ mod tests {
             original_size: size(px(640.0), px(360.0)),
             thumbnail_size: Some(size(px(160.0), px(90.0))),
             text: Some(std::sync::Arc::from("héllo")),
+            frames: None,
         };
         let mut images = std::collections::HashMap::new();
         write_pin_backup(directory.path(), &pin, &mut images).unwrap();
@@ -1179,6 +1268,51 @@ mod tests {
         assert!(parse_pin_backup(42, "0\t0\t0\t0\t2\t0\t0\t0\t0\t", directory.path()).is_err());
         remove_pin_backup(directory.path(), 42).unwrap();
         assert!(load_pin_backups(directory.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn animated_pins_decode_and_survive_backup() {
+        let delay = Delay::from_numer_denom_ms(80, 1);
+        let content = collect_animation_frames(
+            [
+                Ok(Frame::from_parts(
+                    RgbaImage::from_pixel(2, 1, Rgba([1, 2, 3, 255])),
+                    0,
+                    0,
+                    delay,
+                )),
+                Ok(Frame::from_parts(
+                    RgbaImage::from_pixel(2, 1, Rgba([4, 5, 6, 255])),
+                    0,
+                    0,
+                    delay,
+                )),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(content.frames.as_ref().unwrap().len(), 2);
+        let directory = tempfile::tempdir().unwrap();
+        let pin = PinBackup {
+            id: 43,
+            image: content.image,
+            bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(50.0))),
+            opacity: 1.0,
+            original_size: size(px(100.0), px(50.0)),
+            thumbnail_size: None,
+            text: None,
+            frames: content.frames,
+        };
+        write_pin_backup(
+            directory.path(),
+            &pin,
+            &mut std::collections::HashMap::new(),
+        )
+        .unwrap();
+        let loaded = load_pin_backups(directory.path()).unwrap();
+        assert_eq!(loaded[0].frames.as_ref().unwrap().len(), 2);
+        assert_eq!(loaded[0].frames.as_ref().unwrap()[1].delay(), delay);
+        remove_pin_backup(directory.path(), 43).unwrap();
     }
 
     #[test]

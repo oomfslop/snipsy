@@ -51,7 +51,7 @@ Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When
 
 Pins: drag to move or drop files to open them; arrow keys move by one point (`⇧` for ten); scroll or `+`/`-` to resize; `⌘`+scroll, `⌘`+`+`/`-`, or `[`/`]` for opacity; `1`/`2` rotate; `3`/`4` flip; `0` or middle-click restores size and opacity; `⇧`+double-click toggles thumbnail mode; `Space` edits annotations; hold `⌥` to sample a pixel and press `C` to copy it (`⇧C` for RGB); `⌘⇧X` toggles click-through for the pin under the pointer (or restores all pins); `⌘C` copies; `⌘⇧C` copies source text; `⌘V` replaces from the clipboard; `⌘S` saves; `⌘⇧S` quick-saves; `Escape`, `⌘W`, or double-click closes recoverably; `⇧Escape` destroys. Hover a pin for its controls.
 
-Open pins are backed up in Application Support and restored after relaunch with their position, size, opacity, orientation, thumbnail state, and source text.
+Open pins, including animated GIFs, are backed up in Application Support and restored after relaunch with their position, size, opacity, orientation, thumbnail state, and source text.
 
 Startup commands: `snipsy snip`, `snipsy paste`, `snipsy paste --plain TEXT`, `snipsy paste --files FILE...`, and `snipsy history`.
 

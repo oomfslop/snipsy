@@ -12,17 +12,28 @@ use std::{
 static NEXT_PIN_ID: AtomicU64 = AtomicU64::new(0);
 
 pub fn open_pin(image: Arc<RgbaImage>, bounds: Option<Rect>, cx: &mut App) {
-    open_pin_with_text(image, bounds, None, cx);
+    open_pin_with_text(image, bounds, None, None, cx);
 }
 
 pub fn open_text_pin(image: Arc<RgbaImage>, text: String, cx: &mut App) {
-    open_pin_with_text(image, None, Some(text.into()), cx);
+    open_pin_with_text(image, None, Some(text.into()), None, cx);
+}
+
+pub fn open_content(content: app::PinContent, cx: &mut App) {
+    open_pin_with_text(
+        content.image,
+        None,
+        content.text.map(Into::into),
+        content.frames,
+        cx,
+    );
 }
 
 fn open_pin_with_text(
     image: Arc<RgbaImage>,
     bounds: Option<Rect>,
     text: Option<Arc<str>>,
+    frames: Option<Arc<Vec<image::Frame>>>,
     cx: &mut App,
 ) {
     if cx.global::<app::AppState>().pins_hidden {
@@ -34,7 +45,18 @@ fn open_pin_with_text(
     let bounds = bounds
         .map(|bounds| Bounds::new(point(px(bounds.pos.x), px(bounds.pos.y)), logical_size))
         .unwrap_or_else(|| Bounds::centered(None, logical_size, cx));
-    open_pin_window(image, bounds, logical_size, None, 1.0, text, None, true, cx);
+    open_pin_window(
+        image,
+        bounds,
+        logical_size,
+        None,
+        1.0,
+        text,
+        frames,
+        None,
+        true,
+        cx,
+    );
 }
 
 fn open_pin_window(
@@ -44,6 +66,7 @@ fn open_pin_window(
     thumbnail_size: Option<Size<Pixels>>,
     opacity: f32,
     text: Option<Arc<str>>,
+    frames: Option<Arc<Vec<image::Frame>>>,
     id: Option<u128>,
     activate: bool,
     cx: &mut App,
@@ -87,7 +110,10 @@ fn open_pin_window(
                 })
                 .detach();
                 Pin {
-                    preview: raster::create_render_image(&image),
+                    preview: frames.as_ref().map_or_else(
+                        || raster::create_render_image(&image),
+                        |frames| raster::create_render_frames(frames),
+                    ),
                     image,
                     opacity,
                     focus,
@@ -95,6 +121,7 @@ fn open_pin_window(
                     thumbnail_size,
                     click_through: false,
                     text,
+                    frames,
                     id,
                     backup_task: None,
                     replace_task: None,
@@ -127,6 +154,7 @@ pub struct ClosedPin {
     original_size: Size<Pixels>,
     thumbnail_size: Option<Size<Pixels>>,
     text: Option<Arc<str>>,
+    frames: Option<Arc<Vec<image::Frame>>>,
     clipboard_change_count: i64,
 }
 
@@ -145,6 +173,7 @@ pub fn restore_pin(pin: ClosedPin, cx: &mut App) {
         pin.thumbnail_size,
         pin.opacity,
         pin.text,
+        pin.frames,
         Some(pin.id),
         true,
         cx,
@@ -159,6 +188,7 @@ pub struct PinBackup {
     pub original_size: Size<Pixels>,
     pub thumbnail_size: Option<Size<Pixels>>,
     pub text: Option<Arc<str>>,
+    pub frames: Option<Arc<Vec<image::Frame>>>,
 }
 
 pub enum PinBackupCommand {
@@ -174,6 +204,7 @@ pub fn restore_backup(pin: PinBackup, cx: &mut App) {
         pin.thumbnail_size,
         pin.opacity,
         pin.text,
+        pin.frames,
         Some(pin.id),
         false,
         cx,
@@ -189,6 +220,7 @@ pub struct Pin {
     thumbnail_size: Option<Size<Pixels>>,
     click_through: bool,
     text: Option<Arc<str>>,
+    frames: Option<Arc<Vec<image::Frame>>>,
     id: u128,
     backup_task: Option<Task<()>>,
     replace_task: Option<Task<()>>,
@@ -208,6 +240,7 @@ impl Pin {
                         original_size: state.original_size,
                         thumbnail_size: state.thumbnail_size,
                         text: state.text.clone(),
+                        frames: state.frames.clone(),
                     }),
                     cx,
                 );
@@ -226,7 +259,9 @@ impl Pin {
         self.replace_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = load.await;
             let _ = this.update_in(cx, |state, window, cx| match result {
-                Ok(content) => state.replace_content(content.image, content.text, window, cx),
+                Ok(content) => {
+                    state.replace_content(content.image, content.text, content.frames, window, cx)
+                }
                 Err(error) => app::show_error(error, cx),
             });
         }));
@@ -236,15 +271,21 @@ impl Pin {
         &mut self,
         image: Arc<RgbaImage>,
         text: Option<String>,
+        frames: Option<Arc<Vec<image::Frame>>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let previous = std::mem::replace(&mut self.preview, raster::create_render_image(&image));
+        let preview = frames.as_ref().map_or_else(
+            || raster::create_render_image(&image),
+            |frames| raster::create_render_frames(frames),
+        );
+        let previous = std::mem::replace(&mut self.preview, preview);
         cx.drop_image(previous, Some(window));
         self.original_size = get_logical_size(&image);
         self.thumbnail_size = None;
         self.image = image;
         self.text = text.map(Into::into);
+        self.frames = frames;
         self.schedule_backup(window, cx);
         cx.notify();
     }
@@ -255,7 +296,8 @@ impl Pin {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.replace_content(image, None, window, cx);
+        // shortcut: editing an animation applies to a still frame, add timeline annotations before preserving frames.
+        self.replace_content(image, None, None, window, cx);
     }
 
     fn close(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -269,6 +311,7 @@ impl Pin {
             original_size: self.original_size,
             thumbnail_size: self.thumbnail_size,
             text: self.text.clone(),
+            frames: self.frames.clone(),
             clipboard_change_count: platform::get_clipboard_change_count(),
         });
         if state.closed_pins.len() > 10 {
@@ -360,10 +403,24 @@ impl Pin {
             "0" => self.reset(window, cx),
             "1" | "2" | "3" | "4" => {
                 let swap_dimensions = matches!(event.keystroke.key.as_str(), "1" | "2");
-                let image = transform_image(&self.image, &event.keystroke.key);
-                let previous =
-                    std::mem::replace(&mut self.preview, raster::create_render_image(&image));
-                self.image = Arc::new(image);
+                let (image, frames, preview) = if let Some(frames) = &self.frames {
+                    let frames = Arc::new(
+                        frames
+                            .iter()
+                            .map(|frame| transform_frame(frame, &event.keystroke.key))
+                            .collect::<Vec<_>>(),
+                    );
+                    let image = Arc::new(frames[0].buffer().clone());
+                    let preview = raster::create_render_frames(&frames);
+                    (image, Some(frames), preview)
+                } else {
+                    let image = Arc::new(transform_image(&self.image, &event.keystroke.key));
+                    let preview = raster::create_render_image(&image);
+                    (image, None, preview)
+                };
+                let previous = std::mem::replace(&mut self.preview, preview);
+                self.image = image;
+                self.frames = frames;
                 cx.drop_image(previous, Some(window));
                 if swap_dimensions {
                     let viewport = window.viewport_size();
@@ -433,6 +490,10 @@ fn transform_image(image: &RgbaImage, key: &str) -> RgbaImage {
         "4" => image::imageops::flip_vertical(image),
         _ => unreachable!(),
     };
+}
+
+fn transform_frame(frame: &image::Frame, key: &str) -> image::Frame {
+    return image::Frame::from_parts(transform_image(frame.buffer(), key), 0, 0, frame.delay());
 }
 
 fn get_logical_size(image: &RgbaImage) -> Size<Pixels> {
@@ -657,7 +718,7 @@ impl Render for Pin {
 mod tests {
     use super::{
         create_pin_id, create_thumbnail_size, get_image_bounds, get_logical_size, sample_pin_pixel,
-        transform_image,
+        transform_frame, transform_image,
     };
     use gpui::{Bounds, point, px, size};
     use image::{Rgba, RgbaImage};
@@ -671,6 +732,15 @@ mod tests {
         assert_eq!(transform_image(&rotated, "2"), image);
         assert_eq!(transform_image(&transform_image(&image, "3"), "3"), image);
         assert_eq!(transform_image(&transform_image(&image, "4"), "4"), image);
+    }
+
+    #[test]
+    fn animated_frame_transforms_keep_delay() {
+        let delay = image::Delay::from_numer_denom_ms(90, 1);
+        let frame = image::Frame::from_parts(RgbaImage::new(2, 3), 0, 0, delay);
+        let transformed = transform_frame(&frame, "2");
+        assert_eq!(transformed.buffer().dimensions(), (3, 2));
+        assert_eq!(transformed.delay(), delay);
     }
 
     #[test]

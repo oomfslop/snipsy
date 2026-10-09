@@ -69,11 +69,25 @@ pub fn decode_bgra(
 }
 
 pub fn create_render_image(image: &RgbaImage) -> Arc<RenderImage> {
-    let mut image = image.clone();
-    for pixel in image.pixels_mut() {
-        pixel.0.swap(0, 2);
-    }
-    return Arc::new(RenderImage::new(vec![Frame::new(image)]));
+    return create_render_frames(std::slice::from_ref(&Frame::new(image.clone())));
+}
+
+pub fn create_render_frames(frames: &[Frame]) -> Arc<RenderImage> {
+    let frames = frames
+        .iter()
+        .cloned()
+        .map(|frame| {
+            let delay = frame.delay();
+            let left = frame.left();
+            let top = frame.top();
+            let mut image = frame.into_buffer();
+            for pixel in image.pixels_mut() {
+                pixel.0.swap(0, 2);
+            }
+            return Frame::from_parts(image, left, top, delay);
+        })
+        .collect::<Vec<_>>();
+    return Arc::new(RenderImage::new(frames));
 }
 
 pub fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
@@ -459,6 +473,18 @@ mod tests {
         assert!(image.height() > 64);
         assert!(image.pixels().any(|pixel| pixel.0 != [250, 250, 250, 255]));
         assert!(render_text_image(&"line\n".repeat(61), &Arc::new(Default::default())).is_err());
+    }
+
+    #[test]
+    fn animated_render_images_keep_frames_and_delays() {
+        let delay = image::Delay::from_numer_denom_ms(120, 1);
+        let frames = vec![
+            Frame::from_parts(RgbaImage::new(2, 1), 0, 0, delay),
+            Frame::from_parts(RgbaImage::new(2, 1), 0, 0, delay),
+        ];
+        let rendered = create_render_frames(&frames);
+        assert_eq!(rendered.frame_count(), 2);
+        assert_eq!(rendered.delay(1), delay);
     }
 
     #[test]
