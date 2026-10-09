@@ -528,15 +528,6 @@ pub fn capture_screen(
                                 )
                             })
                             .collect();
-                        if own_window_ids.iter().any(|id| {
-                            !excluded_windows
-                                .iter()
-                                .any(|window| window.windowID() == *id)
-                        }) {
-                            return Err(
-                                "Could not exclude Snipsy's windows from capture; try again".into(),
-                            );
-                        }
                         let excluded_windows = NSArray::from_retained_slice(&excluded_windows);
                         let mut captures = Vec::with_capacity(displays.len());
                         let mut scale = 1.0_f32;
