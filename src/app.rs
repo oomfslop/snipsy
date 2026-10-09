@@ -1382,6 +1382,13 @@ pub fn open_paths(paths: Vec<PathBuf>, cx: &mut App) {
     .detach();
 }
 
+pub fn load_path_content(path: PathBuf, cx: &mut App) -> Task<Result<PinContent, String>> {
+    let fonts = cx.global::<AppState>().fonts.clone();
+    return cx
+        .background_executor()
+        .spawn(async move { load_path(&path, &fonts) });
+}
+
 fn load_path(
     path: &Path,
     fonts: &Arc<resvg::usvg::fontdb::Database>,

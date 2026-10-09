@@ -289,6 +289,24 @@ impl Pin {
         }));
     }
 
+    fn replace_from_path(
+        &mut self,
+        path: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let load = app::load_path_content(path, cx);
+        self.replace_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = load.await;
+            let _ = this.update_in(cx, |state, window, cx| match result {
+                Ok(content) => {
+                    state.replace_content(content.image, content.text, content.frames, window, cx)
+                }
+                Err(error) => app::show_error(error, cx),
+            });
+        }));
+    }
+
     fn replace_content(
         &mut self,
         image: Arc<RgbaImage>,
@@ -723,8 +741,16 @@ impl Render for Pin {
                     }
                 }),
             )
-            .on_drop(cx.listener(|_, paths: &ExternalPaths, _, cx| {
-                app::open_paths(paths.paths().to_vec(), cx)
+            .on_drop(cx.listener(|state, paths: &ExternalPaths, window, cx| {
+                let mut paths = paths.paths().to_vec();
+                if window.modifiers().shift {
+                    app::open_paths(paths, cx);
+                } else if !paths.is_empty() {
+                    state.replace_from_path(paths.remove(0), window, cx);
+                    if !paths.is_empty() {
+                        app::open_paths(paths, cx);
+                    }
+                }
             }))
             .on_mouse_down(
                 MouseButton::Middle,
