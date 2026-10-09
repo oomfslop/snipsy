@@ -1,6 +1,6 @@
 use crate::{
-    editor::Screenshot, history::History, icons::Icons, pin, platform, preferences::Preferences,
-    raster, selection::SelectionState,
+    editor::Screenshot, geometry::Rect, history::History, icons::Icons, pin, platform,
+    preferences::Preferences, raster, selection::SelectionState,
 };
 use base64::Engine;
 use global_hotkey::{
@@ -39,6 +39,7 @@ pub struct AppState {
     pub pins_hidden: bool,
     pub capture_history: Vec<Screenshot>,
     pub capture_cursor: bool,
+    pub last_capture_selection: Option<(Rect, Rect)>,
     pub history: Vec<(Arc<RgbaImage>, Arc<RenderImage>)>,
     history_persist: async_channel::Sender<Arc<RgbaImage>>,
     pin_persist: async_channel::Sender<pin::PinBackupCommand>,
@@ -533,6 +534,7 @@ pub fn run(startup: StartupAction) -> Result<(), String> {
             pins_hidden: false,
             capture_history: Vec::new(),
             capture_cursor: false,
+            last_capture_selection: None,
             history: Vec::new(),
             history_persist,
             pin_persist,
@@ -1257,6 +1259,10 @@ pub fn remember_capture(image: Arc<RgbaImage>, cx: &mut App) {
 
 pub fn remember_capture_frame(screenshot: Screenshot, cx: &mut App) {
     insert_capture_history(&mut cx.global_mut::<AppState>().capture_history, screenshot);
+}
+
+pub fn remember_capture_selection(bounds: Rect, selection: Rect, cx: &mut App) {
+    cx.global_mut::<AppState>().last_capture_selection = Some((bounds, selection));
 }
 
 fn insert_capture_history(history: &mut Vec<Screenshot>, screenshot: Screenshot) {

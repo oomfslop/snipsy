@@ -749,6 +749,9 @@ impl SelectionState {
             | Action::Print => match self.get_image(cx) {
                 Ok(image) => {
                     let image = Arc::new(image);
+                    if !matches!(action, Action::Apply) {
+                        app::remember_capture_selection(self.bounds, self.selection.unwrap(), cx);
+                    }
                     match action {
                         Action::Copy => {
                             if let Err(error) = app::copy_image(&image, cx) {
@@ -912,6 +915,16 @@ impl SelectionState {
             }
             cx.notify();
             return;
+        }
+        if key == "r" && self.selection.is_none() {
+            if let Some(selection) = get_last_capture_selection(
+                cx.global::<AppState>().last_capture_selection,
+                self.bounds,
+            ) {
+                self.selection = Some(selection);
+                cx.notify();
+                return;
+            }
         }
         let tool = match key {
             "v" => Some(Tool::Select),
@@ -2970,6 +2983,11 @@ fn create_keyboard_resized_selection(
     return selection;
 }
 
+fn get_last_capture_selection(last: Option<(Rect, Rect)>, bounds: Rect) -> Option<Rect> {
+    return last
+        .and_then(|(saved_bounds, selection)| (saved_bounds == bounds).then_some(selection));
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -3010,6 +3028,32 @@ mod tests {
         assert_eq!(
             super::create_keyboard_resized_selection(minimum, "right", false, vec2(2.0, 2.0)),
             minimum
+        );
+    }
+
+    #[test]
+    fn last_capture_region_requires_matching_desktop_geometry() {
+        let bounds = Rect {
+            pos: vec2(-100.0, 0.0),
+            size: vec2(300.0, 200.0),
+        };
+        let selection = Rect {
+            pos: vec2(10.0, 20.0),
+            size: vec2(30.0, 40.0),
+        };
+        assert_eq!(
+            super::get_last_capture_selection(Some((bounds, selection)), bounds),
+            Some(selection)
+        );
+        assert_eq!(
+            super::get_last_capture_selection(
+                Some((bounds, selection)),
+                Rect {
+                    size: vec2(301.0, 200.0),
+                    ..bounds
+                }
+            ),
+            None
         );
     }
 
