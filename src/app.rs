@@ -751,8 +751,18 @@ fn write_image(image: &RgbaImage, path: &Path) -> Result<(), String> {
         path.to_path_buf()
     };
     let format = image::ImageFormat::from_path(&path).map_err(|error| error.to_string())?;
-    if !matches!(format, image::ImageFormat::Png | image::ImageFormat::Jpeg) {
-        return Err("Choose a .png or .jpg filename".into());
+    if !matches!(
+        format,
+        image::ImageFormat::Png
+            | image::ImageFormat::Jpeg
+            | image::ImageFormat::WebP
+            | image::ImageFormat::Bmp
+            | image::ImageFormat::Tiff
+            | image::ImageFormat::Tga
+            | image::ImageFormat::Ico
+            | image::ImageFormat::Gif
+    ) {
+        return Err("Choose a PNG, JPEG, WebP, BMP, TIFF, TGA, ICO, or GIF filename".into());
     }
     let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))
         .map_err(|error| error.to_string())?;
@@ -991,6 +1001,12 @@ mod tests {
         let jpeg = directory.path().join("capture.jpg");
         write_image(&image, &jpeg).unwrap();
         assert_eq!(image::open(jpeg).unwrap().width(), 3);
+        for extension in ["webp", "bmp", "tiff", "tga", "ico", "gif"] {
+            let path = directory.path().join(format!("capture.{extension}"));
+            write_image(&image, &path).unwrap();
+            let saved = image::open(path).unwrap();
+            assert_eq!((saved.width(), saved.height()), (3, 2));
+        }
     }
 
     #[test]

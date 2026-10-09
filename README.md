@@ -54,7 +54,7 @@ Open pins are backed up in Application Support and restored after relaunch with 
 
 Startup commands: `snipsy snip`, `snipsy paste`, `snipsy paste --plain TEXT`, `snipsy paste --files FILE...`, and `snipsy history`.
 
-PNG and JPEG exports use an atomic file replacement. The last ten screen captures can be replayed while snipping, and the last ten finished selections persist in Application Support and are available from the History menu. Settings are deferred.
+PNG, JPEG, WebP, BMP, TIFF, TGA, ICO, and static GIF exports use an atomic file replacement. The last ten screen captures can be replayed while snipping, and the last ten finished selections persist in Application Support and are available from the History menu. Settings are deferred.
 
 Google Lens remains available in the editor toolbar. It submits the edited PNG directly from the default browser, via a temporary local handoff page deleted after 30 seconds. The Lens endpoint is undocumented and may change.
 

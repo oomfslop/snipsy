@@ -501,7 +501,7 @@ pub fn prompt_save_image(suggested_name: &str) -> Receiver<Result<Option<PathBuf
     panel.setCanCreateDirectories(true);
     panel.setAllowsOtherFileTypes(false);
     panel.setAllowedContentTypes(&NSArray::from_retained_slice(
-        &["png", "jpg"]
+        &["png", "jpg", "webp", "bmp", "tiff", "tga", "ico", "gif"]
             .into_iter()
             .filter_map(|extension| {
                 UTType::typeWithFilenameExtension(&NSString::from_str(extension))
