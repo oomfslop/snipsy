@@ -25,7 +25,10 @@ pub struct AppState {
 
 impl Global for AppState {}
 
-actions!(snipsy, [Quit]);
+actions!(
+    snipsy,
+    [Quit, Hide, ShowPreferences, CloseWindow, MinimizeWindow]
+);
 
 pub fn run(command: Option<Command>, data_dir: &Path, listener: UnixListener) {
     let data_dir = data_dir.to_path_buf();
@@ -34,7 +37,8 @@ pub fn run(command: Option<Command>, data_dir: &Path, listener: UnixListener) {
     application.run(move |cx| {
         gpui_kit::init(cx);
         ui::init_theme(cx);
-        platform::initialize_app();
+        cx.set_activation_policy(ActivationPolicy::Accessory);
+        platform::use_window_resize_cursors();
         let mut fonts = fontdb::Database::new();
         fonts.load_system_fonts();
         cx.set_global(AppState {
@@ -57,8 +61,7 @@ pub fn run(command: Option<Command>, data_dir: &Path, listener: UnixListener) {
         .filter_map(|result| result.err().map(|error| format!("{error:#}")))
         .collect::<Vec<_>>();
         pin::init(&data_dir, cx);
-        cx.on_action(|_: &Quit, cx| recording::quit(cx));
-        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+        init_actions(cx);
         cx.spawn(async move |cx| {
             while let Ok(command) = commands.recv().await {
                 cx.update(|cx| dispatch(command, cx));
@@ -72,6 +75,49 @@ pub fn run(command: Option<Command>, data_dir: &Path, listener: UnixListener) {
             show_error(anyhow::anyhow!(errors.join("\n")));
         }
     });
+}
+
+fn init_actions(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| recording::quit(cx));
+    cx.on_action(|_: &Hide, cx| cx.hide());
+    cx.on_action(|_: &ShowPreferences, cx| dispatch(Command::Preferences, cx));
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-h", Hide, None),
+        KeyBinding::new("cmd-,", ShowPreferences, None),
+        KeyBinding::new("cmd-w", CloseWindow, None),
+        KeyBinding::new("cmd-m", MinimizeWindow, None),
+    ]);
+    use component::input;
+    cx.set_menus([
+        Menu::new("Snipsy").items([
+            MenuItem::action("Preferences…", ShowPreferences),
+            MenuItem::separator(),
+            MenuItem::action("Hide Snipsy", Hide),
+            MenuItem::action("Quit Snipsy", Quit),
+        ]),
+        Menu::new("Edit").items([
+            MenuItem::os_action("Undo", input::Undo, OsAction::Undo),
+            MenuItem::os_action("Redo", input::Redo, OsAction::Redo),
+            MenuItem::separator(),
+            MenuItem::os_action("Cut", input::Cut, OsAction::Cut),
+            MenuItem::os_action("Copy", input::Copy, OsAction::Copy),
+            MenuItem::os_action("Paste", input::Paste, OsAction::Paste),
+            MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
+        ]),
+        Menu::new("Window").items([
+            MenuItem::action("Minimize", MinimizeWindow),
+            MenuItem::action("Close", CloseWindow),
+        ]),
+    ]);
+    cx.on_window_closed(|cx, id| {
+        let state = cx.global_mut::<AppState>();
+        state.windows.retain(|_, handle| handle.window_id() != id);
+        if state.windows.is_empty() {
+            cx.set_activation_policy(ActivationPolicy::Accessory);
+        }
+    })
+    .detach();
 }
 
 fn dispatch(command: Command, cx: &mut App) {
@@ -135,14 +181,18 @@ fn show_window<V: Render>(
     cx: &mut App,
     build: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
 ) -> Result<()> {
-    cx.activate(true);
     if let Some(handle) = cx.global::<AppState>().windows.get(key)
         && handle
-            .update(cx, |_, window, _| window.activate_window())
+            .update(cx, |_, window, _| {
+                platform::make_key_window(window);
+                window.activate_window();
+            })
             .is_ok()
     {
+        cx.activate(true);
         return Ok(());
     }
+    cx.set_activation_policy(ActivationPolicy::Regular);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
         titlebar: Some(TitlebarOptions {
@@ -165,6 +215,7 @@ fn show_window<V: Render>(
     cx.global_mut::<AppState>()
         .windows
         .insert(key, handle.into());
+    cx.activate(true);
     return Ok(());
 }
 
@@ -172,4 +223,57 @@ pub fn show_error(error: anyhow::Error) {
     let message = format!("{error:#}");
     eprintln!("{message}");
     platform::show_error(&message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppState, init_actions};
+    use crate::ui;
+    use gpui_kit::{
+        Context, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+        Styled as _, TestAppContext, Window, WindowHandle, div,
+    };
+
+    struct TestView {
+        focus: FocusHandle,
+        standard: bool,
+    }
+
+    impl Render for TestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let root = div().id("root").track_focus(&self.focus).size_full();
+            return if self.standard {
+                ui::handle_window_actions(root)
+            } else {
+                root
+            }
+            .child("window");
+        }
+    }
+
+    fn open_window(standard: bool, cx: &mut TestAppContext) -> WindowHandle<TestView> {
+        let window = cx.add_window(|window, cx| {
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
+            TestView { focus, standard }
+        });
+        cx.run_until_parked();
+        return window;
+    }
+
+    #[gpui_kit::test]
+    fn command_w_closes_only_standard_windows(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(AppState::default());
+            init_actions(cx);
+        });
+        let overlay = open_window(false, cx);
+        cx.simulate_keystrokes(overlay.into(), "cmd-w");
+        cx.run_until_parked();
+        assert!(overlay.update(cx, |_, _, _| ()).is_ok());
+        let standard = open_window(true, cx);
+        cx.simulate_keystrokes(standard.into(), "cmd-w");
+        cx.run_until_parked();
+        assert!(standard.update(cx, |_, _, _| ()).is_err());
+    }
 }

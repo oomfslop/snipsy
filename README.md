@@ -33,10 +33,10 @@ Global shortcuts and the capture toolbar layout are configurable in Preferences.
 
 | Action | Shortcut |
 | --- | --- |
-| Capture or record a region | `⌘⇧A` or `⌘⇧L` |
-| Pin clipboard (image, files, color, or text) | `⌘⇧P` |
-| Toggle click-through for the pin under the pointer | `⌘⇧X` |
-| Show or hide pins | `⇧F3` |
+| Capture or record a region | `⌘⇧A` |
+| Pin clipboard (image, files, color, or text) | not set |
+| Toggle click-through for the pin under the pointer | not set |
+| Show or hide pins | not set |
 
 While capturing:
 
@@ -76,7 +76,7 @@ On pins:
 | Copy the color under the pointer (`⇧` for RGB) | hold `⌥`, press `C` |
 | Replace from clipboard / drop a file (`⇧` opens separately) | `⌘V` |
 | Save / quick-save / print | `⌘S` / `⌘⇧S` / `⌘P` |
-| Close (reopen with `⌘⇧P` until the clipboard changes) / destroy | `Esc`, `⌘W`, or double-click / `⇧Esc` |
+| Close (reopen by pinning the clipboard until it changes) / destroy | `Esc`, `⌘W`, or double-click / `⇧Esc` |
 | Animated GIFs: pause, step frames, speed | `P`, `1` `2`, `⌥` scroll |
 
 Right-click a pin for the full menu, including moving it to another image group. New pins join the active group; only the active group is shown.

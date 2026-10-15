@@ -27,6 +27,7 @@ impl Render for GroupsView {
         let groups = cx.global::<Groups>();
         return v_flex()
             .id("groups")
+            .map(crate::ui::handle_window_actions)
             .size_full()
             .track_focus(&self.focus)
             .bg(cx.theme().background)

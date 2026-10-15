@@ -12,23 +12,30 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// A field missing from the file means the shortcut was cleared; only a missing file falls
+/// back to the defaults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
 pub struct HotkeySettings {
-    pub capture: HotKey,
-    pub paste: HotKey,
-    pub click_through: HotKey,
-    pub toggle_pins: HotKey,
+    #[serde(default)]
+    pub capture: Option<HotKey>,
+    #[serde(default)]
+    pub paste: Option<HotKey>,
+    #[serde(default)]
+    pub click_through: Option<HotKey>,
+    #[serde(default)]
+    pub toggle_pins: Option<HotKey>,
 }
 
 impl Default for HotkeySettings {
     fn default() -> Self {
-        let command_shift = Some(Modifiers::SUPER | Modifiers::SHIFT);
         return Self {
-            capture: HotKey::new(command_shift, Code::KeyA),
-            paste: HotKey::new(command_shift, Code::KeyP),
-            click_through: HotKey::new(command_shift, Code::KeyX),
-            toggle_pins: HotKey::new(Some(Modifiers::SHIFT), Code::F3),
+            capture: Some(HotKey::new(
+                Some(Modifiers::SUPER | Modifiers::SHIFT),
+                Code::KeyA,
+            )),
+            paste: None,
+            click_through: None,
+            toggle_pins: None,
         };
     }
 }
@@ -69,7 +76,7 @@ impl HotkeyKind {
 }
 
 impl HotkeySettings {
-    pub fn get(self, kind: HotkeyKind) -> HotKey {
+    pub fn get(self, kind: HotkeyKind) -> Option<HotKey> {
         return match kind {
             HotkeyKind::Capture => self.capture,
             HotkeyKind::Paste => self.paste,
@@ -78,7 +85,7 @@ impl HotkeySettings {
         };
     }
 
-    fn get_mut(&mut self, kind: HotkeyKind) -> &mut HotKey {
+    fn get_mut(&mut self, kind: HotkeyKind) -> &mut Option<HotKey> {
         return match kind {
             HotkeyKind::Capture => &mut self.capture,
             HotkeyKind::Paste => &mut self.paste,
@@ -88,35 +95,22 @@ impl HotkeySettings {
     }
 
     fn get_bindings(self) -> Vec<(HotKey, Command)> {
-        let mut bindings = HotkeyKind::ALL
-            .map(|kind| (self.get(kind), kind.get_command()))
-            .to_vec();
-        let alias = get_capture_alias();
-        if self.capture != alias {
-            bindings.push((alias, Command::Snip));
-        }
-        return bindings;
+        return HotkeyKind::ALL
+            .into_iter()
+            .filter_map(|kind| Some((self.get(kind)?, kind.get_command())))
+            .collect();
     }
 
     fn validate(self) -> Result<()> {
         let hotkeys = HotkeyKind::ALL.map(|kind| self.get(kind));
         ensure!(
-            !hotkeys
-                .iter()
-                .enumerate()
-                .any(|(index, hotkey)| hotkeys[index + 1..].contains(hotkey)),
+            !hotkeys.iter().enumerate().any(|(index, hotkey)| {
+                hotkey.is_some() && hotkeys[index + 1..].contains(hotkey)
+            }),
             "Global shortcuts must be unique"
-        );
-        ensure!(
-            !hotkeys[1..].contains(&get_capture_alias()),
-            "⌘⇧L is reserved for capture"
         );
         return Ok(());
     }
-}
-
-fn get_capture_alias() -> HotKey {
-    return HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyL);
 }
 
 fn load_settings(path: &Path) -> Result<HotkeySettings> {
@@ -170,7 +164,7 @@ pub fn get_settings(cx: &App) -> Option<HotkeySettings> {
     return cx.try_global::<Hotkeys>().map(|hotkeys| hotkeys.settings);
 }
 
-pub fn set_hotkey(kind: HotkeyKind, hotkey: HotKey, cx: &mut App) -> Result<()> {
+pub fn set_hotkey(kind: HotkeyKind, hotkey: Option<HotKey>, cx: &mut App) -> Result<()> {
     ensure!(
         cx.has_global::<Hotkeys>(),
         "Global shortcuts are unavailable"
@@ -241,26 +235,35 @@ mod tests {
     use crate::app::storage;
 
     #[test]
-    fn settings_round_trip_and_reject_conflicts() {
+    fn only_capture_is_set_by_default() {
+        let settings = HotkeySettings::default();
+        assert!(settings.capture.is_some());
+        assert_eq!(
+            (settings.paste, settings.click_through, settings.toggle_pins),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn settings_round_trip_cleared_shortcuts_and_reject_conflicts() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("hotkeys.toml");
         assert_eq!(load_settings(&path).unwrap(), HotkeySettings::default());
         let settings = HotkeySettings {
-            paste: "control+KeyV".parse().unwrap(),
+            paste: Some("control+KeyV".parse().unwrap()),
             ..Default::default()
         };
         storage::write_toml(&path, &settings).unwrap();
         assert_eq!(load_settings(&path).unwrap(), settings);
-        std::fs::write(&path, "paste = \"shift+KeyQ\"\n").unwrap();
-        assert_eq!(
-            load_settings(&path).unwrap().capture,
-            HotkeySettings::default().capture
-        );
+        let cleared = HotkeySettings {
+            capture: None,
+            ..settings
+        };
+        storage::write_toml(&path, &cleared).unwrap();
+        assert_eq!(load_settings(&path).unwrap(), cleared);
         let mut duplicate = settings;
         duplicate.paste = duplicate.capture;
         assert!(duplicate.validate().is_err());
-        let mut reserved = settings;
-        reserved.paste = "super+shift+KeyL".parse().unwrap();
-        assert!(reserved.validate().is_err());
+        assert!(HotkeySettings::default().validate().is_ok());
     }
 }

@@ -11,9 +11,10 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use gpui_kit::{
     assets::IconName,
     component::{
-        ActiveTheme, Icon, Selectable as _, Sizable as _,
+        ActiveTheme, Disableable as _, Icon, Selectable as _, Sizable as _,
         button::{Button, ButtonVariants as _},
         group_box::GroupBoxVariant,
+        h_flex,
         separator::Separator,
         setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
         v_flex,
@@ -33,7 +34,7 @@ struct DraggedItem {
 pub struct PreferencesView {
     focus: FocusHandle,
     recording: Option<HotkeyKind>,
-    error: Option<SharedString>,
+    error: Option<(HotkeyKind, SharedString)>,
     drop_index: Option<usize>,
 }
 
@@ -68,13 +69,13 @@ impl PreferencesView {
                     "Use a modifier with a letter, number, or punctuation key, or a function key"
                 )
             })
-            .and_then(|hotkey| hotkeys::set_hotkey(kind, hotkey, cx));
+            .and_then(|hotkey| hotkeys::set_hotkey(kind, Some(hotkey), cx));
         match result {
             Ok(()) => {
                 self.recording = None;
                 self.error = None;
             }
-            Err(error) => self.error = Some(format!("{error:#}").into()),
+            Err(error) => self.error = Some((kind, format!("{error:#}").into())),
         }
         cx.notify();
     }
@@ -148,6 +149,7 @@ impl Render for PreferencesView {
             .font_weight(FontWeight::BOLD);
         return div()
             .id("preferences")
+            .map(crate::ui::handle_window_actions)
             .relative()
             .size_full()
             .track_focus(&self.focus)
@@ -191,30 +193,53 @@ fn render_hotkey_field(
 ) -> impl IntoElement + use<> {
     let state = view.read(cx);
     let recording = state.recording == Some(kind);
-    let error = state.error.clone().filter(|_| recording);
-    let label = if recording {
-        "Press shortcut…".into()
-    } else {
-        hotkeys::get_settings(cx).map_or("Unavailable".into(), |settings| {
-            format_hotkey(settings.get(kind))
-        })
+    let error = state
+        .error
+        .clone()
+        .filter(|(failed, _)| *failed == kind)
+        .map(|(_, error)| error);
+    let hotkey = hotkeys::get_settings(cx).map(|settings| settings.get(kind));
+    let label = match hotkey {
+        _ if recording => "Press shortcut…".into(),
+        None => "Unavailable".into(),
+        Some(None) => "Not set".into(),
+        Some(Some(hotkey)) => format_hotkey(hotkey),
     };
     return v_flex()
         .items_end()
         .gap_1()
         .child(
-            Button::new(("hotkey", kind as usize))
-                .secondary()
-                .small()
-                .min_w(px(140.))
-                .selected(recording)
-                .label(label)
-                .on_click(window.listener_for(view, move |state, _, window, cx| {
-                    state.recording = Some(kind);
-                    state.error = None;
-                    window.focus(&state.focus, cx);
-                    cx.notify();
-                })),
+            h_flex()
+                .gap_1()
+                .child(
+                    Button::new(("hotkey", kind as usize))
+                        .secondary()
+                        .small()
+                        .min_w(px(140.))
+                        .selected(recording)
+                        .label(label)
+                        .on_click(window.listener_for(view, move |state, _, window, cx| {
+                            state.recording = Some(kind);
+                            state.error = None;
+                            window.focus(&state.focus, cx);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new(("clear-hotkey", kind as usize))
+                        .ghost()
+                        .small()
+                        .icon(IconName::Close)
+                        .tooltip("Clear shortcut")
+                        .disabled(!matches!(hotkey, Some(Some(_))))
+                        .on_click(window.listener_for(view, move |state, _, _, cx| {
+                            state.recording = None;
+                            state.error = hotkeys::set_hotkey(kind, None, cx)
+                                .err()
+                                .map(|error| (kind, format!("{error:#}").into()));
+                            cx.notify();
+                        })),
+                ),
         )
         .when_some(error, |field, error| {
             field.child(div().text_xs().text_color(cx.theme().danger).child(error))

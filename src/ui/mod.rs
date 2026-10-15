@@ -3,7 +3,7 @@ pub mod history;
 pub mod magnifier;
 pub mod preferences;
 
-use crate::{geometry::Rect, pin, platform};
+use crate::{app, geometry::Rect, pin, platform};
 use anyhow::Result;
 use glam::vec2;
 use gpui_kit::{
@@ -54,6 +54,14 @@ pub fn init_theme(cx: &mut App) {
     theme.light_theme = light;
     theme.dark_theme = dark;
     Theme::change(cx.window_appearance(), None, cx);
+}
+
+/// Regular windows (Preferences, History, Groups) answer the Window menu; overlays and pins
+/// leave its items disabled.
+pub fn handle_window_actions(root: Stateful<Div>) -> Stateful<Div> {
+    return root
+        .on_action(|_: &app::CloseWindow, window, _| window.remove_window())
+        .on_action(|_: &app::MinimizeWindow, window, _| window.minimize_window());
 }
 
 pub struct Assets;

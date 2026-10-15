@@ -18,6 +18,7 @@ impl Render for HistoryView {
         let theme = cx.theme();
         let root = div()
             .id("history")
+            .map(crate::ui::handle_window_actions)
             .size_full()
             .track_focus(&self.focus)
             .bg(theme.background)

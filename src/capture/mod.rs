@@ -346,6 +346,7 @@ impl CaptureView {
         if self.screenshot.is_none() {
             return;
         }
+        platform::make_key_window(window);
         cx.activate(true);
         window.activate_window();
         window.focus(&self.focus, cx);

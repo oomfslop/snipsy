@@ -13,10 +13,10 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSColor,
-    NSColorPanel, NSColorSpace, NSCursor, NSEvent, NSImage, NSImageView, NSModalResponseOK,
-    NSPasteboard, NSPasteboardTypeFileURL, NSPopUpMenuWindowLevel, NSPrintOperation, NSSavePanel,
-    NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSColor, NSColorPanel, NSColorSpace,
+    NSCursor, NSEvent, NSImage, NSImageView, NSModalResponseOK, NSNormalWindowLevel, NSPasteboard,
+    NSPasteboardTypeFileURL, NSPopUpMenuWindowLevel, NSPrintOperation, NSSavePanel, NSScreen,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowCollectionBehavior,
     NSWindowStyleMask,
 };
 use objc2_av_foundation::{
@@ -52,16 +52,9 @@ use std::{
     },
 };
 
-pub fn initialize_app() {
-    let mtm = MainThreadMarker::new().expect("app initializes on the main thread");
-    NSApplication::sharedApplication(mtm)
-        .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    use_window_resize_cursors();
-}
-
 /// GPUI maps edge resize cursors to `resize*Cursor`, which macOS draws as single-direction
 /// arrows; the private window-resize cursors match the diagonal ones GPUI already uses.
-fn use_window_resize_cursors() {
+pub fn use_window_resize_cursors() {
     let metaclass = NSCursor::class().metaclass();
     for (public, private) in [
         (
@@ -270,6 +263,15 @@ fn get_native_window(window: &gpui_kit::Window) -> Retained<NSWindow> {
         .expect("GPUI view is attached to its window");
 }
 
+/// App activation brings the key and main windows forward, so the window has to become both
+/// before activating; GPUI orders it front asynchronously, after the last focused window
+/// has already been raised.
+pub fn make_key_window(window: &gpui_kit::Window) {
+    let native = get_native_window(window);
+    native.makeKeyAndOrderFront(None);
+    native.makeMainWindow();
+}
+
 pub fn hide_overlay(window: &gpui_kit::Window) {
     get_native_window(window).orderOut(None);
     let mtm = MainThreadMarker::new().expect("window hides on the main thread");
@@ -459,36 +461,22 @@ fn prompt_save(suggested_name: &str, types: &NSArray<UTType>) -> Receiver<Result
     return receiver;
 }
 
-fn get_own_window_ids(mtm: MainThreadMarker) -> Vec<u32> {
+/// Overlays, pins and dialogs float above normal windows; regular windows like Preferences
+/// are captured like any other app's.
+fn get_floating_window_ids(mtm: MainThreadMarker) -> Vec<u32> {
     return NSApplication::sharedApplication(mtm)
         .windows()
         .iter()
-        .filter(|window| window.isVisible())
+        .filter(|window| window.isVisible() && window.level() > NSNormalWindowLevel)
         .filter_map(|window| u32::try_from(window.windowNumber()).ok())
         .collect();
 }
 
-fn is_own_window(window: &SCWindow, own_ids: &[u32]) -> bool {
-    // SAFETY: SCWindow properties are plain getters on a valid object.
-    let (id, owner) = unsafe {
-        (
-            window.windowID(),
-            window.owningApplication().map(|app| app.processID()),
-        )
-    };
-    return is_own_window_id(id, owner, own_ids);
-}
-
-fn is_own_window_id(id: u32, owner: Option<i32>, own_ids: &[u32]) -> bool {
-    return own_ids.contains(&id) || owner == Some(std::process::id() as i32);
-}
-
-/// Snipsy's own windows are excluded from every capture so overlays and pins never end up in screenshots.
 fn with_shareable_content(
     callback: impl Fn(Result<(&SCShareableContent, Retained<NSArray<SCWindow>>)>) + 'static,
 ) {
     let mtm = MainThreadMarker::new().expect("capture starts on the main thread");
-    let own_ids = get_own_window_ids(mtm);
+    let floating_ids = get_floating_window_ids(mtm);
     let block = RcBlock::new(
         move |content: *mut SCShareableContent, error: *mut NSError| {
             autoreleasepool(|_| {
@@ -500,7 +488,7 @@ fn with_shareable_content(
                 // SAFETY: SCShareableContent getters are valid for the content's lifetime.
                 let excluded = unsafe { content.windows() }
                     .iter()
-                    .filter(|window| is_own_window(window, &own_ids))
+                    .filter(|window| floating_ids.contains(&unsafe { window.windowID() }))
                     .collect::<Vec<_>>();
                 callback(Ok((content, NSArray::from_retained_slice(&excluded))));
             });
@@ -1087,8 +1075,8 @@ fn copy_capture_image(image: &CGImage) -> Result<image::RgbaImage> {
 mod tests {
     use super::{
         ACTIVE_COLOR_PICKER_TARGET, DisplayCapture, get_recording_region, get_recording_size,
-        get_scaled_size, is_complete_recording_frame, is_own_window_id,
-        release_color_picker_target, save_recording, stitch_capture_images,
+        get_scaled_size, is_complete_recording_frame, release_color_picker_target, save_recording,
+        stitch_capture_images,
     };
     use crate::geometry::Rect;
     use glam::vec2;
@@ -1183,14 +1171,6 @@ mod tests {
     fn recording_dimensions_reject_float_rounded_u32_overflow() {
         assert!(get_scaled_size(vec2(u32::MAX as f32, 100.0), 1.0).is_err());
         assert!(get_recording_size(vec2(u32::MAX as f32, 100.0), 1.0).is_err());
-    }
-
-    #[test]
-    fn overlay_exclusion_does_not_require_application_metadata() {
-        assert!(is_own_window_id(42, None, &[42, 43]));
-        assert!(is_own_window_id(99, Some(std::process::id() as i32), &[42]));
-        assert!(!is_own_window_id(99, None, &[42]));
-        assert!(!is_own_window_id(99, Some(-1), &[42]));
     }
 
     #[test]

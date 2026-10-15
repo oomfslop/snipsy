@@ -317,6 +317,7 @@ fn open(data: PinData, activate: bool, cx: &mut App) {
             platform::set_window_visible(window, true);
         }
         if activate {
+            platform::make_key_window(window);
             cx.activate(true);
             window.activate_window();
             window.focus(&pin.focus, cx);
