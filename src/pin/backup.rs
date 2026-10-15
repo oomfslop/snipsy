@@ -1,7 +1,7 @@
 use crate::{
     app::{
         content::{self, PinContent},
-        groups, storage,
+        storage,
     },
     geometry::Rect,
     pin::{MIN_SIZE, PinData},
@@ -24,7 +24,6 @@ struct PinMetadata {
     thumbnail_size: Option<Vec2>,
     text: Option<String>,
     animated: bool,
-    group: usize,
 }
 
 pub async fn run_worker(
@@ -74,7 +73,6 @@ fn write(directory: &Path, pin: &PinData, written: &mut HashMap<u128, PinContent
             thumbnail_size: pin.thumbnail_size,
             text: content.text.clone(),
             animated,
-            group: pin.group,
         },
     )?;
     if !unchanged {
@@ -115,9 +113,8 @@ fn read(directory: &Path, id: u128, text: &str) -> Result<PinData> {
             && metadata
                 .thumbnail_size
                 .is_none_or(|size| size.is_finite() && size.min_element() > 0.0)
-            && (0.2..=1.0).contains(&metadata.opacity)
-            && metadata.group < groups::MAX_GROUPS,
-        "invalid geometry, opacity, or group"
+            && (0.2..=1.0).contains(&metadata.opacity),
+        "invalid geometry or opacity"
     );
     let loaded = content::load_image_file(&get_image_path(directory, id, metadata.animated))?;
     return Ok(PinData {
@@ -133,7 +130,6 @@ fn read(directory: &Path, id: u128, text: &str) -> Result<PinData> {
         opacity: metadata.opacity,
         original_size: metadata.original_size,
         thumbnail_size: metadata.thumbnail_size,
-        group: metadata.group,
     });
 }
 
@@ -156,7 +152,6 @@ mod tests {
             opacity: 0.6,
             original_size: vec2(640.0, 360.0),
             thumbnail_size: Some(vec2(160.0, 90.0)),
-            group: 1,
         };
     }
 
@@ -178,11 +173,11 @@ mod tests {
         assert_eq!(loaded[0].id, 42);
         assert_eq!(*loaded[0].content.image, *image);
         assert_eq!(loaded[0].content.text.as_deref(), Some("héllo"));
-        assert_eq!((loaded[0].group, loaded[0].opacity), (1, 0.6));
+        assert_eq!(loaded[0].opacity, 0.6);
         assert_eq!(loaded[0].bounds, pin.bounds);
         std::fs::write(
             directory.path().join("42.toml"),
-            "opacity = 2.0\noriginal_size = [1.0, 1.0]\nanimated = false\ngroup = 0\n\n[bounds]\npos = [0.0, 0.0]\nsize = [10.0, 10.0]\n",
+            "opacity = 2.0\noriginal_size = [1.0, 1.0]\nanimated = false\n\n[bounds]\npos = [0.0, 0.0]\nsize = [10.0, 10.0]\n",
         )
         .unwrap();
         assert!(load(directory.path()).unwrap().is_empty());
@@ -191,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn restoring_pins_rejects_nonfinite_geometry_and_unreachable_groups() {
+    fn restoring_pins_rejects_nonfinite_geometry() {
         let directory = tempfile::tempdir().unwrap();
         let pin = create_pin(42, PinContent::from_image(Arc::new(RgbaImage::new(1, 1))));
         write(directory.path(), &pin, &mut HashMap::new()).unwrap();
@@ -212,8 +207,6 @@ mod tests {
             (&["bounds", "size"], toml::Value::Float(1e40)),
             (&["original_size"], toml::Value::Float(1e40)),
             (&["thumbnail_size"], toml::Value::Float(1e40)),
-            (&["group"], toml::Value::Integer(64)),
-            (&["group"], toml::Value::Integer(i64::MAX)),
         ] {
             let mut metadata: toml::Table = text.parse().unwrap();
             replace(&mut metadata, path, value);

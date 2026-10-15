@@ -1,7 +1,6 @@
 pub mod cli;
 pub mod content;
 pub mod export;
-pub mod groups;
 pub mod history;
 pub mod hotkeys;
 pub mod recording;
@@ -52,7 +51,6 @@ pub fn run(command: Option<Command>, data_dir: &Path, listener: UnixListener) {
         capture::init(cx);
         let errors = [
             cli::listen(listener, sender.clone()),
-            groups::init(&data_dir, cx),
             toolbar_layout::init(&data_dir, cx),
             hotkeys::init(&data_dir, sender.clone(), cx),
             tray::init(sender, cx),
@@ -143,21 +141,6 @@ fn dispatch(command: Command, cx: &mut App) {
         Command::Whiteboard { color } => return capture::start_whiteboard(color, cx),
         Command::TogglePins => return pin::toggle_hidden(cx),
         Command::ToggleClickThrough => return pin::toggle_click_through(cx),
-        Command::CreateGroup { name } => {
-            groups::create((!name.is_empty()).then(|| name.join(" ")), cx)
-        }
-        Command::SwitchGroup { name } => {
-            groups::switch_by_name((!name.is_empty()).then(|| name.join(" ")), cx)
-        }
-        Command::EmptyGroup => return pin::empty_active_group(cx),
-        Command::Groups => show_window(
-            "groups",
-            "Image Groups",
-            size(px(360.), px(420.)),
-            false,
-            cx,
-            |window, cx| cx.new(|cx| ui::groups::GroupsView::new(window, cx)),
-        ),
         Command::Preferences => show_window(
             "preferences",
             "Preferences",

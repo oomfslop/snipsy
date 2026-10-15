@@ -29,7 +29,6 @@ pub fn init(sender: async_channel::Sender<Command>, cx: &mut App) -> Result<()> 
             Command::Whiteboard { color: [255; 4] },
         ),
         (create_item("Show or Hide Pins"), Command::TogglePins),
-        (create_item("Image Groups…"), Command::Groups),
         (create_item("Preferences…"), Command::Preferences),
     ];
     let quit = create_item("Quit Snipsy");

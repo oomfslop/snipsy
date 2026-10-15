@@ -4,7 +4,7 @@ use crate::{
     app::{
         self,
         content::{self, PinContent},
-        export, groups, storage,
+        export, storage,
     },
     capture,
     geometry::Rect,
@@ -26,7 +26,6 @@ use gpui_kit::{
 };
 use image::{Frame, RgbaImage};
 use std::{
-    collections::HashSet,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -46,7 +45,6 @@ pub struct PinData {
     pub opacity: f32,
     pub original_size: Vec2,
     pub thumbnail_size: Option<Vec2>,
-    pub group: usize,
 }
 
 struct ClosedPin {
@@ -60,7 +58,6 @@ struct Pins {
     closed: Vec<ClosedPin>,
     hidden: bool,
     backup: Option<async_channel::Sender<BackupCommand>>,
-    cleared_restore_groups: Option<HashSet<usize>>,
 }
 
 impl Global for Pins {}
@@ -98,10 +95,6 @@ actions!(
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = pin, no_json)]
 struct Nudge(Vec2);
-
-#[derive(Clone, PartialEq, Action)]
-#[action(namespace = pin, no_json)]
-struct MoveToGroup(usize);
 
 pub fn init(data_dir: &Path, cx: &mut App) {
     let context = Some("Pin");
@@ -163,7 +156,6 @@ pub fn init(data_dir: &Path, cx: &mut App) {
     let (loaded, load) = async_channel::bounded(1);
     let pins = cx.global_mut::<Pins>();
     pins.backup = Some(sender);
-    pins.cleared_restore_groups = Some(HashSet::new());
     cx.background_executor()
         .spawn(async move {
             let pins = backup::load(&directory);
@@ -178,28 +170,13 @@ pub fn init(data_dir: &Path, cx: &mut App) {
         .detach();
     cx.spawn(async move |cx| {
         let pins = load.recv().await.unwrap_or_else(|error| Err(error.into()));
-        cx.update(|cx| {
-            let cleared = cx
-                .global_mut::<Pins>()
-                .cleared_restore_groups
-                .take()
-                .unwrap_or_default();
-            match pins {
-                Ok(pins) => {
-                    let groups = pins.iter().map(|pin| pin.group + 1).max().unwrap_or(0);
-                    if let Err(error) = groups::ensure_count(groups, cx) {
-                        app::show_error(error);
-                    }
-                    for pin in pins {
-                        if cleared.contains(&pin.group) {
-                            send_backup(BackupCommand::Remove(pin.id), cx);
-                            continue;
-                        }
-                        open(pin, false, cx);
-                    }
+        cx.update(|cx| match pins {
+            Ok(pins) => {
+                for pin in pins {
+                    open(pin, false, cx);
                 }
-                Err(error) => eprintln!("could not restore pins: {error:#}"),
             }
+            Err(error) => eprintln!("could not restore pins: {error:#}"),
         });
     })
     .detach();
@@ -242,7 +219,6 @@ fn open_content(content: PinContent, bounds: Option<Rect>, cx: &mut App) {
             opacity: 1.0,
             original_size: bounds.size,
             thumbnail_size: None,
-            group: groups::get_active(cx),
         },
         true,
         cx,
@@ -276,9 +252,6 @@ pub fn paste(cx: &mut App) -> Result<()> {
         .closed
         .pop_if(|closed| closed.clipboard_change_count == change_count)
     {
-        if let Err(error) = groups::switch(closed.data.group, cx) {
-            app::show_error(error);
-        }
         open(closed.data, true, cx);
         return Ok(());
     }
@@ -360,18 +333,6 @@ pub fn toggle_click_through(cx: &mut App) {
     }
 }
 
-pub fn empty_active_group(cx: &mut App) {
-    let active = groups::get_active(cx);
-    if let Some(cleared) = &mut cx.global_mut::<Pins>().cleared_restore_groups {
-        cleared.insert(active);
-    }
-    update_pins(cx, |pin, window, cx| {
-        if pin.data.group == active {
-            pin.destroy(&Destroy, window, cx);
-        }
-    });
-}
-
 pub struct Pin {
     data: PinData,
     preview: Arc<RenderImage>,
@@ -405,7 +366,7 @@ impl Pin {
     }
 
     pub fn get_is_visible(&self, cx: &App) -> bool {
-        return !cx.global::<Pins>().hidden && self.data.group == groups::get_active(cx);
+        return !cx.global::<Pins>().hidden;
     }
 
     fn get_image(&self) -> &Arc<RgbaImage> {
@@ -667,15 +628,6 @@ impl Pin {
 
     fn show_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
-        let groups = cx.global::<groups::Groups>();
-        let mut move_menu = NativeMenu::new();
-        for (index, name) in groups.names.iter().enumerate() {
-            move_menu = move_menu.menu_with_check(
-                name.clone(),
-                index == self.data.group,
-                Box::new(MoveToGroup(index)),
-            );
-        }
         NativeMenu::new()
             .menu("Copy", Box::new(Copy))
             .menu("Save…", Box::new(Save))
@@ -688,7 +640,6 @@ impl Pin {
                 self.data.thumbnail_size.is_some(),
                 Box::new(ToggleThumbnail),
             )
-            .submenu("Move to Group", move_menu)
             .separator()
             .menu("Close", Box::new(Close))
             .menu("Destroy", Box::new(Destroy))
@@ -805,11 +756,6 @@ impl Render for Pin {
             .on_action(
                 cx.listener(|_, nudge: &Nudge, window, _| platform::move_window(window, nudge.0)),
             )
-            .on_action(cx.listener(|pin, group: &MoveToGroup, window, cx| {
-                pin.data.group = group.0;
-                platform::set_window_visible(window, pin.get_is_visible(cx));
-                pin.schedule_backup(window, cx);
-            }))
             .on_modifiers_changed(cx.listener(|_, _, _, cx| cx.notify()))
             .on_mouse_move(cx.listener(|_, _, window, cx| {
                 if window.modifiers().alt {
@@ -991,7 +937,6 @@ mod tests {
                     opacity: 1.0,
                     original_size: vec2(100.0, 100.0),
                     thumbnail_size: None,
-                    group: 0,
                 },
                 window,
                 cx,
@@ -1008,45 +953,10 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn clearing_groups_during_restore_keeps_only_later_pins(cx: &mut TestAppContext) {
-        let directory = tempfile::tempdir().unwrap();
-        let backups = directory.path().join("pins");
-        std::fs::create_dir_all(&backups).unwrap();
-        RgbaImage::new(2, 1).save(backups.join("42.png")).unwrap();
-        std::fs::write(
-            backups.join("42.toml"),
-            "opacity = 1.0\noriginal_size = [100.0, 100.0]\nanimated = false\ngroup = 0\n\n[bounds]\npos = [0.0, 0.0]\nsize = [100.0, 100.0]\n",
-        )
-        .unwrap();
-        cx.update(|cx| {
-            gpui_kit::init(cx);
-            crate::app::groups::init(directory.path(), cx).unwrap();
-            init(directory.path(), cx);
-            super::empty_active_group(cx);
-        });
-        let window = create_pin_window(cx, PinContent::from_image(Arc::new(RgbaImage::new(2, 1))));
-        let id = window
-            .update(cx, |pin, window, cx| {
-                super::send_backup(super::BackupCommand::Save(pin.get_snapshot(window)), cx);
-                pin.data.id
-            })
-            .unwrap();
-        cx.run_until_parked();
-        cx.update(|cx| {
-            assert_eq!(cx.global::<Pins>().views.len(), 1);
-            assert!(cx.global::<Pins>().cleared_restore_groups.is_none());
-        });
-        let restored = super::backup::load(&backups).unwrap();
-        assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0].id, id);
-    }
-
-    #[gpui_kit::test]
     fn animated_pins_schedule_more_frames(cx: &mut TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::app::groups::init(directory.path(), cx).unwrap();
             init(directory.path(), cx);
         });
         let frames = vec![Frame::new(RgbaImage::new(2, 1)); 2];
@@ -1076,7 +986,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::app::groups::init(directory.path(), cx).unwrap();
             init(directory.path(), cx);
         });
         let frames = Arc::new(vec![
@@ -1131,7 +1040,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::app::groups::init(directory.path(), cx).unwrap();
             init(directory.path(), cx);
         });
         let frames = vec![
@@ -1192,7 +1100,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::app::groups::init(directory.path(), cx).unwrap();
             init(directory.path(), cx);
         });
         let delay = Delay::from_numer_denom_ms(80, 1);
@@ -1239,7 +1146,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::app::groups::init(directory.path(), cx).unwrap();
             init(directory.path(), cx);
         });
         for bulk in [false, true] {

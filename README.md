@@ -22,7 +22,7 @@ Snipsy runs in the background with a menu-bar item. Settings, history, and pin b
 ```
 snipsy [snip | record | paste [--plain TEXT... | --files FILE...] | history | clear-history
         | whiteboard [--color COLOR] | toggle-pins | toggle-click-through
-        | create-group [NAME] | switch-group [NAME] | empty-group | groups | preferences | quit]
+        | preferences | quit]
 ```
 
 Commands are forwarded to the running instance and start it when needed. `COLOR` accepts names, `#rgb[a]`, `#rrggbb[aa]`, and `r g b` (0–255 or 0.0–1.0); `--color transparent` makes a transparent whiteboard.
@@ -79,7 +79,7 @@ On pins:
 | Close (reopen by pinning the clipboard until it changes) / destroy | `Esc`, `⌘W`, or double-click / `⇧Esc` |
 | Animated GIFs: pause, step frames, speed | `P`, `1` `2`, `⌥` scroll |
 
-Right-click a pin for the full menu, including moving it to another image group. New pins join the active group; only the active group is shown.
+Right-click a pin for the full menu.
 
 Save and quick-save preserve animated GIF frames and timing. `P` enters frame selection at the first frame; use `1`/`2` to choose a frame to copy, save, print, or annotate. Selected frames save as PNG by default. Choose another image extension in Save to export a still image.
 
@@ -88,8 +88,8 @@ Save and quick-save preserve animated GIF frames and timing. `P` enters frame se
 - `editor.rs`, `geometry.rs`, `raster.rs`: annotation model, undo, hit testing, and CPU rendering for exports. No UI types.
 - `capture/`: the capture overlay. `layout.rs` holds the placement math, `paint.rs` draws annotations on the GPU, `text.rs` handles text editing and IME, `toolbar.rs` renders the toolbars.
 - `pin/`: pin windows and their backups.
-- `app/`: startup, command dispatch, CLI and single-instance IPC, hotkeys, tray, history, groups, recording, and persistence.
-- `ui/`: shared widgets and the History, Groups, and Preferences windows.
+- `app/`: startup, command dispatch, CLI and single-instance IPC, hotkeys, tray, history, recording, and persistence.
+- `ui/`: shared widgets and the History and Preferences windows.
 - `platform/macos.rs`: ScreenCaptureKit capture and recording, overlay windows, and native dialogs. This is the boundary to port for other platforms.
 - `lens.rs`: Google Lens handoff.
 

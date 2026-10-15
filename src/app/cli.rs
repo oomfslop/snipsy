@@ -48,18 +48,6 @@ pub enum Command {
     TogglePins,
     /// Toggle click-through for the pin under the pointer
     ToggleClickThrough,
-    /// Create an image group and switch to it
-    CreateGroup {
-        name: Vec<String>,
-    },
-    /// Switch to the named image group, or the next one
-    SwitchGroup {
-        name: Vec<String>,
-    },
-    /// Destroy every pin in the active image group
-    EmptyGroup,
-    /// Manage image groups
-    Groups,
     Preferences,
     Quit,
 }
