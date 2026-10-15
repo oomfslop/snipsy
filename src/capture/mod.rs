@@ -302,7 +302,7 @@ impl CaptureView {
             capture_history: Vec::new(),
             capture_history_index: 0,
             intensity,
-            toolbar_size: Rc::new(Cell::new(vec2(480.0, 32.0))),
+            toolbar_size: Rc::new(Cell::new(vec2(600.0, 42.0))),
             _subscriptions: vec![subscription],
         };
         if let Some(image) = image {

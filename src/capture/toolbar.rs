@@ -223,7 +223,10 @@ impl CaptureView {
             )
             .child(
                 Toolbar::new("actions")
-                    .small()
+                    .with_size(gpui_kit::component::Size::Medium)
+                    .h_10()
+                    .p_1()
+                    .gap_1()
                     .when(matches!(self.mode, Mode::Capture), |toolbar| {
                         toolbar
                             .child(self.create_button(
@@ -355,7 +358,11 @@ impl CaptureView {
             )
             .selected(tool == variant)
         };
-        let toolbar = Toolbar::new("tool-options").small();
+        let toolbar = Toolbar::new("tool-options")
+            .with_size(gpui_kit::component::Size::Medium)
+            .h_10()
+            .p_1()
+            .gap_1();
         let toolbar = match tool {
             Tool::Rectangle | Tool::Ellipse => toolbar
                 .child(variant(Tool::Rectangle, cx))
