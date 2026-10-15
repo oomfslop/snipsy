@@ -10,7 +10,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 glam = { version = "0.30", features = ["serde"] }
 global-hotkey = { version = "0.8", features = ["serde"] }
-gpui-kit = "0.7.1"
+gpui-kit = "0.7.3"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 async-channel = "2"
@@ -22,7 +22,7 @@ lyon = "1"
 tray-icon = "0.26.1"
 
 [dev-dependencies]
-gpui-kit = { version = "0.7.1", features = ["test-support"] }
+gpui-kit = { version = "0.7.3", features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 raw-window-handle = "0.6"
