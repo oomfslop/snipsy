@@ -6,7 +6,11 @@ pub mod preferences;
 use crate::{geometry::Rect, pin, platform};
 use anyhow::Result;
 use glam::vec2;
-use gpui_kit::{base::Root, component::ActiveTheme, *};
+use gpui_kit::{
+    base::Root,
+    component::{self, ActiveTheme, Sizable as _, Theme, ThemeRegistry, toolbar::Toolbar},
+    *,
+};
 use std::borrow::Cow;
 
 gpui_kit::assets::icon_assets!(
@@ -32,8 +36,25 @@ gpui_kit::assets::icon_assets!(
         Underline,
         PaintBucket,
         Trash,
+        Keyboard,
+        PanelTop,
+        GripVertical,
     ]
 );
+
+pub fn init_theme(cx: &mut App) {
+    let registry = ThemeRegistry::global_mut(cx);
+    registry
+        .load_themes_from_str(include_str!("theme.json"))
+        .expect("bundled theme is valid");
+    let light = registry.themes()["Snipsy Light"].clone();
+    let dark = registry.themes()["Snipsy Dark"].clone();
+    Theme::change(cx.window_appearance(), None, cx);
+    let theme = Theme::global_mut(cx);
+    theme.light_theme = light;
+    theme.dark_theme = dark;
+    Theme::change(cx.window_appearance(), None, cx);
+}
 
 pub struct Assets;
 
@@ -126,6 +147,20 @@ pub fn to_rect(bounds: Bounds<Pixels>) -> Rect {
     };
 }
 
+pub fn create_toolbar(id: impl Into<ElementId>) -> Toolbar {
+    return Toolbar::new(id)
+        .with_size(component::Size::Medium)
+        .h_auto()
+        .p(TOOLBAR_PADDING)
+        .gap(TOOLBAR_PADDING);
+}
+
+const TOOLBAR_PADDING: Pixels = px(4.);
+
+pub fn create_toolbar_panel(cx: &App) -> Div {
+    return panel(cx).rounded(cx.theme().radius + TOOLBAR_PADDING + px(1.));
+}
+
 pub fn panel(cx: &App) -> Div {
     let theme = cx.theme();
     return div()
@@ -135,4 +170,61 @@ pub fn panel(cx: &App) -> Div {
         .border_color(theme.border)
         .rounded(theme.radius)
         .shadow_md();
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::{
+        Context, InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _,
+        TestAppContext, Window,
+        assets::IconName,
+        component::{ActiveTheme as _, Theme, ThemeMode, button::Button},
+        div, px,
+    };
+
+    struct ToolbarHost;
+
+    impl Render for ToolbarHost {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            window.set_rem_size(px(13.));
+            return div().flex().items_start().child(
+                super::create_toolbar_panel(cx)
+                    .debug_selector(|| "panel".into())
+                    .child(
+                        super::create_toolbar("toolbar").child(
+                            Button::new("button")
+                                .icon(IconName::Copy)
+                                .debug_selector(|| "button".into()),
+                        ),
+                    ),
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn bundled_theme_replaces_default_colors(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            super::init_theme(cx);
+            for mode in [ThemeMode::Light, ThemeMode::Dark] {
+                Theme::change(mode, None, cx);
+                let theme = cx.theme();
+                assert!(theme.font_size == px(13.));
+                assert!(theme.group_box != theme.background, "{mode:?}");
+            }
+        });
+    }
+
+    #[gpui_kit::test]
+    fn toolbar_buttons_have_equal_insets(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_, cx) = cx.add_window_view(|_, _| ToolbarHost);
+        cx.run_until_parked();
+        let panel = cx.debug_bounds("panel").unwrap();
+        let button = cx.debug_bounds("button").unwrap();
+        let start = button.origin - panel.origin;
+        let end = panel.bottom_right() - button.bottom_right();
+        assert_eq!(start.x, start.y);
+        assert_eq!(start, end);
+    }
 }

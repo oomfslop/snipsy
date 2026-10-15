@@ -29,7 +29,7 @@ Commands are forwarded to the running instance and start it when needed. `COLOR`
 
 ## Shortcuts
 
-Global shortcuts are configurable in Preferences.
+Global shortcuts and the capture toolbar layout are configurable in Preferences.
 
 | Action | Shortcut |
 | --- | --- |

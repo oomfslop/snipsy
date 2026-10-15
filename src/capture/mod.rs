@@ -1,7 +1,7 @@
 mod layout;
 mod paint;
 mod text;
-mod toolbar;
+pub mod toolbar;
 
 use crate::{
     app::{self, AppState, content::PinContent, export, history, recording},
@@ -302,7 +302,7 @@ impl CaptureView {
             capture_history: Vec::new(),
             capture_history_index: 0,
             intensity,
-            toolbar_size: Rc::new(Cell::new(vec2(600.0, 42.0))),
+            toolbar_size: Rc::new(Cell::new(vec2(600.0, 36.0))),
             _subscriptions: vec![subscription],
         };
         if let Some(image) = image {
@@ -1440,7 +1440,10 @@ mod tests {
     use std::sync::Arc;
 
     fn create_capture(cx: &mut TestAppContext) -> WindowHandle<CaptureView> {
-        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(crate::app::toolbar_layout::ToolbarLayout::default());
+        });
         return cx.add_window(|window, cx| {
             CaptureView::new(
                 Rect {

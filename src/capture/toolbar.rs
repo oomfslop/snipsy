@@ -1,4 +1,5 @@
 use crate::{
+    app::toolbar_layout::{self, ToolbarItem, ToolbarLayout},
     capture::{CaptureView, EditorAction, Mode, get_tool_family, layout},
     editor::{BlurMode, TextAttribute, Tool},
     geometry::{Color, Rect},
@@ -12,7 +13,6 @@ use gpui_kit::{
         button::{Button, ButtonVariants as _},
         separator::Separator,
         slider::Slider,
-        toolbar::Toolbar,
     },
     prelude::*,
     *,
@@ -106,10 +106,78 @@ fn get_tool_spec(tool: Tool) -> &'static ToolSpec {
     return TOOLS.iter().find(|spec| spec.tool == tool).unwrap();
 }
 
+pub struct ToolbarItemSpec {
+    pub icon: IconName,
+    pub label: &'static str,
+    shortcut: Option<SharedString>,
+    action: EditorAction,
+}
+
+impl ToolbarItemSpec {
+    pub fn get_tooltip(&self) -> SharedString {
+        return match &self.shortcut {
+            Some(shortcut) => format!("{} ({shortcut})", self.label).into(),
+            None => self.label.into(),
+        };
+    }
+}
+
+pub fn get_item_spec(item: ToolbarItem, pin_editor: bool) -> Option<ToolbarItemSpec> {
+    let create = |icon, label, shortcut: Option<&'static str>, action| ToolbarItemSpec {
+        icon,
+        label,
+        shortcut: shortcut.map(SharedString::from),
+        action,
+    };
+    let create_tool = |tool| {
+        let spec = get_tool_spec(tool);
+        return ToolbarItemSpec {
+            icon: spec.icon,
+            label: spec.label,
+            shortcut: Some(spec.key.to_uppercase().into()),
+            action: EditorAction::Tool(tool),
+        };
+    };
+    return Some(match item {
+        ToolbarItem::Record => create(
+            IconName::CircleDot,
+            "Record region",
+            None,
+            EditorAction::Record,
+        ),
+        ToolbarItem::Select => create_tool(Tool::Select),
+        ToolbarItem::Shape => create_tool(Tool::Rectangle),
+        ToolbarItem::Arrow => create_tool(Tool::Arrow),
+        ToolbarItem::Pen => create_tool(Tool::Pen),
+        ToolbarItem::Highlighter => create_tool(Tool::Highlighter),
+        ToolbarItem::Text => create_tool(Tool::Text),
+        ToolbarItem::Blur => create_tool(Tool::Mosaic),
+        ToolbarItem::Eraser => create_tool(Tool::Eraser),
+        ToolbarItem::Undo => create(IconName::Undo2, "Undo", Some("⌘Z"), EditorAction::Undo),
+        ToolbarItem::Redo => create(IconName::Redo2, "Redo", Some("⇧⌘Z"), EditorAction::Redo),
+        ToolbarItem::Layers => create(IconName::Layers, "Layers", None, EditorAction::Layers),
+        ToolbarItem::Search => create(
+            IconName::ScanSearch,
+            "Search with Google Lens",
+            None,
+            EditorAction::Search,
+        ),
+        ToolbarItem::Print => create(IconName::Printer, "Print", Some("⌘P"), EditorAction::Print),
+        ToolbarItem::Save => create(IconName::Save, "Save", Some("⌘S"), EditorAction::Save),
+        ToolbarItem::Pin => create(IconName::Pin, "Pin", Some("⌘T"), EditorAction::Pin),
+        ToolbarItem::Cancel => create(IconName::Close, "Cancel", Some("Esc"), EditorAction::Cancel),
+        ToolbarItem::Copy if pin_editor => {
+            create(IconName::Check, "Apply", Some("Enter"), EditorAction::Apply)
+        }
+        ToolbarItem::Copy => create(IconName::Copy, "Copy", Some("Enter"), EditorAction::Copy),
+        ToolbarItem::Separator => return None,
+    });
+}
+
 impl CaptureView {
     fn create_button(
         &self,
-        id: &'static str,
+        id: impl Into<ElementId>,
         icon: IconName,
         tooltip: impl Into<SharedString>,
         action: EditorAction,
@@ -165,7 +233,10 @@ impl CaptureView {
                 screen,
             )
         });
-        let mut elements = vec![self.render_action_bar(bar, cx).into_any_element()];
+        let mut elements = Vec::new();
+        if !cx.global::<ToolbarLayout>().items.is_empty() {
+            elements.push(self.render_action_bar(bar, cx).into_any_element());
+        }
         let tool = self.editor.get_current_tool();
         if !matches!(tool, Tool::Select | Tool::Eraser) {
             elements.push(
@@ -183,28 +254,40 @@ impl CaptureView {
         let measured = self.toolbar_size.clone();
         let entity = cx.entity_id();
         let family = get_tool_family(self.editor.tool);
-        let tools = TOOLS
-            .iter()
-            .filter(|spec| get_tool_family(spec.tool) == spec.tool)
-            .map(|spec| {
-                self.create_button(
-                    spec.label,
+        let pin_editor = matches!(self.mode, Mode::PinEditor(_));
+        let items =
+            toolbar_layout::get_visible_items(&cx.global::<ToolbarLayout>().items, |item| {
+                item == ToolbarItem::Record && !matches!(self.mode, Mode::Capture)
+            });
+        let toolbar = items
+            .into_iter()
+            .fold(ui::create_toolbar("actions"), |toolbar, item| {
+                let Some(spec) = get_item_spec(item, pin_editor) else {
+                    return toolbar.content(Separator::vertical().h_4());
+                };
+                let button = self.create_button(
+                    ("toolbar-item", item as usize),
                     spec.icon,
-                    format!("{} ({})", spec.label, spec.key.to_uppercase()),
-                    EditorAction::Tool(spec.tool),
+                    spec.get_tooltip(),
+                    spec.action,
                     cx,
-                )
-                .selected(family == spec.tool)
-            })
-            .collect::<Vec<_>>();
-        let separator = || Separator::vertical().h_4();
-        return ui::panel(cx)
+                );
+                toolbar.child(match spec.action {
+                    EditorAction::Tool(tool) => button.selected(family == tool),
+                    EditorAction::Layers => button.selected(self.show_layers),
+                    EditorAction::Undo => {
+                        button.disabled(self.editor.undo.is_empty() && self.editor.draft.is_none())
+                    }
+                    EditorAction::Redo => button.disabled(self.editor.redo.is_empty()),
+                    _ => button,
+                })
+            });
+        return ui::create_toolbar_panel(cx)
             .id("action-bar")
             .absolute()
             .left(px(bar.pos.x))
             .top(px(bar.pos.y))
             .max_w(px(self.bounds.size.x - 2.0 * layout::MARGIN))
-            .rounded(cx.theme().radius + px(5.))
             .cursor(CursorStyle::Arrow)
             .overflow_x_scroll()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -221,108 +304,7 @@ impl CaptureView {
                 .absolute()
                 .size_full(),
             )
-            .child(
-                Toolbar::new("actions")
-                    .with_size(gpui_kit::component::Size::Medium)
-                    .h_10()
-                    .p_1()
-                    .gap_1()
-                    .when(matches!(self.mode, Mode::Capture), |toolbar| {
-                        toolbar
-                            .child(self.create_button(
-                                "record",
-                                IconName::CircleDot,
-                                "Record region",
-                                EditorAction::Record,
-                                cx,
-                            ))
-                            .content(separator())
-                    })
-                    .children(tools)
-                    .content(separator())
-                    .child(
-                        self.create_button(
-                            "undo",
-                            IconName::Undo2,
-                            "Undo (⌘Z)",
-                            EditorAction::Undo,
-                            cx,
-                        )
-                        .disabled(self.editor.undo.is_empty() && self.editor.draft.is_none()),
-                    )
-                    .child(
-                        self.create_button(
-                            "redo",
-                            IconName::Redo2,
-                            "Redo (⇧⌘Z)",
-                            EditorAction::Redo,
-                            cx,
-                        )
-                        .disabled(self.editor.redo.is_empty()),
-                    )
-                    .child(
-                        self.create_button(
-                            "layers",
-                            IconName::Layers,
-                            "Layers",
-                            EditorAction::Layers,
-                            cx,
-                        )
-                        .selected(self.show_layers),
-                    )
-                    .content(separator())
-                    .child(self.create_button(
-                        "search",
-                        IconName::ScanSearch,
-                        "Search with Google Lens",
-                        EditorAction::Search,
-                        cx,
-                    ))
-                    .child(self.create_button(
-                        "print",
-                        IconName::Printer,
-                        "Print (⌘P)",
-                        EditorAction::Print,
-                        cx,
-                    ))
-                    .child(self.create_button(
-                        "save",
-                        IconName::Save,
-                        "Save (⌘S)",
-                        EditorAction::Save,
-                        cx,
-                    ))
-                    .child(self.create_button(
-                        "pin",
-                        IconName::Pin,
-                        "Pin (⌘T)",
-                        EditorAction::Pin,
-                        cx,
-                    ))
-                    .child(self.create_button(
-                        "cancel",
-                        IconName::Close,
-                        "Cancel (Esc)",
-                        EditorAction::Cancel,
-                        cx,
-                    ))
-                    .map(|toolbar| match self.mode {
-                        Mode::PinEditor(_) => toolbar.child(self.create_button(
-                            "apply",
-                            IconName::Check,
-                            "Apply (Enter)",
-                            EditorAction::Apply,
-                            cx,
-                        )),
-                        _ => toolbar.child(self.create_button(
-                            "copy",
-                            IconName::Copy,
-                            "Copy (Enter)",
-                            EditorAction::Copy,
-                            cx,
-                        )),
-                    }),
-            );
+            .child(toolbar);
     }
 
     fn render_tool_options(
@@ -358,11 +340,7 @@ impl CaptureView {
             )
             .selected(tool == variant)
         };
-        let toolbar = Toolbar::new("tool-options")
-            .with_size(gpui_kit::component::Size::Medium)
-            .h_10()
-            .p_1()
-            .gap_1();
+        let toolbar = ui::create_toolbar("tool-options");
         let toolbar = match tool {
             Tool::Rectangle | Tool::Ellipse => toolbar
                 .child(variant(Tool::Rectangle, cx))
@@ -480,13 +458,12 @@ impl CaptureView {
         } else {
             toolbar
         };
-        return ui::panel(cx)
+        return ui::create_toolbar_panel(cx)
             .id("tool-options")
             .absolute()
             .left(px(bar.pos.x))
             .top(px(y))
             .max_w(px(max_width.max(32.0)))
-            .rounded(cx.theme().radius + px(5.))
             .cursor(CursorStyle::Arrow)
             .overflow_x_scroll()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())

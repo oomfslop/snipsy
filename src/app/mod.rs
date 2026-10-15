@@ -6,12 +6,13 @@ pub mod history;
 pub mod hotkeys;
 pub mod recording;
 pub mod storage;
+pub mod toolbar_layout;
 mod tray;
 
 use crate::{capture, pin, platform, ui};
 use anyhow::Result;
 use cli::Command;
-use gpui_kit::{component::Theme, *};
+use gpui_kit::*;
 use resvg::usvg::fontdb;
 use std::{collections::HashMap, os::unix::net::UnixListener, path::Path, sync::Arc};
 
@@ -32,8 +33,7 @@ pub fn run(command: Option<Command>, data_dir: &Path, listener: UnixListener) {
     application.on_reopen(capture::start);
     application.run(move |cx| {
         gpui_kit::init(cx);
-        Theme::change(cx.window_appearance(), None, cx);
-        Theme::update(cx, |theme| theme.font_size = px(13.));
+        ui::init_theme(cx);
         platform::initialize_app();
         let mut fonts = fontdb::Database::new();
         fonts.load_system_fonts();
@@ -49,6 +49,7 @@ pub fn run(command: Option<Command>, data_dir: &Path, listener: UnixListener) {
         let errors = [
             cli::listen(listener, sender.clone()),
             groups::init(&data_dir, cx),
+            toolbar_layout::init(&data_dir, cx),
             hotkeys::init(&data_dir, sender.clone(), cx),
             tray::init(sender, cx),
         ]
@@ -88,6 +89,7 @@ fn dispatch(command: Command, cx: &mut App) {
             "history",
             "History",
             size(px(760.), px(520.)),
+            false,
             cx,
             |window, cx| cx.new(|cx| ui::history::HistoryView::new(window, cx)),
         ),
@@ -106,13 +108,15 @@ fn dispatch(command: Command, cx: &mut App) {
             "groups",
             "Image Groups",
             size(px(360.), px(420.)),
+            false,
             cx,
             |window, cx| cx.new(|cx| ui::groups::GroupsView::new(window, cx)),
         ),
         Command::Preferences => show_window(
             "preferences",
             "Preferences",
-            size(px(440.), px(260.)),
+            size(px(900.), px(600.)),
+            true,
             cx,
             |window, cx| cx.new(|cx| ui::preferences::PreferencesView::new(window, cx)),
         ),
@@ -127,6 +131,7 @@ fn show_window<V: Render>(
     key: &'static str,
     title: &'static str,
     size: Size<Pixels>,
+    translucent: bool,
     cx: &mut App,
     build: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
 ) -> Result<()> {
@@ -142,13 +147,24 @@ fn show_window<V: Render>(
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
         titlebar: Some(TitlebarOptions {
             title: Some(title.into()),
-            ..Default::default()
+            appears_transparent: translucent,
+            traffic_light_position: translucent.then(|| point(px(18.), px(20.))),
         }),
+        window_background: if translucent {
+            WindowBackgroundAppearance::Blurred
+        } else {
+            WindowBackgroundAppearance::Opaque
+        },
         window_min_size: Some(gpui_kit::size(px(280.), px(220.))),
         ..Default::default()
     };
-    let (handle, _) = gpui_kit::open_window(options, cx, build)?;
-    cx.global_mut::<AppState>().windows.insert(key, handle);
+    let handle = cx.open_window(options, |window, cx| {
+        let view = build(window, cx);
+        cx.new(|cx| base::Root::new(view, window, cx).bg(transparent_black()))
+    })?;
+    cx.global_mut::<AppState>()
+        .windows
+        .insert(key, handle.into());
     return Ok(());
 }
 
