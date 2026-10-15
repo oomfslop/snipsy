@@ -5,16 +5,24 @@ edition = "2024"
 description = "Native macOS screenshot editor and floating image pins"
 
 [dependencies]
+anyhow = "1"
 base64 = "0.22"
-glam = "0.30"
-global-hotkey = "0.8"
-gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
+clap = { version = "4", features = ["derive"] }
+glam = { version = "0.30", features = ["serde"] }
+global-hotkey = { version = "0.8", features = ["serde"] }
+gpui-kit = "0.7.1"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
 async-channel = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "bmp", "ico", "tga"] }
 resvg = "0.45"
 tempfile = "3"
 unicode-segmentation = "1"
 lyon = "1"
+tray-icon = "0.26.1"
+
+[dev-dependencies]
+gpui-kit = { version = "0.7.1", features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 raw-window-handle = "0.6"
@@ -39,6 +47,3 @@ opt-level = 2
 [profile.release]
 lto = true
 codegen-units = 1
-
-[patch.crates-io]
-gpui = { path = "vendor/gpui" }

@@ -1,14 +1,23 @@
-use std::{fmt::Write, io::Cursor, sync::Arc};
-
-use gpui::RenderImage;
+use crate::{
+    editor::{
+        ANNOTATION_FONT, Annotation, BlurMode, HIGHLIGHTER_OPACITY, LINE_HEIGHT, Tool,
+        get_arrow_head,
+    },
+    geometry::{Color, Rect},
+};
+use anyhow::{Context as _, Result, bail, ensure};
+use gpui_kit::RenderImage;
 use image::{Frame, Rgba, RgbaImage};
 use resvg::{tiny_skia, usvg};
+use std::{fmt::Write, io::Cursor, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{
-    editor::{Annotation, BlurMode, Tool, get_arrow_head},
-    geometry::Rect,
-};
+#[derive(Clone)]
+pub struct Screenshot {
+    pub image: Arc<RgbaImage>,
+    pub bounds: Rect,
+    pub windows: Vec<Rect>,
+}
 
 #[derive(Clone, Copy)]
 pub enum PixelAlpha {
@@ -23,27 +32,24 @@ pub fn decode_bgra(
     height: u32,
     stride: usize,
     alpha: PixelAlpha,
-) -> Result<RgbaImage, String> {
-    if width == 0 || height == 0 {
-        return Err("Empty screen image".into());
-    }
+) -> Result<RgbaImage> {
+    ensure!(width != 0 && height != 0, "Empty screen image");
     let row = (width as usize)
         .checked_mul(4)
-        .ok_or("Screen image too large")?;
+        .context("Screen image too large")?;
     let length = row
         .checked_mul(height as usize)
-        .ok_or("Screen image too large")?;
+        .context("Screen image too large")?;
     let required = stride
         .checked_mul(height as usize - 1)
         .and_then(|size| size.checked_add(row))
-        .ok_or("Screen image too large")?;
-    if stride < row || bytes.len() < required {
-        return Err("Invalid screen image stride or data length".into());
-    }
+        .context("Screen image too large")?;
+    ensure!(
+        stride >= row && bytes.len() >= required,
+        "Invalid screen image stride or data length"
+    );
     let mut pixels = Vec::new();
-    pixels
-        .try_reserve_exact(length)
-        .map_err(|error| error.to_string())?;
+    pixels.try_reserve_exact(length)?;
     for y in 0..height as usize {
         for pixel in bytes[y * stride..y * stride + row].chunks_exact(4) {
             let a = if matches!(alpha, PixelAlpha::Opaque) {
@@ -64,8 +70,7 @@ pub fn decode_bgra(
             pixels.extend_from_slice(&[rgb[0], rgb[1], rgb[2], a]);
         }
     }
-    return RgbaImage::from_raw(width, height, pixels)
-        .ok_or_else(|| "Invalid screen image dimensions".into());
+    return RgbaImage::from_raw(width, height, pixels).context("Invalid screen image dimensions");
 }
 
 pub fn create_render_image(image: &RgbaImage) -> Arc<RenderImage> {
@@ -90,26 +95,16 @@ pub fn create_render_frames(frames: &[Frame]) -> Arc<RenderImage> {
     return Arc::new(RenderImage::new(frames));
 }
 
-pub fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
+pub fn encode_png(image: &RgbaImage) -> Result<Vec<u8>> {
     let mut output = Cursor::new(Vec::new());
-    image
-        .write_to(&mut output, image::ImageFormat::Png)
-        .map_err(|error| error.to_string())?;
+    image.write_to(&mut output, image::ImageFormat::Png)?;
     return Ok(output.into_inner());
 }
 
-pub fn render_text_image(
-    text: &str,
-    fonts: &Arc<usvg::fontdb::Database>,
-) -> Result<RgbaImage, String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Err("Clipboard text is empty".into());
-    }
-    if text.len() > 16_384 {
-        return Err("Clipboard text is too large".into());
-    }
-    // shortcut: hard-wrap at 80 graphemes, use shaped layout when text cards become editable.
+pub fn render_text_image(text: &str, fonts: &Arc<usvg::fontdb::Database>) -> Result<RgbaImage> {
+    ensure!(!text.trim().is_empty(), "Clipboard text is empty");
+    ensure!(text.len() <= 16_384, "Clipboard text is too large");
+    // ponytail: hard-wrap at 80 graphemes, use shaped layout when text cards become editable.
     let mut wrapped = String::new();
     let mut lines = 0usize;
     let mut columns = 0usize;
@@ -130,28 +125,49 @@ pub fn render_text_image(
             columns = columns.max(line_columns);
         }
     }
-    if lines > 60 {
-        return Err("Clipboard text has too many lines".into());
-    }
+    ensure!(lines <= 60, "Clipboard text has too many lines");
     let font_size = 18.0;
     let padding = 16.0;
-    let width = (columns as f32 * font_size * 0.7 + padding * 2.0)
-        .ceil()
-        .max(120.0) as u32;
-    let height = (lines as f32 * font_size * 1.3 + padding * 2.0)
-        .ceil()
-        .max(64.0) as u32;
-    let bounds = Rect {
-        pos: glam::Vec2::ZERO,
-        size: glam::vec2(width as f32, height as f32),
-    };
-    let annotation = Annotation {
+    let mut annotation = Annotation {
         tool: Tool::Text,
         points: vec![glam::vec2(padding, padding)],
         text: wrapped,
         width: font_size,
-        color: crate::geometry::Color(0x202024),
+        color: Color(0x202024),
         ..Default::default()
+    };
+    let mut svg = "<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'>".to_string();
+    append_annotation_svg(&mut svg, &annotation);
+    svg.push_str("</svg>");
+    let tree = usvg::Tree::from_str(
+        &svg,
+        &usvg::Options {
+            fontdb: fonts.clone(),
+            font_family: ANNOTATION_FONT.into(),
+            ..Default::default()
+        },
+    )?;
+    let text_bounds = tree.root().abs_stroke_bounding_box();
+    let offset = glam::vec2(
+        (padding - text_bounds.left()).max(0.0).ceil(),
+        (padding - text_bounds.top()).max(0.0).ceil(),
+    );
+    annotation.points[0] += offset;
+    let width = (columns as f32 * font_size * 0.7 + padding * 2.0)
+        .max(text_bounds.right() + offset.x + padding)
+        .ceil()
+        .max(120.0) as u32;
+    let height = (lines as f32 * font_size * LINE_HEIGHT + padding * 2.0)
+        .max(text_bounds.bottom() + offset.y + padding)
+        .ceil()
+        .max(64.0) as u32;
+    ensure!(
+        u64::from(width) * u64::from(height) <= 16 * 1024 * 1024,
+        "Clipboard text image is too large"
+    );
+    let bounds = Rect {
+        pos: glam::Vec2::ZERO,
+        size: glam::vec2(width as f32, height as f32),
     };
     return render_selection(
         &RgbaImage::from_pixel(width, height, Rgba([250, 250, 250, 255])),
@@ -168,7 +184,7 @@ pub fn render_selection(
     selection: Rect,
     annotations: impl Iterator<Item = impl std::borrow::Borrow<Annotation>>,
     fonts: &Arc<usvg::fontdb::Database>,
-) -> Result<RgbaImage, String> {
+) -> Result<RgbaImage> {
     let scale_x = image.width() as f32 / bounds.size.x;
     let scale_y = image.height() as f32 / bounds.size.y;
     let x = (selection.pos.x * scale_x).floor().max(0.0) as u32;
@@ -180,7 +196,7 @@ pub fn render_selection(
         .ceil()
         .min(image.height() as f32) as u32;
     if right <= x || bottom <= y || x >= image.width() || y >= image.height() {
-        return Err("Selection is outside the image".into());
+        bail!("Selection is outside the image");
     }
     let mut output = image::imageops::crop_imm(image, x, y, right - x, bottom - y).to_image();
     let offset = glam::vec2(x as f32 / scale_x, y as f32 / scale_y);
@@ -249,7 +265,7 @@ fn composite_svg(
     scale_x: f32,
     scale_y: f32,
     fonts: &Arc<usvg::fontdb::Database>,
-) -> Result<(), String> {
+) -> Result<()> {
     let svg = format!(
         "<svg xmlns='http://www.w3.org/2000/svg' width='{}' height='{}'><g transform='scale({scale_x} {scale_y}) translate({} {})'>{body}</g></svg>",
         output.width(),
@@ -259,12 +275,12 @@ fn composite_svg(
     );
     let options = usvg::Options {
         fontdb: fonts.clone(),
-        font_family: "Arial".into(),
+        font_family: ANNOTATION_FONT.into(),
         ..Default::default()
     };
-    let tree = usvg::Tree::from_str(&svg, &options).map_err(|error| error.to_string())?;
+    let tree = usvg::Tree::from_str(&svg, &options)?;
     let mut pixmap =
-        tiny_skia::Pixmap::new(output.width(), output.height()).ok_or("Image too large")?;
+        tiny_skia::Pixmap::new(output.width(), output.height()).context("Image too large")?;
     resvg::render(
         &tree,
         tiny_skia::Transform::identity(),
@@ -306,7 +322,7 @@ fn append_annotation_svg(svg: &mut String, annotation: &Annotation) {
         let _ = write!(svg, " fill='none' stroke='#{:06x}'", annotation.color.0);
     }
     if annotation.tool == Tool::Highlighter {
-        svg.push_str(" opacity='0.35'");
+        let _ = write!(svg, " opacity='{HIGHLIGHTER_OPACITY}'");
     }
     svg.push('>');
     match annotation.tool {
@@ -327,48 +343,35 @@ fn append_annotation_svg(svg: &mut String, annotation: &Annotation) {
                 size.y / 2.0
             );
         }
-        Tool::Arrow => {
-            let [left, right] = get_arrow_head(start, end, annotation.width);
+        Tool::Pen | Tool::Highlighter if annotation.points.len() == 1 => {
             let _ = write!(
                 svg,
-                "<path d='M{} {}L{} {}'/>",
-                start.x, start.y, end.x, end.y
-            );
-            let _ = write!(
-                svg,
-                "<path d='M{} {}L{} {}L{} {}'/>",
-                left.x, left.y, end.x, end.y, right.x, right.y
+                "<circle cx='{}' cy='{}' r='{}' fill='#{:06x}' stroke='none'/>",
+                start.x,
+                start.y,
+                annotation.width / 2.0,
+                annotation.color.0
             );
         }
-        Tool::Line => {
+        Tool::Arrow | Tool::Line | Tool::Pen | Tool::Highlighter => {
             svg.push_str("<polyline points='");
             for point in &annotation.points {
                 let _ = write!(svg, "{},{} ", point.x, point.y);
             }
             svg.push_str("'/>");
-        }
-        Tool::Pen | Tool::Highlighter => {
-            if annotation.points.len() == 1 {
+            if annotation.tool == Tool::Arrow {
+                let [left, right] = get_arrow_head(&annotation.points, annotation.width);
                 let _ = write!(
                     svg,
-                    "<circle cx='{}' cy='{}' r='{}' fill='#{:06x}' stroke='none'/>",
-                    start.x,
-                    start.y,
-                    annotation.width / 2.0,
-                    annotation.color.0
+                    "<path d='M{} {}L{} {}L{} {}'/>",
+                    left.x, left.y, end.x, end.y, right.x, right.y
                 );
-            } else {
-                svg.push_str("<polyline points='");
-                for point in &annotation.points {
-                    let _ = write!(svg, "{},{} ", point.x, point.y);
-                }
-                svg.push_str("'/>");
             }
         }
         Tool::Text => {
             let _ = write!(
                 svg,
-                "<text fill='#{:06x}' stroke='none' font-family='Arial' font-size='{}'>",
+                "<text xml:space='preserve' fill='#{:06x}' stroke='none' font-family='{ANNOTATION_FONT}' font-size='{}'>",
                 annotation.color.0, annotation.width
             );
             let mut offset = 0;
@@ -377,7 +380,7 @@ fn append_annotation_svg(svg: &mut String, annotation: &Annotation) {
                     svg,
                     "<tspan x='{}' y='{}'>",
                     start.x,
-                    start.y + annotation.width * (1.0 + index as f32 * 1.3)
+                    start.y + annotation.width * (1.0 + index as f32 * LINE_HEIGHT)
                 );
                 let mut byte = 0;
                 for (length, format) in annotation.get_format_runs(offset..offset + line.len()) {
@@ -392,11 +395,25 @@ fn append_annotation_svg(svg: &mut String, annotation: &Annotation) {
                         } else {
                             "none"
                         },
-                        text.replace('&', "&amp;")
-                            .replace('<', "&lt;")
-                            .replace('>', "&gt;")
-                            .replace('\"', "&quot;")
-                            .replace('\'', "&apos;")
+                        text.replace(
+                            |character| {
+                                matches!(
+                                    character,
+                                    '\0'..='\u{8}'
+                                        | '\u{b}'
+                                        | '\u{c}'
+                                        | '\u{e}'..='\u{1f}'
+                                        | '\u{fffe}'
+                                        | '\u{ffff}'
+                                )
+                            },
+                            "�",
+                        )
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;")
+                        .replace('\"', "&quot;")
+                        .replace('\'', "&apos;")
                     );
                     byte += length;
                 }
@@ -413,8 +430,13 @@ fn append_annotation_svg(svg: &mut String, annotation: &Annotation) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::Color;
     use glam::{Vec2, vec2};
+
+    fn load_system_fonts() -> Arc<usvg::fontdb::Database> {
+        let mut fonts = usvg::fontdb::Database::new();
+        fonts.load_system_fonts();
+        return Arc::new(fonts);
+    }
 
     #[test]
     fn rich_text_exports_independent_styles_and_escaped_content() {
@@ -439,17 +461,74 @@ mod tests {
             pos: Vec2::ZERO,
             size: vec2(120.0, 80.0),
         };
-        let mut fonts = usvg::fontdb::Database::new();
-        fonts.load_system_fonts();
+        let fonts = load_system_fonts();
         let output = render_selection(
             &RgbaImage::from_pixel(120, 80, Rgba([0, 0, 0, 255])),
             bounds,
             bounds,
             std::iter::once(&annotation),
-            &Arc::new(fonts),
+            &fonts,
         )
         .unwrap();
         assert!(output.pixels().any(|pixel| pixel[0] > 0));
+    }
+
+    #[test]
+    fn text_exports_preserve_leading_and_repeated_spaces() {
+        let fonts = load_system_fonts();
+        let bounds = Rect {
+            pos: Vec2::ZERO,
+            size: vec2(240.0, 80.0),
+        };
+        let render = |text: &str| {
+            let annotation = Annotation {
+                tool: Tool::Text,
+                text: text.into(),
+                width: 24.0,
+                ..Default::default()
+            };
+            render_selection(
+                &RgbaImage::new(240, 80),
+                bounds,
+                bounds,
+                std::iter::once(&annotation),
+                &fonts,
+            )
+            .unwrap()
+        };
+        let get_left = |image: &RgbaImage| {
+            image
+                .enumerate_pixels()
+                .filter(|(_, _, pixel)| pixel[3] != 0)
+                .map(|(x, _, _)| x)
+                .min()
+                .unwrap()
+        };
+        assert!(get_left(&render("  X")) > get_left(&render("X")));
+        assert_ne!(render("X X"), render("X  X"));
+    }
+
+    #[test]
+    fn text_exports_replace_invalid_xml_characters() {
+        let fonts = load_system_fonts();
+        let bounds = Rect {
+            pos: Vec2::ZERO,
+            size: vec2(400.0, 100.0),
+        };
+        let image = RgbaImage::new(400, 100);
+        let render = |text: &str| {
+            let annotation = Annotation {
+                tool: Tool::Text,
+                text: text.into(),
+                width: 24.0,
+                ..Default::default()
+            };
+            render_selection(&image, bounds, bounds, std::iter::once(&annotation), &fonts).unwrap()
+        };
+        assert_eq!(
+            render("A\0\u{8}\u{b}\u{c}\u{e}\u{1f}\u{fffe}\u{ffff}<B>&\t\nC\rD"),
+            render("A��������<B>&\t\nC\rD")
+        );
     }
 
     #[test]
@@ -465,14 +544,97 @@ mod tests {
     }
 
     #[test]
+    fn converted_arrows_export_every_vertex_and_follow_the_last_segment() {
+        let annotation = Annotation {
+            tool: Tool::Arrow,
+            points: vec![
+                vec2(20.0, 20.0),
+                vec2(100.0, 20.0),
+                vec2(100.0, 100.0),
+                vec2(100.0, 100.0),
+            ],
+            width: 8.0,
+            ..Default::default()
+        };
+        let bounds = Rect {
+            pos: Vec2::ZERO,
+            size: vec2(120.0, 120.0),
+        };
+        let output = render_selection(
+            &RgbaImage::new(120, 120),
+            bounds,
+            bounds,
+            std::iter::once(&annotation),
+            &Arc::new(Default::default()),
+        )
+        .unwrap();
+
+        assert!(output.get_pixel(60, 20)[3] > 0);
+        assert!(output.get_pixel(100, 60)[3] > 0);
+        assert_eq!(output.get_pixel(60, 60)[3], 0);
+        assert!(output.get_pixel(84, 68)[3] > 0);
+    }
+
+    #[test]
     fn text_cards_wrap_unicode_and_reject_unbounded_height() {
-        let mut fonts = usvg::fontdb::Database::new();
-        fonts.load_system_fonts();
-        let image = render_text_image(&"😀".repeat(81), &Arc::new(fonts)).unwrap();
+        let image = render_text_image(&"😀".repeat(81), &load_system_fonts()).unwrap();
         assert!(image.width() >= 120);
         assert!(image.height() > 64);
         assert!(image.pixels().any(|pixel| pixel.0 != [250, 250, 250, 255]));
         assert!(render_text_image(&"line\n".repeat(61), &Arc::new(Default::default())).is_err());
+    }
+
+    #[test]
+    fn text_cards_do_not_clip_wide_glyphs() {
+        let fonts = load_system_fonts();
+        let text = "W".repeat(80);
+        let card = render_text_image(&text, &fonts).unwrap();
+        let annotation = Annotation {
+            tool: Tool::Text,
+            points: vec![vec2(16.0, 16.0)],
+            text,
+            width: 18.0,
+            color: Color(0x202024),
+            ..Default::default()
+        };
+        let bounds = Rect {
+            pos: Vec2::ZERO,
+            size: vec2(2048.0, 80.0),
+        };
+        let reference = render_selection(
+            &RgbaImage::from_pixel(2048, 80, Rgba([250, 250, 250, 255])),
+            bounds,
+            bounds,
+            std::iter::once(&annotation),
+            &fonts,
+        )
+        .unwrap();
+        let count_ink = |image: &RgbaImage| {
+            image
+                .pixels()
+                .filter(|pixel| pixel.0 != [250, 250, 250, 255])
+                .count()
+        };
+        assert_eq!(count_ink(&card), count_ink(&reference));
+    }
+
+    #[test]
+    fn text_cards_preserve_indentation_and_blank_lines() {
+        let fonts = load_system_fonts();
+        let plain = render_text_image("W", &fonts).unwrap();
+        let indented = render_text_image("  W", &fonts).unwrap();
+        let get_left = |image: &RgbaImage| {
+            image
+                .enumerate_pixels()
+                .filter(|(_, _, pixel)| pixel.0 != [250, 250, 250, 255])
+                .map(|(x, _, _)| x)
+                .min()
+                .unwrap()
+        };
+        assert!(get_left(&indented) > get_left(&plain));
+        assert!(render_text_image("W\n\n", &fonts).unwrap().height() > plain.height());
+        assert!(render_text_image("\n\nW", &fonts).unwrap().height() > plain.height());
+        assert!(render_text_image(" \n\t", &fonts).is_err());
     }
 
     #[test]

@@ -1,12 +1,12 @@
 use crate::geometry::{Color, Rect};
 use glam::{Vec2, vec2};
+use std::ops::Range;
 
-#[derive(Clone)]
-pub struct Screenshot {
-    pub image: std::sync::Arc<image::RgbaImage>,
-    pub bounds: Rect,
-    pub windows: Vec<Rect>,
-}
+pub const LINE_HEIGHT: f32 = 1.3;
+/// Previews and exports render with the same font so saved images match the editor.
+pub const ANNOTATION_FONT: &str = "Arial";
+pub const HIGHLIGHTER_OPACITY: f32 = 0.35;
+const HIGHLIGHTER_COLOR: Color = Color(0xffdf38);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
@@ -36,7 +36,7 @@ pub struct TextFormat {
     pub underline: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextAttribute {
     Bold,
     Italic,
@@ -116,6 +116,12 @@ impl Annotation {
             min = min.min(*point);
             max = max.max(*point);
         }
+        if self.tool == Tool::Arrow {
+            for point in get_arrow_head(&self.points, self.width) {
+                min = min.min(point);
+                max = max.max(point);
+            }
+        }
         if self.tool == Tool::Text {
             let lines: Vec<_> = self.text.split('\n').collect();
             max = min
@@ -127,7 +133,7 @@ impl Annotation {
                         .unwrap_or(0) as f32
                         * self.width
                         * 0.7,
-                    lines.len() as f32 * self.width * 1.3,
+                    lines.len() as f32 * self.width * LINE_HEIGHT,
                 );
         }
         return Rect {
@@ -144,7 +150,7 @@ impl Annotation {
             .unwrap_or(self.text_format);
     }
 
-    pub fn replace_text(&mut self, range: std::ops::Range<usize>, text: &str, format: TextFormat) {
+    pub fn replace_text(&mut self, range: Range<usize>, text: &str, format: TextFormat) {
         let start = self.text[..range.start].chars().count();
         let end = self.text[..range.end].chars().count();
         self.formats
@@ -158,7 +164,7 @@ impl Annotation {
 
     pub fn set_text_attribute(
         &mut self,
-        range: std::ops::Range<usize>,
+        range: Range<usize>,
         attribute: TextAttribute,
         enabled: bool,
     ) {
@@ -174,7 +180,7 @@ impl Annotation {
         }
     }
 
-    pub fn get_format_runs(&self, range: std::ops::Range<usize>) -> Vec<(usize, TextFormat)> {
+    pub fn get_format_runs(&self, range: Range<usize>) -> Vec<(usize, TextFormat)> {
         let offset = self.text[..range.start].chars().count();
         let mut runs: Vec<(usize, TextFormat)> = Vec::new();
         for (index, character) in self.text[range].chars().enumerate() {
@@ -193,7 +199,7 @@ impl Annotation {
             || self.tool == Tool::Text
             || self.tool == Tool::Mosaic
         {
-            return self.get_bounds().intersects(point);
+            return self.get_bounds().contains(point);
         }
         let start = self.points[0];
         let end = *self.points.last().unwrap();
@@ -216,18 +222,33 @@ impl Annotation {
                 if radii.min_element() < 1.0 {
                     return get_segment_distance(point, start, end) <= tolerance;
                 }
-                let relative = (point - (start + end) / 2.0) / radii;
-                return if self.filled {
-                    relative.length() <= 1.0
-                } else {
-                    (relative.length() - 1.0).abs() * radii.min_element() <= tolerance
+                let center = (start + end) / 2.0;
+                if self.filled {
+                    return ((point - center) / radii).length() <= 1.0;
+                }
+                let arc = lyon::geom::Arc {
+                    center: lyon::math::point(center.x, center.y),
+                    radii: lyon::math::vector(radii.x, radii.y),
+                    start_angle: lyon::math::Angle::zero(),
+                    sweep_angle: lyon::math::Angle::two_pi(),
+                    x_rotation: lyon::math::Angle::zero(),
                 };
+                let mut from = arc.from();
+                return arc.flattened(0.1).any(|to| {
+                    let segment = lyon::geom::LineSegment { from, to };
+                    from = to;
+                    segment.distance_to_point(lyon::math::point(point.x, point.y)) <= tolerance
+                });
             }
             Tool::Arrow => {
-                let [left, right] = get_arrow_head(start, end, self.width);
-                return [(start, end), (left, end), (right, end)]
-                    .iter()
-                    .any(|(a, b)| get_segment_distance(point, *a, *b) <= tolerance);
+                let [left, right] = get_arrow_head(&self.points, self.width);
+                return self
+                    .points
+                    .windows(2)
+                    .any(|pair| get_segment_distance(point, pair[0], pair[1]) <= tolerance)
+                    || [(left, end), (right, end)]
+                        .iter()
+                        .any(|(a, b)| get_segment_distance(point, *a, *b) <= tolerance);
             }
             _ => {
                 return self
@@ -307,16 +328,19 @@ impl Editor {
         if draft.tool != Tool::Text
             && draft.tool != Tool::Pen
             && draft.tool != Tool::Highlighter
-            && !(draft.tool == Tool::Line && draft.points.len() > 2)
+            && !(matches!(draft.tool, Tool::Line | Tool::Arrow) && draft.points.len() > 2)
             && draft.points[0].distance(*draft.points.last().unwrap()) < 1.0
         {
             return;
         }
-        self.record_change();
         let index = if let Some(index) = self.editing_index.take() {
-            self.layers[index].annotation = draft;
+            if self.layers[index].annotation != draft {
+                self.record_change();
+                self.layers[index].annotation = draft;
+            }
             index
         } else {
+            self.record_change();
             let index = self.layers.len();
             self.layers.push(Layer {
                 id: self.next_layer_id,
@@ -333,6 +357,9 @@ impl Editor {
         self.commit_draft();
         self.tool = tool;
         self.selected = None;
+        if tool == Tool::Highlighter {
+            self.color = HIGHLIGHTER_COLOR;
+        }
     }
 
     pub fn undo_change(&mut self) {
@@ -350,12 +377,12 @@ impl Editor {
 
     pub fn redo_change(&mut self) {
         self.settings_history = None;
-        self.draft = None;
-        self.editing_index = None;
         if let Some(next) = self.redo.pop() {
+            self.draft = None;
+            self.editing_index = None;
             self.undo.push(std::mem::replace(&mut self.layers, next));
+            self.selected = None;
         }
-        self.selected = None;
     }
 
     pub fn delete_selected(&mut self) {
@@ -363,13 +390,6 @@ impl Editor {
             self.record_change();
             self.layers.remove(index);
         }
-    }
-
-    pub fn get_annotation_at(&self, point: Vec2) -> Option<usize> {
-        return self
-            .layers
-            .iter()
-            .rposition(|annotation| annotation.contains_point(point));
     }
 
     pub fn start_editing_text(&mut self, index: usize) {
@@ -415,12 +435,17 @@ impl Editor {
         if let Some(draft) = &mut self.draft {
             f(draft);
         } else if let Some(index) = self.selected {
+            let mut annotation = self.layers[index].annotation.clone();
+            f(&mut annotation);
+            if annotation == self.layers[index].annotation {
+                return;
+            }
             let id = self.layers[index].id;
             if self.settings_history != Some((id, key)) {
                 self.record_change();
             }
             self.settings_history = Some((id, key));
-            f(&mut self.layers[index].annotation);
+            self.layers[index].annotation = annotation;
         }
     }
 
@@ -480,19 +505,57 @@ impl Editor {
         self.selected = Some(next);
     }
 
+    fn get_tool_width(&self, tool: Tool) -> f32 {
+        return match tool {
+            Tool::Text => self.text_size,
+            Tool::Highlighter => self.highlighter_width,
+            _ => self.width,
+        };
+    }
+
     pub fn get_current_width(&self) -> f32 {
         return self.get_current_annotation().map_or_else(
-            || match self.tool {
-                Tool::Text => self.text_size,
-                Tool::Highlighter => self.highlighter_width,
-                _ => self.width,
-            },
+            || self.get_tool_width(self.tool),
             |annotation| annotation.width,
         );
     }
 
+    pub fn create_annotation(&self, tool: Tool, point: Vec2) -> Annotation {
+        return Annotation {
+            tool,
+            points: vec![point],
+            color: self.color,
+            width: self.get_tool_width(tool),
+            filled: self.filled,
+            blur_mode: self.blur_mode,
+            intensity: self.intensity,
+            text_format: self.text_format,
+            ..Default::default()
+        };
+    }
+
+    pub fn select_layer(&mut self, index: usize) {
+        self.selected = Some(index);
+        let annotation = &self.layers[index].annotation;
+        self.color = annotation.color;
+        match annotation.tool {
+            Tool::Text => self.text_size = annotation.width,
+            Tool::Highlighter => self.highlighter_width = annotation.width,
+            _ => self.width = annotation.width,
+        }
+    }
+
     pub fn finish_settings_change(&mut self) {
         self.settings_history = None;
+    }
+
+    pub fn adjust_size(&mut self, step: f32) {
+        let width = self.get_current_width();
+        if self.get_current_tool() == Tool::Text {
+            self.set_text_size(width + step * 2.0);
+        } else {
+            self.set_width(width + step);
+        }
     }
 
     pub fn set_width(&mut self, width: f32) {
@@ -521,7 +584,14 @@ pub fn get_byte_offset(text: &str, utf16_offset: usize) -> usize {
     return text.len();
 }
 
-pub fn get_arrow_head(start: Vec2, end: Vec2, width: f32) -> [Vec2; 2] {
+pub fn get_arrow_head(points: &[Vec2], width: f32) -> [Vec2; 2] {
+    let end = *points.last().unwrap();
+    let start = points
+        .iter()
+        .rev()
+        .copied()
+        .find(|point| *point != end)
+        .unwrap_or(end);
     let direction = (end - start).normalize_or_zero();
     let normal = vec2(-direction.y, direction.x);
     let length = (width * 4.0).max(12.0).min(start.distance(end) * 0.6);
@@ -565,6 +635,53 @@ mod tests {
         editor.set_filled(true);
         assert!(editor.layers[0].contains_point(vec2(25.0, 25.0)));
         assert_eq!(editor.layers[0].id, id);
+    }
+
+    #[test]
+    fn unchanged_settings_preserve_undo_and_redo() {
+        let mut editor = Editor::new();
+        editor.draft = Some(Annotation {
+            tool: Tool::Rectangle,
+            points: vec![Vec2::ZERO, vec2(50.0, 50.0)],
+            ..Default::default()
+        });
+        editor.commit_draft();
+        editor.set_color(Color(0xff0000));
+        editor.undo_change();
+        editor.select_layer(0);
+        let undo = editor.undo.clone();
+        let redo = editor.redo.clone();
+
+        editor.set_color(Color::WHITE);
+        editor.set_variant(Tool::Rectangle);
+        editor.set_filled(false);
+        editor.set_blur_mode(BlurMode::Pixelated);
+        editor.set_intensity(12.0);
+        editor.set_width(3.0);
+
+        assert_eq!(editor.undo, undo);
+        assert_eq!(editor.redo, redo);
+        editor.redo_change();
+        assert_eq!(editor.layers[0].color, Color(0xff0000));
+    }
+
+    #[test]
+    fn clamped_settings_do_not_add_undo_entries() {
+        let mut editor = Editor::new();
+        editor.draft = Some(Annotation {
+            tool: Tool::Text,
+            text: "Text".into(),
+            width: 144.0,
+            ..Default::default()
+        });
+        editor.commit_draft();
+
+        editor.set_text_size(146.0);
+        editor.set_width(4.0);
+
+        assert_eq!(editor.undo.len(), 1);
+        editor.undo_change();
+        assert!(editor.layers.is_empty());
     }
 
     #[test]
@@ -720,6 +837,27 @@ mod tests {
     }
 
     #[test]
+    fn empty_redo_keeps_new_and_edited_drafts() {
+        let mut editor = Editor::new();
+        let draft = Annotation {
+            tool: Tool::Text,
+            text: "Uncommitted text".into(),
+            ..Default::default()
+        };
+        editor.draft = Some(draft.clone());
+        editor.redo_change();
+        assert_eq!(editor.draft, Some(draft));
+
+        editor.commit_draft();
+        editor.start_editing_text(0);
+        editor.draft.as_mut().unwrap().text.push_str(" with edits");
+        let draft = editor.draft.clone();
+        editor.redo_change();
+        assert_eq!(editor.draft, draft);
+        assert_eq!(editor.editing_index, Some(0));
+    }
+
+    #[test]
     fn hit_testing_checks_shape_strokes() {
         let rectangle = Annotation {
             tool: Tool::Rectangle,
@@ -731,6 +869,36 @@ mod tests {
         };
         assert!(rectangle.contains_point(vec2(50.0, 10.0)));
         assert!(!rectangle.contains_point(vec2(50.0, 50.0)));
+    }
+
+    #[test]
+    fn ellipse_hit_testing_uses_pixel_distance_to_the_outline() {
+        for radii in [vec2(500.0, 10.0), vec2(10.0, 500.0), Vec2::splat(40.0)] {
+            let mut annotation = Annotation {
+                tool: Tool::Ellipse,
+                points: vec![-radii, radii],
+                ..Default::default()
+            };
+            let major = if radii.x >= radii.y {
+                vec2(radii.x, 0.0)
+            } else {
+                vec2(0.0, radii.y)
+            };
+            assert!(!annotation.contains_point(major * 1.4));
+            assert!(!annotation.contains_point(major * 0.5));
+            assert!(!annotation.contains_point(radii));
+            for degrees in (0..360).step_by(15) {
+                let point = radii * Vec2::from_angle((degrees as f32).to_radians());
+                let normal = (point / (radii * radii)).normalize();
+                assert!(annotation.contains_point(point));
+                assert!(annotation.contains_point(point + normal * 7.0));
+                assert!(!annotation.contains_point(point + normal * 8.0));
+            }
+            annotation.filled = true;
+            assert!(annotation.contains_point(Vec2::ZERO));
+            assert!(annotation.contains_point(major * 0.5));
+            assert!(!annotation.contains_point(major * 1.4));
+        }
     }
 
     #[test]
@@ -759,6 +927,81 @@ mod tests {
         editor.commit_draft();
         assert_eq!(editor.layers.len(), 1);
         assert_eq!(editor.layers[0].points.len(), 3);
+    }
+
+    #[test]
+    fn converted_arrows_hit_test_the_line_strip_instead_of_a_diagonal() {
+        let mut editor = Editor::new();
+        editor.draft = Some(Annotation {
+            tool: Tool::Line,
+            points: vec![vec2(20.0, 20.0), vec2(100.0, 20.0), vec2(100.0, 100.0)],
+            ..Default::default()
+        });
+        editor.commit_draft();
+        editor.set_variant(Tool::Arrow);
+
+        assert!(editor.layers[0].contains_point(vec2(60.0, 20.0)));
+        assert!(editor.layers[0].contains_point(vec2(100.0, 60.0)));
+        assert!(!editor.layers[0].contains_point(vec2(60.0, 60.0)));
+        editor.undo_change();
+        assert_eq!(editor.layers[0].tool, Tool::Line);
+    }
+
+    #[test]
+    fn arrow_bounds_include_the_arrowhead() {
+        for end in [vec2(100.0, 20.0), vec2(20.0, 100.0)] {
+            let annotation = Annotation {
+                tool: Tool::Arrow,
+                points: vec![vec2(20.0, 20.0), end],
+                ..Default::default()
+            };
+            let bounds = annotation.get_bounds();
+            for point in get_arrow_head(&annotation.points, annotation.width) {
+                assert!(bounds.contains(point));
+            }
+        }
+    }
+
+    #[test]
+    fn converted_closed_arrows_keep_the_draft() {
+        let mut editor = Editor::new();
+        editor.tool = Tool::Line;
+        editor.draft = Some(Annotation {
+            tool: Tool::Line,
+            points: vec![vec2(20.0, 20.0), vec2(100.0, 20.0), vec2(20.0, 20.0)],
+            ..Default::default()
+        });
+        editor.set_variant(Tool::Arrow);
+        editor.commit_draft();
+
+        assert_eq!(editor.layers.len(), 1);
+        assert_eq!(editor.layers[0].tool, Tool::Arrow);
+        assert_eq!(editor.layers[0].points.len(), 3);
+    }
+
+    #[test]
+    fn committing_unchanged_text_preserves_undo_and_redo() {
+        let mut editor = Editor::new();
+        editor.draft = Some(Annotation {
+            tool: Tool::Text,
+            text: "Text".into(),
+            ..Default::default()
+        });
+        editor.commit_draft();
+        editor.set_color(Color(0xff0000));
+        editor.undo_change();
+        editor.start_editing_text(0);
+        editor.commit_draft();
+        assert_eq!(editor.undo.len(), 1);
+        assert_eq!(editor.redo.len(), 1);
+        assert_eq!(editor.selected, Some(0));
+        assert_eq!(editor.editing_index, None);
+        assert!(editor.draft.is_none());
+        editor.redo_change();
+        assert_eq!(editor.layers[0].color, Color(0xff0000));
+        editor.undo_change();
+        editor.undo_change();
+        assert!(editor.layers.is_empty());
     }
 
     #[test]

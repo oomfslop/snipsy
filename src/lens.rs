@@ -1,9 +1,11 @@
+use anyhow::Result;
 use base64::Engine;
-use std::io::Write;
-use std::path::PathBuf;
-use std::time::Duration;
+use gpui_kit::App;
+use std::{io::Write, path::PathBuf, time::Duration};
 
-pub fn create_handoff(image: &[u8]) -> Result<PathBuf, String> {
+/// Google Lens only accepts uploads as a browser form post, so the image goes through a
+/// local page that submits itself. The endpoint is undocumented and may change.
+pub fn create_handoff(png: &[u8]) -> Result<PathBuf> {
     let html = r##"<!doctype html>
 <meta charset="utf-8">
 <title>Opening Google Lens…</title>
@@ -26,24 +28,25 @@ pub fn create_handoff(image: &[u8]) -> Result<PathBuf, String> {
 "##
     .replace(
         "__IMAGE_BASE64__",
-        &base64::engine::general_purpose::STANDARD.encode(image),
+        &base64::engine::general_purpose::STANDARD.encode(png),
     );
     let mut file = tempfile::Builder::new()
         .prefix("snipsy-lens-")
         .suffix(".html")
-        .tempfile()
-        .map_err(|error| error.to_string())?;
-    file.write_all(html.as_bytes())
-        .map_err(|error| error.to_string())?;
-    return file
-        .into_temp_path()
-        .keep()
-        .map_err(|error| error.to_string());
+        .tempfile()?;
+    file.write_all(html.as_bytes())?;
+    return Ok(file.into_temp_path().keep()?);
 }
 
-pub fn schedule_cleanup(path: PathBuf) {
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(30));
-        let _ = std::fs::remove_file(path);
-    });
+/// The browser reads the page asynchronously, so it cannot be deleted right after opening.
+pub fn schedule_cleanup(path: PathBuf, cx: &App) {
+    let timer = cx.background_executor().timer(Duration::from_secs(30));
+    cx.background_executor()
+        .spawn(async move {
+            timer.await;
+            if let Err(error) = std::fs::remove_file(&path) {
+                eprintln!("could not remove {}: {error}", path.display());
+            }
+        })
+        .detach();
 }

@@ -1,90 +1,99 @@
 # Snipsy
 
-GPUI screenshot editor for macOS 14+. Capture a frozen screen region or click a window, annotate it, copy/save it, or pin it above other apps.
+Screenshot editor and floating image pins for macOS 14+, in the spirit of Snipaste. Built with [GPUI Kit](https://gpui-kit.com).
 
-Tools: outlined/filled rectangles and ovals, line strips/arrows, pen, highlighter, rich text, pixelated/Gaussian blur, and annotation eraser. Secondary controls update the selected or latest annotation. Scroll the size control to adjust stroke width or text size; blur has an intensity slider. Color circles accompany the native color picker. Layers can be selected, moved, reordered, deleted, and undone/redone. Double-click text to edit; select text ranges for bold/italic/underline. Unicode input and IME composition use GPUI's input handler. Ordinary annotations preview through GPUI GPU paths. Blur composites render on a background worker; exports use the same annotation coordinates and styles.
+Capture a frozen screen region or click a window, annotate it, then copy, save, pin, print, record, or search it with Google Lens. Pins float above other apps and survive relaunches.
 
 ## Build
 
-Requires Rust, Xcode, and its Metal toolchain. Install the toolchain if missing:
+Requires Rust and Xcode with its Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`).
 
 ```sh
-xcodebuild -downloadComponent MetalToolchain
+cargo build --release
+python3 scripts/bundle_macos.py release
 ```
 
-```sh
-python3 scripts/prepare_vendor.py
-cargo build
-python3 scripts/bundle_macos.py
+Open `target/release/Snipsy.app`. Grant it Screen Recording in System Settings → Privacy & Security; when run from a terminal, macOS attributes the permission to the terminal instead.
+
+Snipsy runs in the background with a menu-bar item. Settings, history, and pin backups live in `~/Library/Application Support/Snipsy`.
+
+## Command line
+
+```
+snipsy [snip | record | paste [--plain TEXT... | --files FILE...] | history | clear-history
+        | whiteboard [--color COLOR] | toggle-pins | toggle-click-through
+        | create-group [NAME] | switch-group [NAME] | empty-group | groups | preferences | quit]
 ```
 
-Open `target/debug/Snipsy.app` in Finder. For a release bundle, use `cargo build --release` and `python3 scripts/bundle_macos.py release`. `cargo run` also works for development.
-
-Run `scripts/prepare_vendor.py` once per checkout, or again after changing the patch. It verifies the GPUI 0.2.2 archive and applies `patches/gpui-frame-resize.patch` to an ignored copy under `vendor/gpui`. Normal Cargo commands then work; `cargo clean` preserves the prepared dependency. Python 3 and the system `patch` utility are required.
-
-Grant Screen Recording to Snipsy in System Settings → Privacy & Security. When launched through a terminal, macOS may attribute permission to that terminal instead. Snipsy starts in the background with no default window. Capture overlaps graphics setup, and the editor stays hidden between captures to reuse its GPU resources. Use a global shortcut to capture or pin an image. Reopening the app starts a capture. Quit with `⌘Q` while an editor or pin is focused.
-
-The menu-bar item provides capture, selected-region recording, clipboard pinning, history, whiteboard, pin visibility, and quit actions.
-Global capture, paste, click-through, and pin-visibility shortcuts are configurable from Preferences.
-
-Press `⌘⇧A`, select an area within one display, then choose Record in the toolbar. Snipsy records a cursor-visible, silent 60 fps H.264 MP4 until **Stop Recording** is chosen. Normal quit finalizes an active recording.
+Commands are forwarded to the running instance and start it when needed. `COLOR` accepts names, `#rgb[a]`, `#rrggbb[aa]`, and `r g b` (0–255 or 0.0–1.0); `--color transparent` makes a transparent whiteboard.
 
 ## Shortcuts
 
+Global shortcuts are configurable in Preferences.
+
 | Action | Shortcut |
 | --- | --- |
-| Open capture / recording selector | `⌘⇧A` or `⌘⇧L` |
-| Pin clipboard image, color, or text | `⌘⇧P` |
-| Show / hide all pins | `⇧F3` |
-| Select / rectangle / ellipse / arrow | `V` / `R` / `O` / `A` |
-| Straight line | `L` |
-| Pen / highlighter / text / mosaic / eraser | `B` / `H` / `T` / `M` / `E` |
-| Copy / save / pin selection | `Enter` or `⌘C` / `⌘S` / `⌘T` |
-| Print selection or pin | `⌘P` |
-| Quick-save selection | `⌘⇧S` |
+| Capture or record a region | `⌘⇧A` or `⌘⇧L` |
+| Pin clipboard (image, files, color, or text) | `⌘⇧P` |
+| Toggle click-through for the pin under the pointer | `⌘⇧X` |
+| Show or hide pins | `⇧F3` |
+
+While capturing:
+
+| Action | Shortcut |
+| --- | --- |
+| Select, rectangle, oval, arrow, line | `V` `R` `O` `A` `L` |
+| Pen, highlighter, text, blur, eraser | `B` `H` `T` `M` `E` |
+| Copy / save / quick-save / pin / print | `Enter` or `⌘C` / `⌘S` / `⌘⇧S` / `⌘T` / `⌘P` |
 | Undo / redo | `⌘Z` / `⌘⇧Z` |
-| Select full display | `⌘A` or `Space` before selecting |
-| Show / hide annotation bar | `Space` after selecting |
-| Restore last capture region | `R` before selecting |
+| Select the whole display | `⌘A`, or `Space` before selecting |
+| Show or hide the toolbars | `Space` after selecting |
+| Restore the last region | `R` before selecting |
 | Previous / next capture | `,` / `.` |
-| Toggle cursor capture | Backtick (`` ` ``) |
-| Copy magnifier color / show RGB | `C` / hold `Shift` while selecting a capture region |
-| Move pointer before selecting | `W` / `A` / `S` / `D` |
-| Move / grow / shrink selection | Arrow keys / `⌘`+arrows / `⇧`+arrows |
-| Move selected annotation | Arrow keys; `⇧` for 10 points |
-| Constrain square, circle, or arrow angle | Hold `Shift` while drawing |
-| Stroke width | `[` / `]` |
-| Commit text / new line | `Enter` / `Shift+Enter` |
+| Toggle cursor capture | `` ` `` |
+| Copy the magnified color (`⇧` for RGB) | `C` |
+| Move the pointer before selecting | `W` `A` `S` `D` |
+| Move / grow / shrink the selection | arrows / `⌘` arrows / `⇧` arrows |
+| Move the selected annotation (`⇧` for 10 points) | arrows |
+| Constrain to squares, circles, or 45° | hold `⇧` while drawing |
+| Stroke width | `[` / `]`, or scroll the size label |
 | Bold / italic / underline text | `⌘B` / `⌘I` / `⌘U` |
-| Cancel text or capture | `Escape` |
+| New line / finish text | `⇧Enter` / `Enter` |
+| Cancel | `Esc` or right-click |
 
-Pins: drag to move; dropping a file replaces the pin (`⇧` opens separately); arrow keys move by one point (`⇧` for ten); scroll or `+`/`-` to resize; `⌘`+scroll, `⌘`+`+`/`-`, or `[`/`]` for opacity; `1`/`2` rotate; `3`/`4` flip; `0` or middle-click restores size and opacity; `⇧`+double-click toggles thumbnail mode; `Space` edits annotations; hold `⌥` to sample a pixel and press `C` to copy it (`⇧C` for RGB); `⌘⇧X` toggles click-through for the pin under the pointer (or restores all pins); `⌘C` copies; `⌘⇧C` copies source text; `⌘V` replaces from the clipboard; `⌘S` saves; `⌘⇧S` quick-saves; `Escape`, `⌘W`, or double-click closes recoverably; `⇧Escape` destroys. Hover a pin for its controls.
+On pins:
 
-Animated GIF pins use `P` to pause/resume, `1`/`2` to step frames, and `⌥`+scroll to adjust playback speed.
+| Action | Shortcut |
+| --- | --- |
+| Move | drag, or arrows (`⇧` for 10 points) |
+| Resize | scroll, `+` / `-`, or drag the bottom-right corner |
+| Opacity | `⌘` scroll, `[` / `]`, or `⌘=` / `⌘-` |
+| Rotate / flip | `1` `2` / `3` `4` |
+| Reset size and opacity | `0` or middle-click |
+| Thumbnail | `⇧` double-click |
+| Annotate | `Space` |
+| Copy image / source text | `⌘C` / `⌘⇧C` |
+| Copy the color under the pointer (`⇧` for RGB) | hold `⌥`, press `C` |
+| Replace from clipboard / drop a file (`⇧` opens separately) | `⌘V` |
+| Save / quick-save / print | `⌘S` / `⌘⇧S` / `⌘P` |
+| Close (reopen with `⌘⇧P` until the clipboard changes) / destroy | `Esc`, `⌘W`, or double-click / `⇧Esc` |
+| Animated GIFs: pause, step frames, speed | `P`, `1` `2`, `⌥` scroll |
 
-Open pins, including animated GIFs, are backed up in Application Support and restored after relaunch with their position, size, opacity, orientation, thumbnail state, and source text.
+Right-click a pin for the full menu, including moving it to another image group. New pins join the active group; only the active group is shown.
 
-Startup commands: `snipsy snip`, `snipsy paste`, `snipsy paste --plain TEXT`, `snipsy paste --files FILE...`, `snipsy history`, `snipsy whiteboard [--color COLOR]`, and `snipsy transparent-whiteboard`.
-Commands are forwarded to the resident Snipsy process; a command starts the resident process when needed.
-Image groups are available from the menu-bar manager or `create-group`, `switch-group`, `switch-groups`, and `empty-group` commands; new pins enter the active group.
+Save and quick-save preserve animated GIF frames and timing. `P` enters frame selection at the first frame; use `1`/`2` to choose a frame to copy, save, print, or annotate. Selected frames save as PNG by default. Choose another image extension in Save to export a still image.
 
-PNG, JPEG, WebP, BMP, TIFF, TGA, ICO, and static GIF exports use an atomic file replacement. The last ten screen captures can be replayed while snipping, and the last ten finished selections persist in Application Support and are available from the History menu.
+## Layout
 
-Google Lens remains available in the editor toolbar. It submits the edited PNG directly from the default browser, via a temporary local handoff page deleted after 30 seconds. The Lens endpoint is undocumented and may change.
-
-## Architecture
-
-- `editor.rs`, `geometry.rs`: annotation model, hit testing, editing, undo/redo; no OS or GPUI types.
-- `raster.rs`: crop, annotation rendering, mosaic, PNG encoding, and GPUI image conversion.
-- `app.rs`, `selection.rs`, `pin.rs`: GPUI lifecycle and views; GPUI handles clipboard and windowing.
-- `platform/macos.rs`: ScreenCaptureKit, exact borderless overlay bounds, background app policy, and native dialogs. This is the boundary to replace for another OS; there is no speculative backend trait.
-- `lens.rs`: platform-independent browser handoff document.
-
-Capture spans the connected desktop, including mixed-scale displays. OCR and scrolling capture are not implemented.
-
-## Checks
+- `editor.rs`, `geometry.rs`, `raster.rs`: annotation model, undo, hit testing, and CPU rendering for exports. No UI types.
+- `capture/`: the capture overlay. `layout.rs` holds the placement math, `paint.rs` draws annotations on the GPU, `text.rs` handles text editing and IME, `toolbar.rs` renders the toolbars.
+- `pin/`: pin windows and their backups.
+- `app/`: startup, command dispatch, CLI and single-instance IPC, hotkeys, tray, history, groups, recording, and persistence.
+- `ui/`: shared widgets and the History, Groups, and Preferences windows.
+- `platform/macos.rs`: ScreenCaptureKit capture and recording, overlay windows, and native dialogs. This is the boundary to port for other platforms.
+- `lens.rs`: Google Lens handoff.
 
 ```sh
-cargo check
 cargo test
+cargo clippy --all-targets
 ```
