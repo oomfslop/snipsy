@@ -1,6 +1,6 @@
 use crate::{
     geometry::{Color, Rect},
-    raster::{self, PixelAlpha, Screenshot},
+    raster::Screenshot,
 };
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use async_channel::{Receiver, Sender};
@@ -25,9 +25,10 @@ use objc2_av_foundation::{
 };
 use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    CGDataProvider, CGError, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
-    CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess, CGWarpMouseCursorPosition,
-    CGWindowListCopyWindowInfo, CGWindowListOption, kCGColorSpaceSRGB, kCGWindowNumber,
+    CGBitmapContextCreate, CGColorSpace, CGContext, CGDisplayCopyColorSpace, CGError, CGImage,
+    CGImageAlphaInfo, CGImageByteOrderInfo, CGPreflightScreenCaptureAccess,
+    CGRequestScreenCaptureAccess, CGWarpMouseCursorPosition, CGWindowListCopyWindowInfo,
+    CGWindowListOption, kCGColorSpaceSRGB, kCGWindowNumber,
 };
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_foundation::{
@@ -336,6 +337,9 @@ pub fn configure_overlay(window: &gpui_kit::Window, bounds: Rect, resizable: boo
         NSWindowStyleMask::Borderless
     });
     let view = get_native_view(window);
+    // SAFETY: GPUI makes its view layer-backed before the window builder runs.
+    let layer: Retained<AnyObject> = unsafe { msg_send![view, layer] };
+    set_srgb_colorspace(&layer);
     native.setAcceptsMouseMovedEvents(true);
     native.makeFirstResponder(Some(view));
     let tracking_options = NSTrackingAreaOptions::MouseMoved
@@ -377,6 +381,16 @@ pub fn configure_overlay(window: &gpui_kit::Window, bounds: Rect, resizable: boo
         ),
         false,
     );
+}
+
+/// GPUI leaves its CAMetalLayer untagged, so macOS shows the sRGB capture in the display's
+/// native gamut without color matching.
+fn set_srgb_colorspace(layer: &AnyObject) {
+    // SAFETY: kCGColorSpaceSRGB is always defined, and CALayer retains the colorspace.
+    unsafe {
+        let srgb = CGColorSpace::with_name(Some(kCGColorSpaceSRGB));
+        let _: () = msg_send![layer, setColorspace: srgb.as_deref()];
+    }
 }
 
 fn create_alert(mtm: MainThreadMarker, message: &str, informative: &str) -> Retained<NSAlert> {
@@ -594,16 +608,16 @@ pub fn capture_screen(bounds: Rect, shows_cursor: bool, sender: Sender<Result<Sc
                 .map(|(display, display_bounds)| {
                     let filter = create_display_filter(&display, &excluded);
                     // SAFETY: plain property access and setters on valid objects.
-                    let (scale, config) = unsafe {
+                    let (scale, config, display_space) = unsafe {
                         let scale = filter.pointPixelScale();
+                        let display_space = CGDisplayCopyColorSpace(display.displayID());
                         let config = SCStreamConfiguration::new();
-                        config.setColorSpaceName(kCGColorSpaceSRGB);
                         config.setWidth((display_bounds.size.x * scale).round() as usize);
                         config.setHeight((display_bounds.size.y * scale).round() as usize);
                         config.setShowsCursor(shows_cursor);
-                        (scale, config)
+                        (scale, config, display_space)
                     };
-                    (filter, config, display_bounds, scale)
+                    (filter, config, display_space, display_bounds, scale)
                 })
                 .collect::<Vec<_>>();
             ensure!(!captures.is_empty(), "No display available");
@@ -618,11 +632,11 @@ pub fn capture_screen(bounds: Rect, shows_cursor: bool, sender: Sender<Result<Sc
         };
         let scale = captures
             .iter()
-            .map(|(_, _, _, scale)| *scale)
+            .map(|(_, _, _, _, scale)| *scale)
             .fold(1.0, f32::max);
         let total = captures.len();
         let pending = Arc::new(Mutex::new(Some(Vec::with_capacity(total))));
-        for (filter, config, display_bounds, _) in captures {
+        for (filter, config, display_space, display_bounds, _) in captures {
             let pending = pending.clone();
             let sender = sender.clone();
             let windows = windows.clone();
@@ -630,7 +644,7 @@ pub fn capture_screen(bounds: Rect, shows_cursor: bool, sender: Sender<Result<Sc
                 autoreleasepool(|_| {
                     // SAFETY: callback pointers are valid until this invocation returns.
                     let image = match unsafe { image.as_ref() } {
-                        Some(image) => copy_capture_image(image),
+                        Some(image) => convert_capture_to_srgb(image, &display_space),
                         None => Err(get_ns_error(error, "Screen capture failed")),
                     };
                     let mut pending = pending.lock().expect("capture state poisoned");
@@ -1043,48 +1057,98 @@ fn get_recording_size(size: Vec2, scale: f32) -> Result<(usize, usize)> {
     return Ok((even(width), even(height)));
 }
 
-fn copy_capture_image(image: &CGImage) -> Result<image::RgbaImage> {
-    ensure!(
-        CGImage::bits_per_component(Some(image)) == 8
-            && CGImage::bits_per_pixel(Some(image)) == 32
-            && CGImage::byte_order_info(Some(image)) == CGImageByteOrderInfo::Order32Little,
-        "Unsupported screen image pixel format"
+/// ScreenCaptureKit's own sRGB conversion is off by a level or two in dark tones, so captures
+/// stay in the display's color space and ColorSync converts them.
+fn convert_capture_to_srgb(
+    image: &CGImage,
+    display_space: &CGColorSpace,
+) -> Result<image::RgbaImage> {
+    let width = CGImage::width(Some(image));
+    let height = CGImage::height(Some(image));
+    let mut pixels = image::RgbaImage::new(u32::try_from(width)?, u32::try_from(height)?);
+    let image = CGImage::new_copy_with_color_space(Some(image), Some(display_space))
+        .context("Could not tag screen image with the display color space")?;
+    // SAFETY: kCGColorSpaceSRGB is always defined.
+    let srgb = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))
+        .context("sRGB color space is unavailable")?;
+    // SAFETY: the context draws into `pixels`, which outlives it and has `width * 4` byte rows.
+    let context = unsafe {
+        CGBitmapContextCreate(
+            pixels.as_mut_ptr().cast(),
+            width,
+            height,
+            8,
+            width * 4,
+            Some(&srgb),
+            CGImageAlphaInfo::NoneSkipLast.0 | CGImageByteOrderInfo::Order32Big.0,
+        )
+    }
+    .context("Could not convert screen image to sRGB")?;
+    CGContext::draw_image(
+        Some(&context),
+        CGRect::new(CGPoint::ZERO, CGSize::new(width as f64, height as f64)),
+        Some(&image),
     );
-    let alpha = match CGImage::alpha_info(Some(image)) {
-        CGImageAlphaInfo::PremultipliedFirst => PixelAlpha::Premultiplied,
-        CGImageAlphaInfo::First => PixelAlpha::Straight,
-        CGImageAlphaInfo::NoneSkipFirst => PixelAlpha::Opaque,
-        _ => bail!("Unsupported screen image alpha format"),
-    };
-    let provider =
-        CGImage::data_provider(Some(image)).context("Screen image has no pixel provider")?;
-    let data =
-        CGDataProvider::data(Some(&provider)).context("Could not read screen image pixels")?;
-    // SAFETY: CGDataProviderCopyData returns immutable owned CFData, retained throughout decoding.
-    let bytes = unsafe { data.as_bytes_unchecked() };
-    return raster::decode_bgra(
-        bytes,
-        u32::try_from(CGImage::width(Some(image)))?,
-        u32::try_from(CGImage::height(Some(image)))?,
-        CGImage::bytes_per_row(Some(image)),
-        alpha,
-    );
+    drop(context);
+    for pixel in pixels.pixels_mut() {
+        pixel[3] = 255;
+    }
+    return Ok(pixels);
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIVE_COLOR_PICKER_TARGET, DisplayCapture, get_recording_region, get_recording_size,
-        get_scaled_size, is_complete_recording_frame, release_color_picker_target, save_recording,
-        stitch_capture_images,
+        ACTIVE_COLOR_PICKER_TARGET, DisplayCapture, convert_capture_to_srgb, get_recording_region,
+        get_recording_size, get_scaled_size, is_complete_recording_frame,
+        release_color_picker_target, save_recording, set_srgb_colorspace, stitch_capture_images,
     };
     use crate::geometry::Rect;
     use glam::vec2;
     use image::{Rgba, RgbaImage};
-    use objc2::rc::Retained;
+    use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
     use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType};
+    use objc2_core_graphics::{
+        CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImageAlphaInfo,
+        CGImageByteOrderInfo, kCGColorSpaceDisplayP3, kCGColorSpaceSRGB,
+    };
     use objc2_foundation::NSObject;
     use objc2_screen_capture_kit::{SCFrameStatus, SCStreamFrameInfoStatus};
+
+    #[test]
+    fn capture_converts_display_colors_to_srgb() {
+        let mut pixel = [30u8, 30, 45, 255];
+        let device = CGColorSpace::new_device_rgb().unwrap();
+        // SAFETY: the context draws into `pixel`, which outlives it and holds one RGBA pixel.
+        let context = unsafe {
+            CGBitmapContextCreate(
+                pixel.as_mut_ptr().cast(),
+                1,
+                1,
+                8,
+                4,
+                Some(&device),
+                CGImageAlphaInfo::NoneSkipLast.0 | CGImageByteOrderInfo::Order32Big.0,
+            )
+        }
+        .unwrap();
+        let image = CGBitmapContextCreateImage(Some(&context)).unwrap();
+        let display_p3 = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceDisplayP3 })).unwrap();
+        let converted = convert_capture_to_srgb(&image, &display_p3).unwrap();
+        assert_eq!(converted.get_pixel(0, 0).0, [30, 30, 46, 255]);
+    }
+
+    #[test]
+    fn overlay_layer_is_tagged_srgb() {
+        // SAFETY: CAMetalLayer is a plain CALayer subclass; colorspace returns a borrowed CGColorSpace.
+        let layer: Retained<AnyObject> = unsafe { msg_send![class!(CAMetalLayer), new] };
+        set_srgb_colorspace(&layer);
+        let colorspace: Option<&CGColorSpace> = unsafe { msg_send![&layer, colorspace] };
+        assert_eq!(
+            CGColorSpace::name(colorspace).as_deref(),
+            Some(unsafe { kCGColorSpaceSRGB })
+        );
+    }
 
     #[test]
     fn stale_color_picker_does_not_release_the_new_shared_panel_target() {

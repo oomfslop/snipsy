@@ -19,60 +19,6 @@ pub struct Screenshot {
     pub windows: Vec<Rect>,
 }
 
-#[derive(Clone, Copy)]
-pub enum PixelAlpha {
-    Premultiplied,
-    Straight,
-    Opaque,
-}
-
-pub fn decode_bgra(
-    bytes: &[u8],
-    width: u32,
-    height: u32,
-    stride: usize,
-    alpha: PixelAlpha,
-) -> Result<RgbaImage> {
-    ensure!(width != 0 && height != 0, "Empty screen image");
-    let row = (width as usize)
-        .checked_mul(4)
-        .context("Screen image too large")?;
-    let length = row
-        .checked_mul(height as usize)
-        .context("Screen image too large")?;
-    let required = stride
-        .checked_mul(height as usize - 1)
-        .and_then(|size| size.checked_add(row))
-        .context("Screen image too large")?;
-    ensure!(
-        stride >= row && bytes.len() >= required,
-        "Invalid screen image stride or data length"
-    );
-    let mut pixels = Vec::new();
-    pixels.try_reserve_exact(length)?;
-    for y in 0..height as usize {
-        for pixel in bytes[y * stride..y * stride + row].chunks_exact(4) {
-            let a = if matches!(alpha, PixelAlpha::Opaque) {
-                255
-            } else {
-                pixel[3]
-            };
-            let mut rgb = [pixel[2], pixel[1], pixel[0]];
-            if matches!(alpha, PixelAlpha::Premultiplied) && a != 255 {
-                rgb = rgb.map(|channel| {
-                    if a == 0 {
-                        0
-                    } else {
-                        ((channel as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8
-                    }
-                });
-            }
-            pixels.extend_from_slice(&[rgb[0], rgb[1], rgb[2], a]);
-        }
-    }
-    return RgbaImage::from_raw(width, height, pixels).context("Invalid screen image dimensions");
-}
-
 pub fn create_render_image(image: &RgbaImage) -> Arc<RenderImage> {
     return create_render_frames(std::slice::from_ref(&Frame::new(image.clone())));
 }
@@ -679,36 +625,6 @@ mod tests {
             render_selection(&image, bounds, bounds, [&annotation].into_iter(), &fonts).unwrap();
         assert!(strong.get_pixel(13, 10)[0] < mild.get_pixel(13, 10)[0]);
         assert_eq!(strong.get_pixel(0, 0), image.get_pixel(0, 0));
-    }
-
-    #[test]
-    fn capture_pixels_preserve_rows_padding_and_alpha() {
-        let image = decode_bgra(
-            &[10, 20, 30, 0, 99, 99, 99, 99, 40, 50, 60, 0],
-            1,
-            2,
-            8,
-            PixelAlpha::Opaque,
-        )
-        .unwrap();
-        assert_eq!(image.get_pixel(0, 0).0, [30, 20, 10, 255]);
-        assert_eq!(image.get_pixel(0, 1).0, [60, 50, 40, 255]);
-        assert_eq!(
-            decode_bgra(&[64, 32, 16, 128], 1, 1, 4, PixelAlpha::Premultiplied)
-                .unwrap()
-                .get_pixel(0, 0)
-                .0,
-            [32, 64, 128, 128]
-        );
-        assert_eq!(
-            decode_bgra(&[64, 32, 16, 128], 1, 1, 4, PixelAlpha::Straight)
-                .unwrap()
-                .get_pixel(0, 0)
-                .0,
-            [16, 32, 64, 128]
-        );
-        assert!(decode_bgra(&[0; 3], 1, 1, 4, PixelAlpha::Opaque).is_err());
-        assert!(decode_bgra(&[0; 4], 1, 1, 3, PixelAlpha::Opaque).is_err());
     }
 
     #[test]
