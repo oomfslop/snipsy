@@ -101,17 +101,18 @@ fn show_overlay(
     if let Some(view) = cx.global_mut::<Captures>().active.take() {
         let _ = view.update(cx, |capture, window, cx| capture.dismiss(window, cx));
     }
+    let pointer = platform::get_pointer_position();
     let cached = cx.global::<Captures>().cache.clone().filter(|view| {
         view.update(cx, |capture, window, cx| {
             platform::configure_overlay(window, bounds, false);
-            capture.reset(bounds, mode.clone(), image.clone(), window, cx);
+            capture.reset(bounds, mode.clone(), image.clone(), pointer, window, cx);
         })
         .is_ok()
     });
     let view = match cached {
         Some(view) => view,
         None => ui::open_overlay(bounds, false, cx, |window, cx| {
-            cx.new(|cx| CaptureView::new(bounds, mode, image, window, cx))
+            cx.new(|cx| CaptureView::new(bounds, mode, image, pointer, window, cx))
         })?,
     };
     let captures = cx.global_mut::<Captures>();
@@ -142,8 +143,18 @@ pub fn open_pin_editor(
     {
         return false;
     }
+    let pointer = platform::get_pointer_position();
     let view = ui::open_overlay(bounds, false, cx, |window, cx| {
-        cx.new(|cx| CaptureView::new(bounds, Mode::PinEditor(target), Some(image), window, cx))
+        cx.new(|cx| {
+            CaptureView::new(
+                bounds,
+                Mode::PinEditor(target),
+                Some(image),
+                pointer,
+                window,
+                cx,
+            )
+        })
     });
     return match view {
         Ok(view) => {
@@ -260,6 +271,7 @@ impl CaptureView {
         bounds: Rect,
         mode: Mode,
         image: Option<Arc<RgbaImage>>,
+        pointer: Vec2,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -279,7 +291,6 @@ impl CaptureView {
                 cx.notify();
             }
         });
-        let mouse = window.mouse_position();
         let mut capture = Self {
             mode,
             bounds,
@@ -288,7 +299,7 @@ impl CaptureView {
             raster_preview: RasterPreview::default(),
             selection: None,
             editor,
-            pointer: vec2(mouse.x.into(), mouse.y.into()).clamp(Vec2::ZERO, bounds.size),
+            pointer: (pointer - bounds.pos).clamp(Vec2::ZERO, bounds.size),
             drag: None,
             focus,
             error: None,
@@ -329,6 +340,7 @@ impl CaptureView {
         bounds: Rect,
         mode: Mode,
         image: Option<Arc<RgbaImage>>,
+        pointer: Vec2,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -338,7 +350,7 @@ impl CaptureView {
         {
             cx.drop_image(image, Some(window));
         }
-        *self = Self::new(bounds, mode, image, window, cx);
+        *self = Self::new(bounds, mode, image, pointer, window, cx);
         cx.notify();
     }
 
@@ -371,7 +383,14 @@ impl CaptureView {
             captures.active = None;
         }
         platform::hide_overlay(window);
-        self.reset(self.bounds, Mode::Capture, None, window, cx);
+        self.reset(
+            self.bounds,
+            Mode::Capture,
+            None,
+            self.bounds.pos + self.pointer,
+            window,
+            cx,
+        );
     }
 
     fn load_capture(
@@ -443,7 +462,14 @@ impl CaptureView {
             return;
         };
         let history = std::mem::take(&mut self.capture_history);
-        self.reset(self.bounds, self.mode.clone(), None, window, cx);
+        self.reset(
+            self.bounds,
+            self.mode.clone(),
+            None,
+            self.bounds.pos + self.pointer,
+            window,
+            cx,
+        );
         self.set_screenshot(history[index].clone());
         self.capture_history = history;
         self.capture_history_index = index;
@@ -1453,10 +1479,26 @@ mod tests {
                 },
                 Mode::Capture,
                 None,
+                vec2(0.0, 0.0),
                 window,
                 cx,
             )
         });
+    }
+
+    #[gpui_kit::test]
+    fn resetting_capture_moves_pointer_to_current_position(cx: &mut TestAppContext) {
+        let window = create_capture(cx);
+        window
+            .update(cx, |capture, window, cx| {
+                let bounds = Rect {
+                    pos: vec2(100.0, 50.0),
+                    size: vec2(200.0, 100.0),
+                };
+                capture.reset(bounds, Mode::Capture, None, vec2(130.0, 90.0), window, cx);
+                assert_eq!(capture.pointer, vec2(30.0, 40.0));
+            })
+            .unwrap();
     }
 
     #[gpui_kit::test]
@@ -1477,6 +1519,7 @@ mod tests {
                     capture.bounds,
                     Mode::Whiteboard,
                     Some(image.clone()),
+                    vec2(0.0, 0.0),
                     window,
                     cx,
                 );
@@ -1754,6 +1797,7 @@ mod tests {
                     capture.bounds,
                     Mode::Whiteboard,
                     Some(Arc::new(RgbaImage::new(200, 100))),
+                    vec2(0.0, 0.0),
                     window,
                     cx,
                 );

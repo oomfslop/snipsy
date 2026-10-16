@@ -279,6 +279,15 @@ pub fn hide_overlay(window: &gpui_kit::Window) {
     NSApplication::sharedApplication(mtm).deactivate();
 }
 
+pub fn get_pointer_position() -> Vec2 {
+    let mtm = MainThreadMarker::new().expect("pointer lookup runs on the main thread");
+    let pointer = NSEvent::mouseLocation();
+    return vec2(
+        pointer.x as f32,
+        get_primary_screen_height(mtm) - pointer.y as f32,
+    );
+}
+
 pub fn is_window_under_pointer(window: &gpui_kit::Window) -> bool {
     let target = get_native_window(window);
     let pointer = NSEvent::mouseLocation();
