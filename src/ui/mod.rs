@@ -33,7 +33,6 @@ gpui_kit::assets::icon_assets!(
         Bold,
         Italic,
         Underline,
-        PaintBucket,
         Trash,
         Keyboard,
         PanelTop,
@@ -65,8 +64,19 @@ pub fn handle_window_actions(root: Stateful<Div>) -> Stateful<Div> {
 
 pub struct Assets;
 
+pub const SQUARE_FILLED_ICON: &str = "icons/snipsy/square-filled.svg";
+pub const CIRCLE_FILLED_ICON: &str = "icons/snipsy/circle-filled.svg";
+
+const CUSTOM_ICONS: [(&str, &[u8]); 2] = [
+    (SQUARE_FILLED_ICON, include_bytes!("square-filled.svg")),
+    (CIRCLE_FILLED_ICON, include_bytes!("circle-filled.svg")),
+];
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some((_, bytes)) = CUSTOM_ICONS.iter().find(|(icon, _)| *icon == path) {
+            return Ok(Some(Cow::Borrowed(bytes)));
+        }
         if let Some(bytes) = ExtraIcons.load(path)? {
             return Ok(Some(bytes));
         }
@@ -76,6 +86,12 @@ impl AssetSource for Assets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
         paths.extend(ExtraIcons.list(path)?);
+        paths.extend(
+            CUSTOM_ICONS
+                .iter()
+                .filter(|(icon, _)| icon.starts_with(path))
+                .map(|(icon, _)| (*icon).into()),
+        );
         return Ok(paths);
     }
 }

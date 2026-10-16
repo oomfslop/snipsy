@@ -9,7 +9,7 @@ use glam::vec2;
 use gpui_kit::{
     assets::IconName,
     component::{
-        ActiveTheme, Disableable as _, Selectable as _, Sizable as _, StyledExt as _,
+        ActiveTheme, Disableable as _, Icon, Selectable as _, Sizable as _, StyledExt as _,
         button::{Button, ButtonVariants as _},
         separator::Separator,
         slider::Slider,
@@ -175,10 +175,18 @@ pub fn get_item_spec(item: ToolbarItem, pin_editor: bool) -> Option<ToolbarItemS
 }
 
 impl CaptureView {
+    pub(super) fn get_custom_swatch(&self, color: Color) -> Option<u32> {
+        return [Some(color), self.custom_color]
+            .into_iter()
+            .flatten()
+            .map(|color| color.0)
+            .find(|swatch| !COLORS.contains(swatch));
+    }
+
     fn create_button(
         &self,
         id: impl Into<ElementId>,
-        icon: IconName,
+        icon: impl Into<Icon>,
         tooltip: impl Into<SharedString>,
         action: EditorAction,
         cx: &Context<Self>,
@@ -349,7 +357,11 @@ impl CaptureView {
                 .child(
                     self.create_button(
                         "outline",
-                        IconName::Square,
+                        if tool == Tool::Ellipse {
+                            IconName::Circle
+                        } else {
+                            IconName::Square
+                        },
                         "Outline",
                         EditorAction::Filled(false),
                         cx,
@@ -359,7 +371,11 @@ impl CaptureView {
                 .child(
                     self.create_button(
                         "filled",
-                        IconName::PaintBucket,
+                        Icon::empty().path(if tool == Tool::Ellipse {
+                            ui::CIRCLE_FILLED_ICON
+                        } else {
+                            ui::SQUARE_FILLED_ICON
+                        }),
                         "Filled",
                         EditorAction::Filled(true),
                         cx,
@@ -437,9 +453,10 @@ impl CaptureView {
                     cx,
                 ))
                 .content(
-                    div().flex().items_center().gap_1().px_1().children(
-                        COLORS
+                    div().flex().items_center().children(
+                        self.get_custom_swatch(color)
                             .into_iter()
+                            .chain(COLORS)
                             .map(|swatch| render_swatch(swatch, color.0 == swatch, cx))
                             .collect::<Vec<_>>(),
                     ),
@@ -656,12 +673,23 @@ fn render_swatch(swatch: u32, selected: bool, cx: &mut Context<CaptureView>) -> 
     let theme = cx.theme();
     return div()
         .id(("color", swatch as usize))
-        .size_4()
         .flex_shrink_0()
+        .p(px(2.))
         .rounded_full()
-        .bg(rgb(swatch))
         .border_2()
-        .border_color(if selected { theme.ring } else { theme.border })
+        .border_color(if selected {
+            theme.foreground
+        } else {
+            transparent_black()
+        })
+        .child(
+            div()
+                .size_4()
+                .rounded_full()
+                .bg(rgb(swatch))
+                .border_1()
+                .border_color(theme.border),
+        )
         .on_click(cx.listener(move |capture, _, _, cx| {
             cx.stop_propagation();
             capture.editor.set_color(Color(swatch));

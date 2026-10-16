@@ -6,7 +6,7 @@ pub mod toolbar;
 use crate::{
     app::{self, AppState, content::PinContent, export, history, recording},
     editor::{Annotation, BlurMode, Editor, TextAttribute, Tool},
-    geometry::Rect,
+    geometry::{Color, Rect},
     pin, platform,
     raster::{self, Screenshot},
     ui::{self, View, magnifier},
@@ -256,6 +256,7 @@ struct CaptureView {
     pending_action: Option<EditorAction>,
     capture_task: Option<Task<()>>,
     color_task: Option<Task<()>>,
+    custom_color: Option<Color>,
     show_layers: bool,
     show_toolbar: bool,
     layer_drop_target: Option<(u64, bool)>,
@@ -307,6 +308,7 @@ impl CaptureView {
             pending_action: None,
             capture_task: None,
             color_task: None,
+            custom_color: None,
             show_layers: false,
             show_toolbar: true,
             layer_drop_target: None,
@@ -954,6 +956,7 @@ impl CaptureView {
             while let Ok(color) = colors.recv().await {
                 let updated = this.update(cx, |capture, cx| {
                     capture.editor.set_color(color);
+                    capture.custom_color = Some(color);
                     cx.notify();
                 });
                 if updated.is_err() {
@@ -1456,7 +1459,7 @@ mod tests {
     use crate::{
         capture::layout::ResizeHandle,
         editor::{Annotation, Editor, Tool},
-        geometry::Rect,
+        geometry::{Color, Rect},
     };
     use glam::vec2;
     use gpui_kit::{
@@ -1565,6 +1568,22 @@ mod tests {
                         size: vec2(22.0, 22.0),
                     })
                 );
+            })
+            .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn picked_color_stays_in_swatches_after_choosing_a_preset(cx: &mut TestAppContext) {
+        let window = create_capture(cx);
+        window
+            .update(cx, |capture, _, _| {
+                capture.custom_color = Some(Color(0x123456));
+                capture.editor.set_color(Color::WHITE);
+                assert_eq!(capture.get_custom_swatch(Color::WHITE), Some(0x123456));
+                assert_eq!(capture.get_custom_swatch(Color(0x654321)), Some(0x654321));
+                capture.custom_color = None;
+                assert_eq!(capture.get_custom_swatch(Color::WHITE), None);
+                assert_eq!(capture.get_custom_swatch(Color(0x654321)), Some(0x654321));
             })
             .unwrap();
     }
