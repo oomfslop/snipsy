@@ -15,7 +15,10 @@ use anyhow::{Result, anyhow};
 use glam::{Vec2, vec2};
 use gpui_kit::{
     component::{
-        ActiveTheme,
+        ActiveTheme, WindowExt as _,
+        button::{Button, ButtonVariants as _},
+        dialog::DialogEntrance,
+        h_flex,
         slider::{SliderEvent, SliderState},
     },
     prelude::*,
@@ -364,6 +367,53 @@ impl CaptureView {
         cx.activate(true);
         window.activate_window();
         window.focus(&self.focus, cx);
+    }
+
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor.layers.is_empty() {
+            return self.dismiss(window, cx);
+        }
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let capture = cx.entity().downgrade();
+        let discard = move |window: &mut Window, cx: &mut App| {
+            window.close_dialog(cx);
+            let _ = capture.update(cx, |capture, cx| capture.dismiss(window, cx));
+        };
+        window.open_alert_dialog(cx, move |alert, window, _| {
+            let discard = discard.clone();
+            return alert
+                .width(px(260.))
+                .margin_top(window.viewport_size().height / 2. - px(80.))
+                .entrance(DialogEntrance::None)
+                .text_center()
+                .title("Discard annotations?")
+                .description("Your annotations on this capture will be lost.")
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .flex_1()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child({
+                            let discard = discard.clone();
+                            Button::new("discard")
+                                .label("Discard")
+                                .primary()
+                                .flex_1()
+                                .on_click(move |_, window, cx| discard(window, cx))
+                        }),
+                )
+                .on_ok(move |_, window, cx| {
+                    discard(window, cx);
+                    return false;
+                });
+        });
     }
 
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -878,7 +928,7 @@ impl CaptureView {
             EditorAction::Delete => self.editor.delete_selected(),
             EditorAction::Undo => self.editor.undo_change(),
             EditorAction::Redo => self.editor.redo_change(),
-            EditorAction::Cancel => return self.dismiss(window, cx),
+            EditorAction::Cancel => return self.cancel(window, cx),
             _ => match self.export(action, window, cx) {
                 Ok(true) => return,
                 Ok(false) => {}
@@ -975,7 +1025,7 @@ impl CaptureView {
                 self.text.marked = None;
                 cx.notify();
             } else {
-                self.dismiss(window, cx);
+                self.cancel(window, cx);
             }
             return;
         }
@@ -1464,7 +1514,7 @@ mod tests {
     use glam::vec2;
     use gpui_kit::{
         AppContext, CursorStyle, KeyDownEvent, Keystroke, MouseDownEvent, MouseMoveEvent,
-        TestAppContext, WindowHandle, point, px,
+        TestAppContext, WindowHandle, component::WindowExt as _, point, px,
     };
     use image::RgbaImage;
     use std::sync::Arc;
@@ -1701,6 +1751,47 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn escape_with_annotations_asks_before_discarding(cx: &mut TestAppContext) {
+        create_capture(cx);
+        let mut capture = None;
+        let window = cx.add_window(|window, cx| {
+            let view = cx.new(|cx| {
+                CaptureView::new(
+                    Rect {
+                        pos: vec2(0.0, 0.0),
+                        size: vec2(200.0, 100.0),
+                    },
+                    Mode::Capture,
+                    None,
+                    vec2(0.0, 0.0),
+                    window,
+                    cx,
+                )
+            });
+            capture = Some(view.clone());
+            return gpui_kit::base::Root::new(view, window, cx);
+        });
+        let capture = capture.unwrap();
+        cx.update(|cx| {
+            capture.update(cx, |capture, _| {
+                capture.editor.draft = Some(Annotation {
+                    tool: Tool::Rectangle,
+                    points: vec![vec2(10.0, 10.0), vec2(50.0, 50.0)],
+                    ..Default::default()
+                });
+                capture.editor.commit_draft();
+            })
+        });
+        cx.simulate_keystrokes(window.into(), "escape");
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            assert!(window.has_active_dialog(cx));
+            assert_eq!(capture.read(cx).editor.layers.len(), 1);
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
