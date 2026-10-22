@@ -37,6 +37,9 @@ gpui_kit::assets::icon_assets!(
         Keyboard,
         PanelTop,
         GripVertical,
+        Film,
+        Volume2,
+        VolumeX,
     ]
 );
 

@@ -49,6 +49,7 @@ const TOOLBAR_SPACE: f32 = 100.0;
 const MIN_WIDTH: f32 = 680.0;
 const MIN_CANVAS_HEIGHT: f32 = 120.0;
 const HANDLE_WIDTH: f32 = 6.0;
+const VOLUME_DRAG_HEIGHT: f32 = 60.0;
 const MIN_CLIP: f64 = 0.1;
 
 pub enum VideoRequest {
@@ -62,7 +63,15 @@ enum TimelineDrag {
     End,
     Playhead,
     Layer(u64, LayerDrag),
+    Volume(usize, f32, f32),
     Resize,
+}
+
+struct AudioTrack {
+    id: i32,
+    label: SharedString,
+    volume: f32,
+    muted: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -79,6 +88,7 @@ pub struct VideoEditor {
     video_size: Vec2,
     window_size: Vec2,
     timeline_height: f32,
+    audio: Vec<AudioTrack>,
     canvas: Rect,
     duration: f64,
     trim: (f64, f64),
@@ -114,7 +124,8 @@ fn show_video_editor(video: RecordedVideo, cx: &mut App) -> Result<()> {
     });
     let pixels = vec2(video.size.0 as f32, video.size.1 as f32);
     let video_size = pixels / platform::get_desktop_scale();
-    let window_size = get_window_size(video_size, screen);
+    let timeline_height = TIMELINE_HEIGHT + video.audio.len() as f32 * LANE_HEIGHT;
+    let window_size = get_window_size(video_size, screen, timeline_height);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
@@ -127,7 +138,7 @@ fn show_video_editor(video: RecordedVideo, cx: &mut App) -> Result<()> {
         }),
         window_min_size: Some(size(
             px(MIN_WIDTH),
-            px(TOP_PADDING + MIN_CANVAS_HEIGHT + TOOLBAR_SPACE + TIMELINE_HEIGHT),
+            px(TOP_PADDING + MIN_CANVAS_HEIGHT + TOOLBAR_SPACE + timeline_height),
         )),
         ..Default::default()
     };
@@ -138,8 +149,8 @@ fn show_video_editor(video: RecordedVideo, cx: &mut App) -> Result<()> {
             VideoEditor::new(
                 video.take().unwrap(),
                 player.take().unwrap(),
-                duration,
                 video_size,
+                timeline_height,
                 screen.x,
                 window,
                 cx,
@@ -149,10 +160,10 @@ fn show_video_editor(video: RecordedVideo, cx: &mut App) -> Result<()> {
     return Ok(());
 }
 
-fn get_window_size(video: Vec2, screen: Vec2) -> Vec2 {
+fn get_window_size(video: Vec2, screen: Vec2, timeline_height: f32) -> Vec2 {
     let chrome = vec2(
         2.0 * SIDE_PADDING,
-        TOP_PADDING + TOOLBAR_SPACE + TIMELINE_HEIGHT,
+        TOP_PADDING + TOOLBAR_SPACE + timeline_height,
     );
     let available = (screen * 0.9 - chrome - vec2(0.0, 28.0)).max(vec2(160.0, 90.0));
     let scale = (available / video.max(Vec2::ONE)).min_element().min(1.0);
@@ -204,17 +215,18 @@ impl VideoEditor {
     fn new(
         video: RecordedVideo,
         player: VideoPlayer,
-        duration: f64,
         video_size: Vec2,
+        timeline_height: f32,
         screen_width: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let duration = player.get_duration();
         let window_size = ui::to_rect(Bounds::new(Point::default(), window.viewport_size())).size;
-        let canvas = get_canvas_rect(video_size, window_size, TIMELINE_HEIGHT);
+        let canvas = get_canvas_rect(video_size, window_size, timeline_height);
         let bounds = Rect {
             pos: Vec2::ZERO,
-            size: window_size - vec2(0.0, TIMELINE_HEIGHT),
+            size: window_size - vec2(0.0, timeline_height),
         };
         let screenshot = Screenshot {
             image: Arc::new(RgbaImage::new(video.size.0, video.size.1)),
@@ -290,7 +302,8 @@ impl VideoEditor {
             capture,
             video_size,
             window_size,
-            timeline_height: TIMELINE_HEIGHT,
+            timeline_height,
+            audio: Vec::new(),
             canvas,
             duration,
             trim: (0.0, duration),
@@ -320,7 +333,8 @@ impl VideoEditor {
     fn resize_timeline(&mut self, height: f32, cx: &mut Context<Self>) {
         let size = self.window_size;
         let max = size.y - TOP_PADDING - MIN_CANVAS_HEIGHT - TOOLBAR_SPACE;
-        self.timeline_height = height.min(max).max(MIN_TIMELINE_HEIGHT);
+        let min = MIN_TIMELINE_HEIGHT + self.audio.len() as f32 * LANE_HEIGHT;
+        self.timeline_height = height.min(max).max(min);
         let canvas = get_canvas_rect(self.video_size, size, self.timeline_height);
         self.track_width = get_track_width(size.x);
         if canvas != self.canvas {
@@ -332,6 +346,39 @@ impl VideoEditor {
             self.capture
                 .update(cx, |capture, cx| capture.resize_video(bounds, canvas, cx));
         }
+        cx.notify();
+    }
+
+    fn load_audio(&mut self, cx: &mut Context<Self>) {
+        let ids = self.player.get_audio_track_ids();
+        let sources = &self.video.audio;
+        self.audio = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| AudioTrack {
+                id: *id,
+                label: match sources.get(index).filter(|_| ids.len() == sources.len()) {
+                    Some(source) => source.get_label().into(),
+                    None => format!("Audio {}", index + 1).into(),
+                },
+                volume: 1.0,
+                muted: false,
+            })
+            .collect();
+        let added = self.audio.len() as f32 - sources.len() as f32;
+        self.resize_timeline(self.timeline_height + added * LANE_HEIGHT, cx);
+    }
+
+    fn get_audio_volumes(&self) -> Vec<(i32, f32)> {
+        return self
+            .audio
+            .iter()
+            .map(|track| (track.id, if track.muted { 0.0 } else { track.volume }))
+            .collect();
+    }
+
+    fn sync_audio(&self, cx: &mut Context<Self>) {
+        self.player.set_audio_volumes(&self.get_audio_volumes());
         cx.notify();
     }
 
@@ -426,7 +473,9 @@ impl VideoEditor {
                 .update(cx, |capture, cx| capture.select_layer_by_id(id, window, cx));
         }
         self.drag = Some(drag);
-        self.player.pause();
+        if !matches!(drag, TimelineDrag::Volume(..)) {
+            self.player.pause();
+        }
         self.update_timeline_drag(event.position, cx);
     }
 
@@ -446,6 +495,13 @@ impl VideoEditor {
             TimelineDrag::Resize => {
                 let y: f32 = position.y.into();
                 return self.resize_timeline(self.window_size.y - y, cx);
+            }
+            TimelineDrag::Volume(index, origin, volume) => {
+                let y: f32 = position.y.into();
+                let track = &mut self.audio[index];
+                track.volume = (volume - (y - origin) / VOLUME_DRAG_HEIGHT).clamp(0.0, 1.0);
+                track.muted = false;
+                return self.sync_audio(cx);
             }
             TimelineDrag::Start => {
                 self.trim.0 = time.min(self.trim.1 - MIN_CLIP).max(0.0);
@@ -533,6 +589,7 @@ impl VideoEditor {
                         editor.trim,
                         get_crop(selection, canvas, size),
                         effects,
+                        &editor.get_audio_volumes(),
                         editor.video.codec,
                         sender,
                     )?);
@@ -723,7 +780,7 @@ impl VideoEditor {
                         TimelineDrag::Layer(id, LayerDrag::Start),
                         TimelineDrag::Layer(id, LayerDrag::End),
                     ],
-                    move |time| TimelineDrag::Layer(id, LayerDrag::Move(time - range.0)),
+                    move |time, _| TimelineDrag::Layer(id, LayerDrag::Move(time - range.0)),
                     cx,
                 );
                 self.render_track(("lane", id as usize), LANE_HEIGHT, header, clip, cx)
@@ -767,9 +824,69 @@ impl VideoEditor {
             false,
             thumbnails,
             [TimelineDrag::Start, TimelineDrag::End],
-            |_| TimelineDrag::Playhead,
+            |_, _| TimelineDrag::Playhead,
             cx,
         );
+        let audio_color = hsla(0.38, 0.45, 0.5, 1.0);
+        let audio_lanes = self
+            .audio
+            .iter()
+            .enumerate()
+            .map(|(index, track)| {
+                let volume = if track.muted { 0.0 } else { track.volume };
+                let header = h_flex()
+                    .gap_1()
+                    .px_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        Button::new(("mute", index))
+                            .icon(if track.muted {
+                                IconName::VolumeX
+                            } else {
+                                IconName::Volume2
+                            })
+                            .tooltip(if track.muted { "Unmute" } else { "Mute" })
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |editor, _, _, cx| {
+                                let track = &mut editor.audio[index];
+                                track.muted = !track.muted;
+                                editor.sync_audio(cx);
+                            })),
+                    )
+                    .child(div().truncate().child(track.label.clone()));
+                let level = div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px((1.0 - volume) * (LANE_HEIGHT - 9.0)))
+                    .h(px(1.))
+                    .bg(audio_color)
+                    .into_any_element();
+                let label = if track.muted {
+                    "Muted".to_string()
+                } else {
+                    format!("{}%", (volume * 100.0).round())
+                };
+                let clip = self
+                    .render_clip(
+                        ("audio-clip", index),
+                        trim,
+                        audio_color,
+                        label.into(),
+                        false,
+                        vec![level],
+                        [TimelineDrag::Start, TimelineDrag::End],
+                        move |_, y| TimelineDrag::Volume(index, y, volume),
+                        cx,
+                    )
+                    .cursor(CursorStyle::ResizeUpDown)
+                    .when(track.muted, |clip| clip.opacity(0.5));
+                self.render_track(("audio-lane", index), LANE_HEIGHT, header, clip, cx)
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
         let playhead = self.get_track_x(time);
         let dim = theme.background.opacity(0.6);
         return div()
@@ -853,6 +970,7 @@ impl VideoEditor {
                         video_clip,
                         cx,
                     ))
+                    .children(audio_lanes)
                     .child(
                         div()
                             .absolute()
@@ -942,9 +1060,9 @@ impl VideoEditor {
         selected: bool,
         content: Vec<AnyElement>,
         [start_drag, end_drag]: [TimelineDrag; 2],
-        body_drag: impl Fn(f64) -> TimelineDrag + 'static,
+        body_drag: impl Fn(f64, f32) -> TimelineDrag + 'static,
         cx: &Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Stateful<Div> {
         let theme = cx.theme();
         let left = self.get_track_x(start);
         let handle_color = if selected { theme.foreground } else { color };
@@ -1002,7 +1120,10 @@ impl VideoEditor {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |editor, event: &MouseDownEvent, window, cx| {
-                    let drag = body_drag(editor.get_track_time(event.position));
+                    let drag = body_drag(
+                        editor.get_track_time(event.position),
+                        event.position.y.into(),
+                    );
                     editor.begin_timeline_drag(drag, event, window, cx)
                 }),
             );
@@ -1022,6 +1143,7 @@ impl Render for VideoEditor {
             if self.loaded {
                 self.player.seek(0.0);
                 self.await_frame();
+                self.load_audio(cx);
             } else {
                 window.request_animation_frame();
             }

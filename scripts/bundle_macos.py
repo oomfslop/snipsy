@@ -26,6 +26,7 @@ with (bundle / "Contents" / "Info.plist").open("wb") as file:
         "LSMinimumSystemVersion": "14.0",
         "NSHighResolutionCapable": True,
         "LSUIElement": True,
+        "NSMicrophoneUsageDescription": "Snipsy records your microphone when you enable it for a screen recording.",
     }, file)
 
 identities = subprocess.run(["security", "find-identity", "-p", "codesigning"], capture_output=True, text=True, check=True).stdout

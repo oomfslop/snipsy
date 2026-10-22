@@ -27,6 +27,21 @@ impl VideoCodec {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioSource {
+    System,
+    Microphone,
+}
+
+impl AudioSource {
+    pub fn get_label(self) -> &'static str {
+        return match self {
+            Self::System => "System audio",
+            Self::Microphone => "Microphone",
+        };
+    }
+}
+
 pub const FPS_OPTIONS: [u32; 3] = [15, 30, 60];
 pub const BITRATE_OPTIONS: [u32; 5] = [2, 5, 10, 20, 40];
 
@@ -36,6 +51,8 @@ pub struct RecordingSettings {
     pub codec: VideoCodec,
     pub fps: u32,
     pub bitrate_mbps: u32,
+    pub system_audio: bool,
+    pub microphone: bool,
 }
 
 impl Default for RecordingSettings {
@@ -44,6 +61,8 @@ impl Default for RecordingSettings {
             codec: VideoCodec::H264,
             fps: 60,
             bitrate_mbps: 10,
+            system_audio: true,
+            microphone: false,
         };
     }
 }

@@ -87,9 +87,9 @@ Save and quick-save preserve animated GIF frames and timing. `P` enters frame se
 
 ## Recording
 
-Click record in the capture toolbar to pick the codec, frame rate, and bitrate (remembered in `config.toml`), then press Record. Double-click the toolbar button to record with the last options. The region stays outlined on screen, and a stop button appears in the menu bar; pins and other windows are recorded.
+Click record in the capture toolbar to pick the codec, frame rate, bitrate, and whether to record system audio or the microphone (macOS 15+), all remembered in `config.toml`, then press Record. Double-click the toolbar button to record with the last options. The region stays outlined on screen, and a stop button appears in the menu bar; pins and other windows are recorded.
 
-When it stops, the recording opens in an editor. Drag the timeline handles to trim, annotate with the capture tools (resizing the selection crops), then export to MP4. Each annotation gets a bar under the timeline: drag its ends or body to show it only in that part of the video. Unexported recordings are discarded when the editor closes.
+When it stops, the recording opens in an editor. Drag the timeline handles to trim, annotate with the capture tools (resizing the selection crops), then export to MP4. Each annotation gets a bar under the timeline: drag its ends or body to show it only in that part of the video. Audio gets one track per source under the video: mute it from the track header or drag the clip up and down to change its volume. Export mixes the tracks into one. Unexported recordings are discarded when the editor closes.
 
 | Action | Shortcut |
 | --- | --- |

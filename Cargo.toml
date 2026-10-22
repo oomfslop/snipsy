@@ -34,10 +34,12 @@ objc2-core-foundation = "0.3"
 objc2-screen-capture-kit = "0.3"
 objc2-core-graphics = "0.3"
 objc2-core-media = { version = "0.3", default-features = false, features = ["CMSampleBuffer", "CMTime", "CMTimeRange", "objc2"] }
-objc2-av-foundation = { version = "0.3", default-features = false, features = ["AVAsset", "AVAssetExportSession", "AVAssetImageGenerator", "AVAssetWriter", "AVAssetWriterInput", "AVMediaFormat", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "AVVideoCompositing", "AVVideoComposition", "AVVideoSettings", "block2", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-image", "objc2-core-media", "objc2-core-video"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["AVAsset", "AVAssetExportSession", "AVAssetTrack", "AVAudioMix", "AVPlayerItemTrack", "AVAssetImageGenerator", "AVAssetWriter", "AVAssetWriterInput", "AVMediaFormat", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "AVVideoCompositing", "AVVideoComposition", "AVVideoSettings", "block2", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-image", "objc2-core-media", "objc2-core-video"] }
 objc2-core-image = { version = "0.3", default-features = false, features = ["std", "CIContext", "CIFilter", "CIImage", "CIVector", "objc2-core-foundation", "objc2-core-graphics"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBuffer", "CVImageBuffer", "CVPixelBuffer"] }
 objc2-uniform-type-identifiers = "0.3"
+objc2-avf-audio = { version = "0.3", default-features = false, features = ["std", "AVAudioSettings"] }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-service-management = { version = "0.3", default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation"] }
 
 [profile.dev]

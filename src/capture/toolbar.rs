@@ -481,6 +481,40 @@ impl CaptureView {
             .content(unit("Mbps"))
             .content(Separator::vertical().h_4())
             .child(
+                Button::new("system-audio")
+                    .icon(IconName::Volume2)
+                    .tooltip("Record system audio")
+                    .selected(settings.system_audio)
+                    .on_click(cx.listener(move |capture, _, window, cx| {
+                        cx.stop_propagation();
+                        let next = RecordingSettings {
+                            system_audio: !settings.system_audio,
+                            ..settings
+                        };
+                        capture.perform_action(EditorAction::SetRecording(next), window, cx);
+                    })),
+            )
+            .child(
+                Button::new("microphone")
+                    .icon(IconName::Mic)
+                    .tooltip(if crate::platform::get_supports_microphone_capture() {
+                        "Record microphone"
+                    } else {
+                        "Microphone recording requires macOS 15"
+                    })
+                    .selected(settings.microphone)
+                    .disabled(!crate::platform::get_supports_microphone_capture())
+                    .on_click(cx.listener(move |capture, _, window, cx| {
+                        cx.stop_propagation();
+                        let next = RecordingSettings {
+                            microphone: !settings.microphone,
+                            ..settings
+                        };
+                        capture.perform_action(EditorAction::SetRecording(next), window, cx);
+                    })),
+            )
+            .content(Separator::vertical().h_4())
+            .child(
                 Button::new("start-recording")
                     .icon(IconName::CircleDot)
                     .label("Record")

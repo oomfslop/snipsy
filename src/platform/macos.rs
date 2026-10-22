@@ -1,5 +1,5 @@
 use crate::{
-    app::recording::{RecordingSettings, VideoCodec},
+    app::recording::{AudioSource, RecordingSettings, VideoCodec},
     editor::{self, BlurMode},
     geometry::{Color, Rect},
     raster::{self, CursorSnapshot, Screenshot, VideoEffect},
@@ -26,13 +26,15 @@ use objc2_av_foundation::{
     AVAsset, AVAssetExportPresetHEVCHighestQuality, AVAssetExportPresetHighestQuality,
     AVAssetExportPresetPassthrough, AVAssetExportSession, AVAssetExportSessionStatus,
     AVAssetImageGenerator, AVAssetWriter, AVAssetWriterInput, AVAssetWriterStatus,
-    AVAsynchronousCIImageFilteringRequest, AVFileTypeMPEG4, AVMediaTypeVideo,
-    AVMutableVideoComposition, AVPlayer, AVPlayerActionAtItemEnd, AVPlayerItem, AVPlayerItemStatus,
-    AVPlayerItemVideoOutput, AVURLAsset, AVVideoAverageBitRateKey, AVVideoCodecKey,
-    AVVideoCodecTypeH264, AVVideoCodecTypeHEVC, AVVideoCompressionPropertiesKey,
-    AVVideoExpectedSourceFrameRateKey, AVVideoHeightKey, AVVideoMaxKeyFrameIntervalKey,
-    AVVideoWidthKey,
+    AVAsynchronousCIImageFilteringRequest, AVFileTypeMPEG4, AVMediaTypeAudio, AVMediaTypeVideo,
+    AVMutableAudioMix, AVMutableAudioMixInputParameters, AVMutableVideoComposition, AVPlayer,
+    AVPlayerActionAtItemEnd, AVPlayerItem, AVPlayerItemStatus, AVPlayerItemVideoOutput, AVURLAsset,
+    AVVideoAverageBitRateKey, AVVideoCodecKey, AVVideoCodecTypeH264, AVVideoCodecTypeHEVC,
+    AVVideoCompressionPropertiesKey, AVVideoExpectedSourceFrameRateKey, AVVideoHeightKey,
+    AVVideoMaxKeyFrameIntervalKey, AVVideoWidthKey,
 };
+use objc2_avf_audio::{AVEncoderBitRateKey, AVFormatIDKey, AVNumberOfChannelsKey, AVSampleRateKey};
+use objc2_core_audio_types::kAudioFormatMPEG4AAC;
 use objc2_core_foundation::{
     CFDictionary, CFNumber, CFRetained, CFString, CFType, CGAffineTransform, CGPoint, CGRect,
     CGSize,
@@ -851,7 +853,8 @@ fn capture_displays(
 struct RecordingOutputIvars {
     writer: Retained<AVAssetWriter>,
     input: Retained<AVAssetWriterInput>,
-    started: Mutex<bool>,
+    audio: Vec<RecordingAudioInput>,
+    start: Mutex<Option<CMTime>>,
     failed: AtomicBool,
     errors: Sender<String>,
 }
@@ -872,11 +875,34 @@ define_class!(
             output_type: SCStreamOutputType,
         ) {
             let ivars = self.ivars();
-            if output_type != SCStreamOutputType::Screen
-                || ivars.failed.load(Ordering::Acquire)
+            if ivars.failed.load(Ordering::Acquire)
                 || !unsafe { sample_buffer.is_valid() }
                 || !unsafe { sample_buffer.data_is_ready() }
             {
+                return;
+            }
+            if output_type != SCStreamOutputType::Screen {
+                let Some(audio) = ivars
+                    .audio
+                    .iter()
+                    .find(|audio| audio.output_type == output_type)
+                else {
+                    return;
+                };
+                let start = ivars.start.lock().expect("video writer poisoned");
+                let Some(start) = *start else {
+                    return;
+                };
+                if unsafe { sample_buffer.presentation_time_stamp().compare(start) } < 0
+                    || !unsafe { audio.input.isReadyForMoreMediaData() }
+                {
+                    return;
+                }
+                if !unsafe { audio.input.appendSampleBuffer(sample_buffer) } {
+                    self.report_error(get_writer_error(&ivars.writer));
+                    return;
+                }
+                audio.received.store(true, Ordering::Release);
                 return;
             }
             let Some(attachments) = (unsafe { sample_buffer.sample_attachments_array(false) })
@@ -893,17 +919,14 @@ define_class!(
             {
                 return;
             }
-            let mut started = ivars.started.lock().expect("video writer poisoned");
+            let mut start = ivars.start.lock().expect("video writer poisoned");
             if !unsafe { ivars.input.isReadyForMoreMediaData() } {
                 return;
             }
-            if !*started {
-                unsafe {
-                    ivars
-                        .writer
-                        .startSessionAtSourceTime(sample_buffer.presentation_time_stamp())
-                };
-                *started = true;
+            if start.is_none() {
+                let time = unsafe { sample_buffer.presentation_time_stamp() };
+                unsafe { ivars.writer.startSessionAtSourceTime(time) };
+                *start = Some(time);
             }
             if !unsafe { ivars.input.appendSampleBuffer(sample_buffer) } {
                 self.report_error(get_writer_error(&ivars.writer));
@@ -918,6 +941,17 @@ define_class!(
         }
     }
 );
+
+struct RecordingAudioInput {
+    source: AudioSource,
+    output_type: SCStreamOutputType,
+    input: Retained<AVAssetWriterInput>,
+    received: AtomicBool,
+}
+
+pub fn get_supports_microphone_capture() -> bool {
+    return objc2::available!(macos = 15.0);
+}
 
 fn is_complete_recording_frame(attachments: &CFDictionary<CFString, CFType>) -> bool {
     // SAFETY: ScreenCaptureKit exposes this constant on every supported macOS version.
@@ -952,6 +986,7 @@ pub struct RecordedVideo {
     pub path: PathBuf,
     pub size: (u32, u32),
     pub codec: VideoCodec,
+    pub audio: Vec<AudioSource>,
     _directory: tempfile::TempDir,
 }
 
@@ -998,7 +1033,17 @@ fn create_recorder(
         config.setQueueDepth(6);
         config.setColorSpaceName(kCGColorSpaceSRGB);
         config.setShowsCursor(true);
-        config.setCapturesAudio(false);
+        config.setCapturesAudio(settings.system_audio);
+        config.setExcludesCurrentProcessAudio(true);
+        config.setSampleRate(48_000);
+        config.setChannelCount(2);
+        if settings.microphone {
+            ensure!(
+                get_supports_microphone_capture(),
+                "Microphone recording requires macOS 15"
+            );
+            config.setCaptureMicrophone(true);
+        }
         let writer = AVAssetWriter::initWithURL_fileType_error(
             AVAssetWriter::alloc(),
             &url,
@@ -1045,11 +1090,65 @@ fn create_recorder(
             "Could not configure the video encoder"
         );
         writer.addInput(&input);
+        let mut audio = Vec::new();
+        for (enabled, source, output_type, channels) in [
+            (
+                settings.system_audio,
+                AudioSource::System,
+                SCStreamOutputType::Audio,
+                2,
+            ),
+            (
+                settings.microphone,
+                AudioSource::Microphone,
+                SCStreamOutputType::Microphone,
+                1,
+            ),
+        ] {
+            if !enabled {
+                continue;
+            }
+            let audio_settings = NSDictionary::<NSString, AnyObject>::from_slices(
+                &[
+                    AVFormatIDKey.context(unavailable)?,
+                    AVSampleRateKey.context(unavailable)?,
+                    AVNumberOfChannelsKey.context(unavailable)?,
+                    AVEncoderBitRateKey.context(unavailable)?,
+                ],
+                &[
+                    NSNumber::new_u32(kAudioFormatMPEG4AAC).as_ref(),
+                    NSNumber::new_u32(48_000).as_ref(),
+                    NSNumber::new_u32(channels).as_ref(),
+                    NSNumber::new_u32(channels * 96_000).as_ref(),
+                ],
+            );
+            let input = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(
+                AVMediaTypeAudio.context(unavailable)?,
+                Some(&audio_settings),
+            );
+            input.setExpectsMediaDataInRealTime(true);
+            ensure!(
+                writer.canAddInput(&input),
+                "Could not configure the audio encoder"
+            );
+            writer.addInput(&input);
+            audio.push(RecordingAudioInput {
+                source,
+                output_type,
+                input,
+                received: AtomicBool::new(false),
+            });
+        }
         writer.setShouldOptimizeForNetworkUse(true);
+        let output_types = audio
+            .iter()
+            .map(|audio| audio.output_type)
+            .collect::<Vec<_>>();
         let allocated = RecordingOutput::alloc().set_ivars(RecordingOutputIvars {
             writer: writer.clone(),
             input,
-            started: Mutex::new(false),
+            audio,
+            start: Mutex::new(None),
             failed: AtomicBool::new(false),
             errors,
         });
@@ -1060,13 +1159,15 @@ fn create_recorder(
             &config,
             Some(ProtocolObject::from_ref(&*output)),
         );
-        stream
-            .addStreamOutput_type_sampleHandlerQueue_error(
-                ProtocolObject::from_ref(&*output),
-                SCStreamOutputType::Screen,
-                None,
-            )
-            .map_err(|error| anyhow!("{}", error.localizedDescription()))?;
+        for output_type in std::iter::once(SCStreamOutputType::Screen).chain(output_types) {
+            stream
+                .addStreamOutput_type_sampleHandlerQueue_error(
+                    ProtocolObject::from_ref(&*output),
+                    output_type,
+                    None,
+                )
+                .map_err(|error| anyhow!("{}", error.localizedDescription()))?;
+        }
         ensure!(writer.startWriting(), get_writer_error(&writer));
         return Ok(ScreenRecorder {
             stream,
@@ -1075,6 +1176,7 @@ fn create_recorder(
                 path,
                 size: (width as u32, height as u32),
                 codec: settings.codec,
+                audio: Vec::new(),
                 _directory: directory,
             },
         });
@@ -1129,12 +1231,15 @@ pub fn stop_screen_recording(recorder: ScreenRecorder, sender: Sender<Result<Rec
             return;
         };
         let ivars = recorder.output.ivars();
-        if !*ivars.started.lock().expect("video writer poisoned") {
+        if ivars.start.lock().expect("video writer poisoned").is_none() {
             unsafe { ivars.writer.cancelWriting() };
             let _ = sender.try_send(Err(anyhow!("The recording has no frames")));
             return;
         }
         unsafe { ivars.input.markAsFinished() };
+        for audio in &ivars.audio {
+            unsafe { audio.input.markAsFinished() };
+        }
         let writer = ivars.writer.clone();
         let recorder = Mutex::new(Some(recorder));
         let sender = sender.clone();
@@ -1142,14 +1247,21 @@ pub fn stop_screen_recording(recorder: ScreenRecorder, sender: Sender<Result<Rec
             let Some(recorder) = recorder.lock().expect("recorder poisoned").take() else {
                 return;
             };
-            let writer = &recorder.output.ivars().writer;
-            let _ = sender.try_send(
-                if unsafe { writer.status() } == AVAssetWriterStatus::Completed {
-                    Ok(recorder.video)
-                } else {
-                    Err(anyhow!(get_writer_error(writer)))
-                },
-            );
+            let ivars = recorder.output.ivars();
+            if unsafe { ivars.writer.status() } != AVAssetWriterStatus::Completed {
+                let _ = sender.try_send(Err(anyhow!(get_writer_error(&ivars.writer))));
+                return;
+            }
+            let audio = ivars
+                .audio
+                .iter()
+                .filter(|audio| audio.received.load(Ordering::Acquire))
+                .map(|audio| audio.source)
+                .collect();
+            let _ = sender.try_send(Ok(RecordedVideo {
+                audio,
+                ..recorder.video
+            }));
         });
         // SAFETY: the framework copies the completion block; the recorder it captures keeps the stream and files alive.
         unsafe { writer.finishWritingWithCompletionHandler(&finish) };
@@ -1465,6 +1577,26 @@ impl VideoPlayer {
             .then(|| buffer.into());
     }
 
+    pub fn get_audio_track_ids(&self) -> Vec<i32> {
+        // SAFETY: plain property reads on a ready item and its tracks.
+        unsafe {
+            let audio = AVMediaTypeAudio.expect("AVFoundation defines the audio media type");
+            return self
+                .item
+                .tracks()
+                .iter()
+                .filter_map(|track| track.assetTrack())
+                .filter(|track| *track.mediaType() == *audio)
+                .map(|track| track.trackID())
+                .collect();
+        }
+    }
+
+    pub fn set_audio_volumes(&self, volumes: &[(i32, f32)]) {
+        // SAFETY: the mix only references track ids of the item's own asset.
+        unsafe { self.item.setAudioMix(Some(&create_audio_mix(volumes))) };
+    }
+
     pub fn set_effects(&self, effects: Vec<VideoEffect>) {
         let composited = !effects.is_empty();
         *self.effects.0.lock().expect("video effects poisoned") =
@@ -1538,6 +1670,24 @@ pub fn generate_video_thumbnails(
     return Ok(VideoThumbnails(generator));
 }
 
+fn create_audio_mix(volumes: &[(i32, f32)]) -> Retained<AVMutableAudioMix> {
+    // SAFETY: input parameters are configured with plain values before the mix is used.
+    unsafe {
+        let parameters = volumes
+            .iter()
+            .map(|(track, volume)| {
+                let parameters = AVMutableAudioMixInputParameters::audioMixInputParameters();
+                parameters.setTrackID(*track);
+                parameters.setVolume_atTime(*volume, get_media_time(0.0));
+                Retained::into_super(parameters)
+            })
+            .collect::<Vec<_>>();
+        let mix = AVMutableAudioMix::audioMix();
+        mix.setInputParameters(&NSArray::from_retained_slice(&parameters));
+        return mix;
+    }
+}
+
 pub struct VideoExport(Retained<AVAssetExportSession>);
 
 impl VideoExport {
@@ -1554,12 +1704,14 @@ impl Drop for VideoExport {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn export_video(
     source: &Path,
     destination: PathBuf,
     range: (f64, f64),
     crop: Option<Rect>,
     effects: Vec<VideoEffect>,
+    volumes: &[(i32, f32)],
     codec: VideoCodec,
     sender: Sender<Result<()>>,
 ) -> Result<VideoExport> {
@@ -1569,7 +1721,8 @@ pub fn export_video(
         .tempdir_in(destination.parent().context("Invalid export path")?)?;
     let output = directory.path().join("export.mp4");
     let url = NSURL::from_file_path(&output).context("Invalid export path")?;
-    let reencode = crop.is_some() || !effects.is_empty();
+    let mixed = volumes.len() > 1 || volumes.iter().any(|(_, volume)| *volume != 1.0);
+    let reencode = crop.is_some() || !effects.is_empty() || mixed;
     let unavailable = "Video export is unavailable";
     // SAFETY: the export session is configured with valid objects before it starts.
     let session = unsafe {
@@ -1594,6 +1747,9 @@ pub fn export_video(
                 Arc::new(effects),
                 crop,
             )));
+        }
+        if mixed {
+            session.setAudioMix(Some(&create_audio_mix(volumes)));
         }
         session
     };
