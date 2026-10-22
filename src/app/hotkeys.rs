@@ -2,7 +2,7 @@ use crate::app::{cli::Command, storage};
 use anyhow::{Result, ensure};
 use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-    hotkey::{Code, HotKey, Modifiers},
+    hotkey::HotKey,
 };
 use gpui_kit::{App, Global};
 use serde::{Deserialize, Serialize};
@@ -12,9 +12,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// A field missing from the file means the shortcut was cleared; only a missing file falls
-/// back to the defaults.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotkeySettings {
     #[serde(default)]
     pub capture: Option<HotKey>,
@@ -24,20 +22,6 @@ pub struct HotkeySettings {
     pub click_through: Option<HotKey>,
     #[serde(default)]
     pub toggle_pins: Option<HotKey>,
-}
-
-impl Default for HotkeySettings {
-    fn default() -> Self {
-        return Self {
-            capture: Some(HotKey::new(
-                Some(Modifiers::SUPER | Modifiers::SHIFT),
-                Code::KeyA,
-            )),
-            paste: None,
-            click_through: None,
-            toggle_pins: None,
-        };
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,21 +219,12 @@ mod tests {
     use crate::app::storage;
 
     #[test]
-    fn only_capture_is_set_by_default() {
-        let settings = HotkeySettings::default();
-        assert!(settings.capture.is_some());
-        assert_eq!(
-            (settings.paste, settings.click_through, settings.toggle_pins),
-            (None, None, None)
-        );
-    }
-
-    #[test]
     fn settings_round_trip_cleared_shortcuts_and_reject_conflicts() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("hotkeys.toml");
         assert_eq!(load_settings(&path).unwrap(), HotkeySettings::default());
         let settings = HotkeySettings {
+            capture: Some("super+shift+KeyA".parse().unwrap()),
             paste: Some("control+KeyV".parse().unwrap()),
             ..Default::default()
         };

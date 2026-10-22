@@ -35,7 +35,7 @@ Global shortcuts and the capture toolbar layout are configurable in Preferences.
 
 | Action | Shortcut |
 | --- | --- |
-| Capture or record a region | `⌘⇧A` |
+| Capture or record a region | not set |
 | Pin clipboard (image, files, color, or text) | not set |
 | Toggle click-through for the pin under the pointer | not set |
 | Show or hide pins | not set |
