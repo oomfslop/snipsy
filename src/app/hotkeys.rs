@@ -1,14 +1,13 @@
-use crate::app::{cli::Command, storage};
-use anyhow::{Result, ensure};
-use global_hotkey::{
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-    hotkey::HotKey,
+use crate::app::{
+    cli::Command,
+    config::{self, Config},
 };
+use anyhow::{Result, ensure};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use gpui_kit::{App, Global};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -85,7 +84,7 @@ impl HotkeySettings {
             .collect();
     }
 
-    fn validate(self) -> Result<()> {
+    pub fn validate(self) -> Result<()> {
         let hotkeys = HotkeyKind::ALL.map(|kind| self.get(kind));
         ensure!(
             !hotkeys.iter().enumerate().any(|(index, hotkey)| {
@@ -97,23 +96,15 @@ impl HotkeySettings {
     }
 }
 
-fn load_settings(path: &Path) -> Result<HotkeySettings> {
-    let settings: HotkeySettings = storage::read_toml(path)?;
-    settings.validate()?;
-    return Ok(settings);
-}
-
 pub struct Hotkeys {
     manager: GlobalHotKeyManager,
-    settings: HotkeySettings,
     registered: Vec<HotKey>,
     commands: Arc<Mutex<HashMap<u32, Command>>>,
-    path: PathBuf,
 }
 
 impl Global for Hotkeys {}
 
-pub fn init(data_dir: &Path, sender: async_channel::Sender<Command>, cx: &mut App) -> Result<()> {
+pub fn init(sender: async_channel::Sender<Command>, cx: &mut App) -> Result<()> {
     let manager = GlobalHotKeyManager::new()?;
     let commands = Arc::new(Mutex::new(HashMap::new()));
     let event_commands = commands.clone();
@@ -125,27 +116,20 @@ pub fn init(data_dir: &Path, sender: async_channel::Sender<Command>, cx: &mut Ap
             let _ = sender.try_send(command);
         }
     }));
-    let path = data_dir.join("hotkeys.toml");
-    let loaded = load_settings(&path);
     let mut hotkeys = Hotkeys {
         manager,
-        settings: HotkeySettings::default(),
         registered: Vec::new(),
         commands,
-        path,
     };
-    let registered = hotkeys.apply(loaded.as_ref().copied().unwrap_or_default());
+    let registered = hotkeys.apply(cx.global::<Config>().hotkeys);
     cx.set_global(hotkeys);
-    let errors = [loaded.map(|_| ()), registered]
-        .into_iter()
-        .filter_map(|result| result.err().map(|error| format!("{error:#}")))
-        .collect::<Vec<_>>();
-    ensure!(errors.is_empty(), "{}", errors.join("\n"));
-    return Ok(());
+    return registered;
 }
 
 pub fn get_settings(cx: &App) -> Option<HotkeySettings> {
-    return cx.try_global::<Hotkeys>().map(|hotkeys| hotkeys.settings);
+    return cx
+        .has_global::<Hotkeys>()
+        .then(|| cx.global::<Config>().hotkeys);
 }
 
 pub fn set_hotkey(kind: HotkeyKind, hotkey: Option<HotKey>, cx: &mut App) -> Result<()> {
@@ -153,19 +137,19 @@ pub fn set_hotkey(kind: HotkeyKind, hotkey: Option<HotKey>, cx: &mut App) -> Res
         cx.has_global::<Hotkeys>(),
         "Global shortcuts are unavailable"
     );
-    let hotkeys = cx.global_mut::<Hotkeys>();
-    let mut settings = hotkeys.settings;
+    let previous = cx.global::<Config>().hotkeys;
+    let mut settings = previous;
     *settings.get_mut(kind) = hotkey;
-    if settings == hotkeys.settings {
+    if settings == previous {
         return Ok(());
     }
     settings.validate()?;
-    let previous = hotkeys.settings;
-    let result = hotkeys
+    let result = cx
+        .global_mut::<Hotkeys>()
         .apply(settings)
-        .and_then(|()| storage::write_toml(&hotkeys.path, &settings));
+        .and_then(|()| config::update(cx, |config| config.hotkeys = settings));
     if let Err(error) = result {
-        return Err(match hotkeys.apply(previous) {
+        return Err(match cx.global_mut::<Hotkeys>().apply(previous) {
             Ok(()) => error,
             Err(rollback) => error.context(format!("{rollback:#}")),
         });
@@ -203,7 +187,6 @@ impl Hotkeys {
             .filter(|(hotkey, _)| self.registered.contains(hotkey))
             .map(|(hotkey, command)| (hotkey.id(), command))
             .collect();
-        self.settings = settings;
         ensure!(
             errors.is_empty(),
             "Could not register shortcuts: {}",
@@ -215,30 +198,17 @@ impl Hotkeys {
 
 #[cfg(test)]
 mod tests {
-    use super::{HotkeySettings, load_settings};
-    use crate::app::storage;
+    use super::HotkeySettings;
 
     #[test]
-    fn settings_round_trip_cleared_shortcuts_and_reject_conflicts() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("hotkeys.toml");
-        assert_eq!(load_settings(&path).unwrap(), HotkeySettings::default());
-        let settings = HotkeySettings {
-            capture: Some("super+shift+KeyA".parse().unwrap()),
-            paste: Some("control+KeyV".parse().unwrap()),
+    fn duplicate_shortcuts_are_rejected() {
+        assert!(HotkeySettings::default().validate().is_ok());
+        let capture = Some("super+shift+KeyA".parse().unwrap());
+        let duplicate = HotkeySettings {
+            capture,
+            paste: capture,
             ..Default::default()
         };
-        storage::write_toml(&path, &settings).unwrap();
-        assert_eq!(load_settings(&path).unwrap(), settings);
-        let cleared = HotkeySettings {
-            capture: None,
-            ..settings
-        };
-        storage::write_toml(&path, &cleared).unwrap();
-        assert_eq!(load_settings(&path).unwrap(), cleared);
-        let mut duplicate = settings;
-        duplicate.paste = duplicate.capture;
         assert!(duplicate.validate().is_err());
-        assert!(HotkeySettings::default().validate().is_ok());
     }
 }

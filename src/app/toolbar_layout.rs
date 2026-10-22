@@ -1,8 +1,7 @@
-use crate::app::storage;
-use anyhow::{Context as _, Result, ensure};
-use gpui_kit::{App, Global};
+use crate::app::config;
+use anyhow::{Result, ensure};
+use gpui_kit::App;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -52,7 +51,7 @@ impl ToolbarItem {
     ];
 }
 
-const DEFAULT_ITEMS: [ToolbarItem; 21] = [
+pub const DEFAULT_ITEMS: [ToolbarItem; 21] = [
     ToolbarItem::Record,
     ToolbarItem::Separator,
     ToolbarItem::Select,
@@ -76,41 +75,7 @@ const DEFAULT_ITEMS: [ToolbarItem; 21] = [
     ToolbarItem::Copy,
 ];
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ToolbarLayout {
-    pub items: Vec<ToolbarItem>,
-    #[serde(skip)]
-    path: PathBuf,
-}
-
-impl Default for ToolbarLayout {
-    fn default() -> Self {
-        return Self {
-            items: DEFAULT_ITEMS.to_vec(),
-            path: PathBuf::new(),
-        };
-    }
-}
-
-impl Global for ToolbarLayout {}
-
-impl ToolbarLayout {
-    fn load(path: &Path) -> Result<Self> {
-        let layout: Self = storage::read_toml(path)?;
-        validate(&layout.items)?;
-        return Ok(Self {
-            path: path.to_path_buf(),
-            ..layout
-        });
-    }
-
-    pub fn get_is_default(&self) -> bool {
-        return self.items == DEFAULT_ITEMS;
-    }
-}
-
-fn validate(items: &[ToolbarItem]) -> Result<()> {
+pub fn validate(items: &[ToolbarItem]) -> Result<()> {
     ensure!(
         items.iter().enumerate().all(|(index, item)| {
             *item == ToolbarItem::Separator || !items[index + 1..].contains(item)
@@ -120,27 +85,9 @@ fn validate(items: &[ToolbarItem]) -> Result<()> {
     return Ok(());
 }
 
-pub fn init(data_dir: &Path, cx: &mut App) -> Result<()> {
-    let path = data_dir.join("toolbar.toml");
-    let loaded = ToolbarLayout::load(&path);
-    cx.set_global(ToolbarLayout {
-        path,
-        ..loaded.as_ref().ok().cloned().unwrap_or_default()
-    });
-    return loaded
-        .map(|_| ())
-        .context("Could not load the toolbar layout");
-}
-
 pub fn set_items(items: Vec<ToolbarItem>, cx: &mut App) -> Result<()> {
     validate(&items)?;
-    let layout = ToolbarLayout {
-        items,
-        path: cx.global::<ToolbarLayout>().path.clone(),
-    };
-    storage::write_toml(&layout.path, &layout)?;
-    cx.set_global(layout);
-    return Ok(());
+    return config::update(cx, |config| config.toolbar = items);
 }
 
 pub fn reset(cx: &mut App) -> Result<()> {
@@ -172,28 +119,7 @@ pub fn get_visible_items(
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_ITEMS, ToolbarItem, ToolbarLayout, get_visible_items};
-    use crate::app::storage;
-
-    #[test]
-    fn layouts_round_trip_and_reject_duplicates() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("toolbar.toml");
-        assert_eq!(ToolbarLayout::load(&path).unwrap().items, DEFAULT_ITEMS);
-        let layout = ToolbarLayout {
-            items: vec![
-                ToolbarItem::Copy,
-                ToolbarItem::Separator,
-                ToolbarItem::Separator,
-                ToolbarItem::Pen,
-            ],
-            path: path.clone(),
-        };
-        storage::write_toml(&path, &layout).unwrap();
-        assert_eq!(ToolbarLayout::load(&path).unwrap(), layout);
-        std::fs::write(&path, "items = [\"pen\", \"pen\"]\n").unwrap();
-        assert!(ToolbarLayout::load(&path).is_err());
-    }
+    use super::{DEFAULT_ITEMS, ToolbarItem, get_visible_items};
 
     #[test]
     fn hidden_items_do_not_leave_stray_separators() {

@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod config;
 pub mod content;
 pub mod export;
 pub mod history;
@@ -50,9 +51,9 @@ pub fn run(command: Option<Command>, data_dir: &Path, listener: UnixListener) {
         history::init(&data_dir, cx);
         capture::init(cx);
         let errors = [
+            config::init(&data_dir, cx),
             cli::listen(listener, sender.clone()),
-            toolbar_layout::init(&data_dir, cx),
-            hotkeys::init(&data_dir, sender.clone(), cx),
+            hotkeys::init(sender.clone(), cx),
             tray::init(sender, cx),
         ]
         .into_iter()

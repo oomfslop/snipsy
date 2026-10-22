@@ -1,8 +1,9 @@
 use crate::{
     app::{
         self,
+        config::Config,
         hotkeys::{self, HotkeyKind},
-        toolbar_layout::{self, ToolbarItem, ToolbarLayout},
+        toolbar_layout::{self, DEFAULT_ITEMS, ToolbarItem},
     },
     capture::toolbar::get_item_spec,
     platform, ui,
@@ -42,8 +43,7 @@ impl PreferencesView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        cx.observe_global::<ToolbarLayout>(|_, cx| cx.notify())
-            .detach();
+        cx.observe_global::<Config>(|_, cx| cx.notify()).detach();
         return Self {
             focus,
             recording: None,
@@ -81,7 +81,7 @@ impl PreferencesView {
     }
 
     fn drop_item(&mut self, dragged: &DraggedItem, cx: &mut Context<Self>) {
-        let mut items = cx.global::<ToolbarLayout>().items.clone();
+        let mut items = cx.global::<Config>().toolbar.clone();
         let index = self.drop_index.take().unwrap_or(items.len());
         move_item(&mut items, dragged, index);
         update_toolbar(items, cx);
@@ -92,7 +92,7 @@ impl PreferencesView {
         let Some(index) = dragged.index else {
             return;
         };
-        let mut items = cx.global::<ToolbarLayout>().items.clone();
+        let mut items = cx.global::<Config>().toolbar.clone();
         items.remove(index);
         update_toolbar(items, cx);
     }
@@ -143,7 +143,7 @@ impl Render for PreferencesView {
             SettingItem::render(move |_, window, cx| render_toolbar_editor(&view, window, cx))
                 .keywords(["toolbar", "buttons", "tools"])
                 .on_reset(
-                    |cx| !cx.global::<ToolbarLayout>().get_is_default(),
+                    |cx| cx.global::<Config>().toolbar != DEFAULT_ITEMS,
                     |_, cx| {
                         if let Err(error) = toolbar_layout::reset(cx) {
                             app::show_error(error);
@@ -268,7 +268,7 @@ fn render_toolbar_editor(
     window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement + use<> {
-    let items = cx.global::<ToolbarLayout>().items.clone();
+    let items = cx.global::<Config>().toolbar.clone();
     let drop_index = view.read(cx).drop_index;
     let theme = cx.theme();
     let accent = theme.primary;
@@ -525,7 +525,7 @@ mod tests {
         DraggedItem, PreferencesView, create_hotkey, format_hotkey, move_item,
         render_toolbar_editor,
     };
-    use crate::app::toolbar_layout::{ToolbarItem::*, ToolbarLayout};
+    use crate::app::{config::Config, toolbar_layout::ToolbarItem::*};
     use gpui_kit::{
         AppContext as _, Context, Entity, IntoElement, Keystroke, Modifiers, Render,
         TestAppContext, Window,
@@ -543,7 +543,7 @@ mod tests {
     fn toolbar_editor_renders_layout_and_empty_toolbar(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            cx.set_global(ToolbarLayout::default());
+            cx.set_global(Config::default());
         });
         let window = cx.add_window(|window, cx| {
             let view = cx.new(|cx| PreferencesView::new(window, cx));
@@ -551,7 +551,7 @@ mod tests {
             gpui_kit::base::Root::new(host, window, cx)
         });
         cx.run_until_parked();
-        cx.update(|cx| cx.global_mut::<ToolbarLayout>().items.clear());
+        cx.update(|cx| cx.global_mut::<Config>().toolbar.clear());
         window.update(cx, |_, window, _| window.refresh()).unwrap();
         cx.run_until_parked();
     }
@@ -560,7 +560,7 @@ mod tests {
     fn preferences_render_both_pages(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            cx.set_global(ToolbarLayout::default());
+            cx.set_global(Config::default());
         });
         let window = cx.add_window(|window, cx| {
             let view = cx.new(|cx| PreferencesView::new(window, cx));

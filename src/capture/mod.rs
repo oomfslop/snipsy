@@ -1522,7 +1522,7 @@ mod tests {
     fn create_capture(cx: &mut TestAppContext) -> WindowHandle<CaptureView> {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            cx.set_global(crate::app::toolbar_layout::ToolbarLayout::default());
+            cx.set_global(crate::app::config::Config::default());
         });
         return cx.add_window(|window, cx| {
             CaptureView::new(

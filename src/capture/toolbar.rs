@@ -1,5 +1,8 @@
 use crate::{
-    app::toolbar_layout::{self, ToolbarItem, ToolbarLayout},
+    app::{
+        config::Config,
+        toolbar_layout::{self, ToolbarItem},
+    },
     capture::{CaptureView, EditorAction, Mode, get_tool_family, layout},
     editor::{BlurMode, TextAttribute, Tool},
     geometry::{Color, Rect},
@@ -242,7 +245,7 @@ impl CaptureView {
             )
         });
         let mut elements = Vec::new();
-        if !cx.global::<ToolbarLayout>().items.is_empty() {
+        if !cx.global::<Config>().toolbar.is_empty() {
             elements.push(self.render_action_bar(bar, cx).into_any_element());
         }
         let tool = self.editor.get_current_tool();
@@ -263,10 +266,9 @@ impl CaptureView {
         let entity = cx.entity_id();
         let family = get_tool_family(self.editor.tool);
         let pin_editor = matches!(self.mode, Mode::PinEditor(_));
-        let items =
-            toolbar_layout::get_visible_items(&cx.global::<ToolbarLayout>().items, |item| {
-                item == ToolbarItem::Record && !matches!(self.mode, Mode::Capture)
-            });
+        let items = toolbar_layout::get_visible_items(&cx.global::<Config>().toolbar, |item| {
+            item == ToolbarItem::Record && !matches!(self.mode, Mode::Capture)
+        });
         let toolbar = items
             .into_iter()
             .fold(ui::create_toolbar("actions"), |toolbar, item| {

@@ -17,7 +17,7 @@ Open `target/release/Snipsy.app`. Grant it Screen Recording in System Settings â
 
 To install, copy it with `ditto target/release/Snipsy.app /Applications/Snipsy.app` and run `open /Applications/Snipsy.app`. Enable Launch at login in Preferences â†’ General.
 
-Snipsy runs in the background with a menu-bar item. Settings, history, and pin backups live in `~/Library/Application Support/Snipsy`. Debug builds use `Snipsy Debug` instead, so `cargo run` starts its own instance next to the installed one.
+Snipsy runs in the background with a menu-bar item. Settings (`config.toml`), history, and pin backups live in `~/Library/Application Support/Snipsy`. Debug builds use `Snipsy Debug` instead, so `cargo run` starts its own instance next to the installed one.
 
 ## Command line
 
