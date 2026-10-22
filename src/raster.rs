@@ -126,13 +126,17 @@ pub fn render_text_image(text: &str, fonts: &Arc<usvg::fontdb::Database>) -> Res
 
 pub fn render_selection(
     image: &RgbaImage,
-    bounds: Rect,
+    image_bounds: Rect,
     selection: Rect,
     annotations: impl Iterator<Item = impl std::borrow::Borrow<Annotation>>,
     fonts: &Arc<usvg::fontdb::Database>,
 ) -> Result<RgbaImage> {
-    let scale_x = image.width() as f32 / bounds.size.x;
-    let scale_y = image.height() as f32 / bounds.size.y;
+    let scale_x = image.width() as f32 / image_bounds.size.x;
+    let scale_y = image.height() as f32 / image_bounds.size.y;
+    let selection = Rect {
+        pos: selection.pos - image_bounds.pos,
+        size: selection.size,
+    };
     let x = (selection.pos.x * scale_x).floor().max(0.0) as u32;
     let y = (selection.pos.y * scale_y).floor().max(0.0) as u32;
     let right = ((selection.pos.x + selection.size.x) * scale_x)
@@ -145,7 +149,7 @@ pub fn render_selection(
         bail!("Selection is outside the image");
     }
     let mut output = image::imageops::crop_imm(image, x, y, right - x, bottom - y).to_image();
-    let offset = glam::vec2(x as f32 / scale_x, y as f32 / scale_y);
+    let offset = image_bounds.pos + glam::vec2(x as f32 / scale_x, y as f32 / scale_y);
     let mut svg = String::new();
     for annotation in annotations {
         let annotation = annotation.borrow();
@@ -665,6 +669,38 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn offset_image_bounds_shift_selection_and_annotations() {
+        let image = RgbaImage::from_fn(40, 40, |x, y| Rgba([x as u8 * 6, y as u8 * 6, 0, 255]));
+        let annotation = |offset| Annotation {
+            tool: Tool::Rectangle,
+            points: vec![vec2(6.0, 6.0) + offset, vec2(30.0, 30.0) + offset],
+            color: Color(0xff0000),
+            width: 2.0,
+            text: String::new(),
+            ..Default::default()
+        };
+        let fonts = Arc::new(usvg::fontdb::Database::new());
+        let render = |offset: Vec2| {
+            render_selection(
+                &image,
+                Rect {
+                    pos: offset,
+                    size: vec2(20.0, 20.0),
+                },
+                Rect {
+                    pos: vec2(2.0, 2.0) + offset,
+                    size: vec2(16.0, 16.0),
+                },
+                [&annotation(offset)].into_iter(),
+                &fonts,
+            )
+            .unwrap()
+        };
+        assert_eq!(render(vec2(300.0, 150.0)), render(Vec2::ZERO));
+        assert_eq!(render(Vec2::ZERO).dimensions(), (32, 32));
     }
 
     #[test]

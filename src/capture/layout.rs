@@ -72,9 +72,9 @@ pub fn create_resized_selection(origin: Rect, handle: ResizeHandle, point: Vec2)
     return Rect::from_corners(anchor, point);
 }
 
-pub fn create_moved_selection(origin: Rect, delta: Vec2, bounds: Vec2) -> Rect {
+pub fn create_moved_selection(origin: Rect, delta: Vec2, bounds: Rect) -> Rect {
     return Rect {
-        pos: (origin.pos + delta).clamp(Vec2::ZERO, (bounds - origin.size).max(Vec2::ZERO)),
+        pos: (origin.pos + delta).clamp(bounds.pos, (bounds.end() - origin.size).max(bounds.pos)),
         size: origin.size,
     };
 }
@@ -83,30 +83,32 @@ pub fn create_keyboard_resized_selection(
     mut selection: Rect,
     key: &str,
     grow: bool,
-    bounds: Vec2,
+    bounds: Rect,
 ) -> Rect {
     let amount = if grow { 1.0 } else { -1.0 };
     match key {
         "left" => {
-            let next = (selection.pos.x - amount).clamp(0.0, selection.end().x - MIN_SELECTION);
+            let next =
+                (selection.pos.x - amount).clamp(bounds.pos.x, selection.end().x - MIN_SELECTION);
             selection.size.x += selection.pos.x - next;
             selection.pos.x = next;
         }
         "right" => {
             selection.size.x = (selection.size.x + amount).clamp(
                 MIN_SELECTION,
-                (bounds.x - selection.pos.x).max(MIN_SELECTION),
+                (bounds.end().x - selection.pos.x).max(MIN_SELECTION),
             );
         }
         "up" => {
-            let next = (selection.pos.y - amount).clamp(0.0, selection.end().y - MIN_SELECTION);
+            let next =
+                (selection.pos.y - amount).clamp(bounds.pos.y, selection.end().y - MIN_SELECTION);
             selection.size.y += selection.pos.y - next;
             selection.pos.y = next;
         }
         _ => {
             selection.size.y = (selection.size.y + amount).clamp(
                 MIN_SELECTION,
-                (bounds.y - selection.pos.y).max(MIN_SELECTION),
+                (bounds.end().y - selection.pos.y).max(MIN_SELECTION),
             );
         }
     }
@@ -117,18 +119,16 @@ pub fn get_is_valid_selection(selection: Rect) -> bool {
     return selection.size.min_element() >= MIN_SELECTION;
 }
 
-pub fn get_dim_rects(selection: Option<Rect>, screen: Vec2) -> Vec<Rect> {
+pub fn get_dim_rects(selection: Option<Rect>, bounds: Rect) -> Vec<Rect> {
     let Some(rect) = selection else {
-        return vec![Rect {
-            pos: Vec2::ZERO,
-            size: screen,
-        }];
+        return vec![bounds];
     };
+    let (start, screen) = (bounds.pos, bounds.end());
     let end = rect.end();
     return vec![
-        Rect::from_corners(Vec2::ZERO, vec2(screen.x, rect.pos.y)),
-        Rect::from_corners(vec2(0.0, end.y), screen.max(end)),
-        Rect::from_corners(vec2(0.0, rect.pos.y), vec2(rect.pos.x, end.y)),
+        Rect::from_corners(start, vec2(screen.x, rect.pos.y)),
+        Rect::from_corners(vec2(start.x, end.y), screen.max(end)),
+        Rect::from_corners(vec2(start.x, rect.pos.y), vec2(rect.pos.x, end.y)),
         Rect::from_corners(vec2(end.x, rect.pos.y), vec2(screen.x.max(end.x), end.y)),
     ];
 }
@@ -207,19 +207,23 @@ mod tests {
 
     #[test]
     fn keyboard_resize_grows_and_shrinks_requested_edges() {
+        let screen = Rect {
+            pos: Vec2::ZERO,
+            size: vec2(100.0, 100.0),
+        };
         let selection = Rect {
             pos: vec2(10.0, 20.0),
             size: vec2(30.0, 40.0),
         };
         assert_eq!(
-            create_keyboard_resized_selection(selection, "left", true, vec2(100.0, 100.0)),
+            create_keyboard_resized_selection(selection, "left", true, screen),
             Rect {
                 pos: vec2(9.0, 20.0),
                 size: vec2(31.0, 40.0)
             }
         );
         assert_eq!(
-            create_keyboard_resized_selection(selection, "down", false, vec2(100.0, 100.0)).size,
+            create_keyboard_resized_selection(selection, "down", false, screen).size,
             vec2(30.0, 39.0)
         );
         let minimum = Rect {
@@ -227,8 +231,24 @@ mod tests {
             size: vec2(2.0, 2.0),
         };
         assert_eq!(
-            create_keyboard_resized_selection(minimum, "right", false, vec2(2.0, 2.0)),
+            create_keyboard_resized_selection(minimum, "right", false, minimum),
             minimum
+        );
+        let canvas = Rect {
+            pos: vec2(10.0, 20.0),
+            size: vec2(50.0, 50.0),
+        };
+        assert_eq!(
+            create_keyboard_resized_selection(canvas, "left", true, canvas),
+            canvas
+        );
+        assert_eq!(
+            create_keyboard_resized_selection(canvas, "down", true, canvas),
+            canvas
+        );
+        assert_eq!(
+            create_moved_selection(selection, vec2(-50.0, 100.0), canvas).pos,
+            vec2(10.0, 30.0)
         );
     }
 
@@ -349,14 +369,11 @@ mod tests {
 
     #[test]
     fn dimming_covers_everything_but_the_selection() {
-        let screen = vec2(1440.0, 900.0);
-        assert_eq!(
-            get_dim_rects(None, screen),
-            vec![Rect {
-                pos: Vec2::ZERO,
-                size: screen
-            }]
-        );
+        let screen = Rect {
+            pos: Vec2::ZERO,
+            size: vec2(1440.0, 900.0),
+        };
+        assert_eq!(get_dim_rects(None, screen), vec![screen]);
         let selection = Rect {
             pos: vec2(200.0, 100.0),
             size: vec2(300.0, 200.0),
@@ -367,7 +384,21 @@ mod tests {
             dim.iter()
                 .map(|rect| rect.size.x * rect.size.y)
                 .sum::<f32>(),
-            screen.x * screen.y - 300.0 * 200.0
+            1440.0 * 900.0 - 300.0 * 200.0
+        );
+        let canvas = Rect {
+            pos: vec2(100.0, 50.0),
+            size: vec2(500.0, 400.0),
+        };
+        let dim = get_dim_rects(Some(selection), canvas);
+        assert!(dim.iter().all(|rect| rect.size.min_element() >= 0.0
+            && canvas.contains(rect.pos)
+            && rect.end().cmple(canvas.end()).all()));
+        assert_eq!(
+            dim.iter()
+                .map(|rect| rect.size.x * rect.size.y)
+                .sum::<f32>(),
+            500.0 * 400.0 - 300.0 * 200.0
         );
     }
 }

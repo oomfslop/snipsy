@@ -80,12 +80,16 @@ pub fn start_whiteboard(color: [u8; 4], cx: &mut App) {
     let size = (bounds.size * platform::get_desktop_scale())
         .round()
         .max(Vec2::ONE);
-    let image = Arc::new(RgbaImage::from_pixel(
-        size.x as u32,
-        size.y as u32,
-        image::Rgba(color),
-    ));
-    match show_overlay(bounds, Mode::Whiteboard, Some(image), cx) {
+    let screenshot = Screenshot {
+        image: Arc::new(RgbaImage::from_pixel(
+            size.x as u32,
+            size.y as u32,
+            image::Rgba(color),
+        )),
+        bounds,
+        windows: Vec::new(),
+    };
+    match show_overlay(bounds, Mode::Whiteboard, Some(screenshot), cx) {
         Ok(view) => {
             let _ = view.update(cx, |capture, window, cx| capture.activate(window, cx));
         }
@@ -98,7 +102,7 @@ pub fn start_whiteboard(color: [u8; 4], cx: &mut App) {
 fn show_overlay(
     bounds: Rect,
     mode: Mode,
-    image: Option<Arc<RgbaImage>>,
+    screenshot: Option<Screenshot>,
     cx: &mut App,
 ) -> Result<View<CaptureView>> {
     if let Some(view) = cx.global_mut::<Captures>().active.take() {
@@ -108,14 +112,21 @@ fn show_overlay(
     let cached = cx.global::<Captures>().cache.clone().filter(|view| {
         view.update(cx, |capture, window, cx| {
             platform::configure_overlay(window, bounds, false);
-            capture.reset(bounds, mode.clone(), image.clone(), pointer, window, cx);
+            capture.reset(
+                bounds,
+                mode.clone(),
+                screenshot.clone(),
+                pointer,
+                window,
+                cx,
+            );
         })
         .is_ok()
     });
     let view = match cached {
         Some(view) => view,
         None => ui::open_overlay(bounds, false, cx, |window, cx| {
-            cx.new(|cx| CaptureView::new(bounds, mode, image, pointer, window, cx))
+            cx.new(|cx| CaptureView::new(bounds, mode, screenshot, pointer, window, cx))
         })?,
     };
     let captures = cx.global_mut::<Captures>();
@@ -146,13 +157,25 @@ pub fn open_pin_editor(
     {
         return false;
     }
+    let desktop = match platform::get_desktop_bounds() {
+        Ok(desktop) => desktop,
+        Err(error) => {
+            app::show_error(error);
+            return false;
+        }
+    };
+    let screenshot = Screenshot {
+        image,
+        bounds,
+        windows: Vec::new(),
+    };
     let pointer = platform::get_pointer_position();
-    let view = ui::open_overlay(bounds, false, cx, |window, cx| {
+    let view = ui::open_overlay(desktop, false, cx, |window, cx| {
         cx.new(|cx| {
             CaptureView::new(
-                bounds,
+                desktop,
                 Mode::PinEditor(target),
-                Some(image),
+                Some(screenshot),
                 pointer,
                 window,
                 cx,
@@ -274,7 +297,7 @@ impl CaptureView {
     fn new(
         bounds: Rect,
         mode: Mode,
-        image: Option<Arc<RgbaImage>>,
+        screenshot: Option<Screenshot>,
         pointer: Vec2,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -321,18 +344,22 @@ impl CaptureView {
             toolbar_size: Rc::new(Cell::new(vec2(600.0, 36.0))),
             _subscriptions: vec![subscription],
         };
-        if let Some(image) = image {
-            capture.set_screenshot(Screenshot {
-                image,
-                bounds,
-                windows: Vec::new(),
-            });
-            capture.selection = Some(Rect {
-                pos: Vec2::ZERO,
-                size: bounds.size,
-            });
+        if let Some(screenshot) = screenshot {
+            capture.set_screenshot(screenshot);
+            capture.selection = Some(capture.get_canvas());
         }
         return capture;
+    }
+
+    fn get_canvas(&self) -> Rect {
+        let bounds = self
+            .screenshot
+            .as_ref()
+            .map_or(self.bounds, |screenshot| screenshot.bounds);
+        return Rect {
+            pos: bounds.pos - self.bounds.pos,
+            size: bounds.size,
+        };
     }
 
     fn set_screenshot(&mut self, screenshot: Screenshot) {
@@ -344,7 +371,7 @@ impl CaptureView {
         &mut self,
         bounds: Rect,
         mode: Mode,
-        image: Option<Arc<RgbaImage>>,
+        screenshot: Option<Screenshot>,
         pointer: Vec2,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -355,7 +382,7 @@ impl CaptureView {
         {
             cx.drop_image(image, Some(window));
         }
-        *self = Self::new(bounds, mode, image, pointer, window, cx);
+        *self = Self::new(bounds, mode, screenshot, pointer, window, cx);
         cx.notify();
     }
 
@@ -554,7 +581,13 @@ impl CaptureView {
         } else {
             self.editor.tool
         };
-        return get_cursor_style(self.get_drag_mode(), tool, self.pointer, self.selection);
+        return get_cursor_style(
+            self.get_drag_mode(),
+            tool,
+            self.pointer,
+            self.selection,
+            self.get_canvas(),
+        );
     }
 
     fn get_shows_magnifier(&self) -> bool {
@@ -565,8 +598,9 @@ impl CaptureView {
 
     fn get_sample(&self) -> Option<magnifier::Sample> {
         let image = &self.screenshot.as_ref()?.image;
-        let scale = vec2(image.width() as f32, image.height() as f32) / self.bounds.size;
-        let pixel = (self.pointer * scale).floor();
+        let canvas = self.get_canvas();
+        let scale = vec2(image.width() as f32, image.height() as f32) / canvas.size;
+        let pixel = ((self.pointer - canvas.pos) * scale).floor();
         let max = vec2(image.width() as f32, image.height() as f32) - 1.0;
         let pixel = pixel.clamp(Vec2::ZERO, max.max(Vec2::ZERO));
         return magnifier::sample_pixel(image, pixel.x as u32, pixel.y as u32);
@@ -611,6 +645,9 @@ impl CaptureView {
         let Some(selection) = self.selection.filter(|selection| {
             selection.contains(pointer) || layout::get_resize_handle(pointer, *selection).is_some()
         }) else {
+            if !self.get_canvas().contains(pointer) {
+                return;
+            }
             let mut drag = Drag::new(DragMode::New, self.pointer);
             drag.origin = self.get_hovered_window();
             self.drag = Some(drag);
@@ -726,6 +763,10 @@ impl CaptureView {
         {
             point = point.clamp(selection.pos, selection.end());
         }
+        let canvas = self.get_canvas();
+        if matches!(mode, DragMode::New) {
+            point = point.clamp(canvas.pos, canvas.end());
+        }
         if event.modifiers.shift && mode == DragMode::Draw {
             point = constrain_point(self.editor.tool, start, point);
         }
@@ -739,7 +780,7 @@ impl CaptureView {
                 self.selection = Some(layout::create_moved_selection(
                     origin,
                     point - start,
-                    self.bounds.size,
+                    canvas,
                 ));
             }
             DragMode::Resize(handle) => {
@@ -752,7 +793,7 @@ impl CaptureView {
                 self.selection = Some(layout::create_resized_selection(
                     origin,
                     handle,
-                    (center + point - start).clamp(Vec2::ZERO, self.bounds.size),
+                    (center + point - start).clamp(canvas.pos, canvas.end()),
                 ));
             }
             DragMode::MoveAnnotation(index) => {
@@ -861,7 +902,7 @@ impl CaptureView {
             .ok_or_else(|| anyhow!("Capture is still loading"))?;
         return raster::render_selection(
             &screenshot.image,
-            self.bounds,
+            self.get_canvas(),
             selection,
             self.editor.get_visible_annotations(),
             &cx.global::<AppState>().fonts,
@@ -1116,10 +1157,7 @@ impl CaptureView {
     }
 
     fn select_all(&mut self, cx: &mut Context<Self>) {
-        self.selection = Some(Rect {
-            pos: Vec2::ZERO,
-            size: self.bounds.size,
-        });
+        self.selection = Some(self.get_canvas());
         cx.notify();
     }
 
@@ -1147,13 +1185,13 @@ impl CaptureView {
                 selection,
                 key,
                 modifiers.platform,
-                self.bounds.size,
+                self.get_canvas(),
             ));
         } else {
             self.selection = Some(layout::create_moved_selection(
                 selection,
                 direction,
-                self.bounds.size,
+                self.get_canvas(),
             ));
         }
         cx.notify();
@@ -1170,6 +1208,7 @@ impl CaptureView {
             .rposition(|annotation| annotation.tool == Tool::Mosaic)
             .map_or(0, |index| index + 1);
         let scene = &annotations[..split];
+        let bounds = self.get_canvas();
         let selection = self
             .selection
             .filter(|selection| layout::get_is_valid_selection(*selection));
@@ -1190,7 +1229,6 @@ impl CaptureView {
         };
         let source = screenshot.image.clone();
         let scene = scene.to_vec();
-        let bounds = self.bounds;
         let fonts = cx.global::<AppState>().fonts.clone();
         preview.task = Some(cx.spawn(async move |this, cx| {
             let (scene, result) = cx
@@ -1278,6 +1316,7 @@ fn get_cursor_style(
     tool: Tool,
     pointer: Vec2,
     selection: Option<Rect>,
+    canvas: Rect,
 ) -> CursorStyle {
     let handle = match drag {
         Some(DragMode::New | DragMode::Draw | DragMode::Erase) => return CursorStyle::Crosshair,
@@ -1301,6 +1340,9 @@ fn get_cursor_style(
             _ => CursorStyle::Crosshair,
         };
     }
+    if !canvas.contains(pointer) {
+        return CursorStyle::Arrow;
+    }
     return CursorStyle::Crosshair;
 }
 
@@ -1312,6 +1354,7 @@ impl Render for CaptureView {
         gpu_annotations.drain(..split);
         let selection = self.selection;
         let screen = self.bounds.size;
+        let image_bounds = self.get_canvas();
         let border = selection.or(self.get_hovered_window()).or_else(|| {
             self.drag
                 .as_ref()
@@ -1364,7 +1407,14 @@ impl Render for CaptureView {
                 }
             }))
             .when_some(self.background.clone(), |root, background| {
-                root.child(img(background).absolute().size_full())
+                root.child(
+                    img(background)
+                        .absolute()
+                        .left(px(image_bounds.pos.x))
+                        .top(px(image_bounds.pos.y))
+                        .w(px(image_bounds.size.x))
+                        .h(px(image_bounds.size.y)),
+                )
             })
             .when_some(raster_preview, |root, (image, selection)| {
                 root.child(
@@ -1404,7 +1454,7 @@ impl Render for CaptureView {
                             );
                         }
                         if ready {
-                            for rect in layout::get_dim_rects(border, screen) {
+                            for rect in layout::get_dim_rects(border, image_bounds) {
                                 window.paint_quad(fill(ui::to_bounds(rect), rgba(0x00000066)));
                             }
                         }
@@ -1510,8 +1560,9 @@ mod tests {
         capture::layout::ResizeHandle,
         editor::{Annotation, Editor, Tool},
         geometry::{Color, Rect},
+        raster::Screenshot,
     };
-    use glam::vec2;
+    use glam::{Vec2, vec2};
     use gpui_kit::{
         AppContext, CursorStyle, KeyDownEvent, Keystroke, MouseDownEvent, MouseMoveEvent,
         TestAppContext, WindowHandle, component::WindowExt as _, point, px,
@@ -1571,7 +1622,11 @@ mod tests {
                 capture.reset(
                     capture.bounds,
                     Mode::Whiteboard,
-                    Some(image.clone()),
+                    Some(Screenshot {
+                        image: image.clone(),
+                        bounds: capture.bounds,
+                        windows: Vec::new(),
+                    }),
                     vec2(0.0, 0.0),
                     window,
                     cx,
@@ -1906,7 +1961,11 @@ mod tests {
                 capture.reset(
                     capture.bounds,
                     Mode::Whiteboard,
-                    Some(Arc::new(RgbaImage::new(200, 100))),
+                    Some(Screenshot {
+                        image: Arc::new(RgbaImage::new(200, 100)),
+                        bounds: capture.bounds,
+                        windows: Vec::new(),
+                    }),
                     vec2(0.0, 0.0),
                     window,
                     cx,
@@ -1982,7 +2041,11 @@ mod tests {
             pos: vec2(20.0, 20.0),
             size: vec2(100.0, 100.0),
         };
-        let cursor = |drag, tool| get_cursor_style(drag, tool, rect.pos, Some(rect));
+        let canvas = Rect {
+            pos: Vec2::ZERO,
+            size: vec2(200.0, 200.0),
+        };
+        let cursor = |drag, tool| get_cursor_style(drag, tool, rect.pos, Some(rect), canvas);
         assert_eq!(
             cursor(Some(DragMode::Move), Tool::Select),
             CursorStyle::ClosedHand
@@ -2003,6 +2066,65 @@ mod tests {
             cursor(None, Tool::Select),
             CursorStyle::ResizeUpLeftDownRight
         );
+        assert_eq!(
+            get_cursor_style(None, Tool::Pen, vec2(150.0, 150.0), Some(rect), canvas),
+            CursorStyle::Crosshair
+        );
+        assert_eq!(
+            get_cursor_style(None, Tool::Pen, vec2(250.0, 150.0), Some(rect), canvas),
+            CursorStyle::Arrow
+        );
+    }
+
+    #[gpui_kit::test]
+    fn image_placed_inside_overlay_limits_selection_and_exports_at_full_resolution(
+        cx: &mut TestAppContext,
+    ) {
+        let window = create_capture(cx);
+        let image_bounds = Rect {
+            pos: vec2(40.0, 20.0),
+            size: vec2(50.0, 25.0),
+        };
+        let canvas = Rect {
+            pos: image_bounds.pos,
+            size: image_bounds.size,
+        };
+        window
+            .update(cx, |capture, window, cx| {
+                cx.set_global(crate::app::AppState::default());
+                capture.reset(
+                    capture.bounds,
+                    Mode::Whiteboard,
+                    Some(Screenshot {
+                        image: Arc::new(RgbaImage::new(100, 50)),
+                        bounds: image_bounds,
+                        windows: Vec::new(),
+                    }),
+                    vec2(0.0, 0.0),
+                    window,
+                    cx,
+                );
+                assert_eq!(capture.selection, Some(canvas));
+                capture.begin_drag(
+                    &MouseDownEvent {
+                        button: gpui_kit::MouseButton::Left,
+                        position: point(px(150.0), px(80.0)),
+                        click_count: 1,
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+                assert!(capture.drag.is_none());
+                assert_eq!(capture.selection, Some(canvas));
+                capture.select_all(cx);
+                assert_eq!(capture.selection, Some(canvas));
+                assert_eq!(
+                    capture.create_export_image(cx).unwrap().dimensions(),
+                    (100, 50)
+                );
+            })
+            .unwrap();
     }
 
     #[test]

@@ -213,7 +213,7 @@ impl CaptureView {
             .screenshot
             .as_ref()
             .map_or(window.scale_factor(), |screenshot| {
-                screenshot.image.width() as f32 / self.bounds.size.x
+                screenshot.image.width() as f32 / self.get_canvas().size.x
             });
         let size = (rect.size * scale).round();
         return ui::panel(cx)
