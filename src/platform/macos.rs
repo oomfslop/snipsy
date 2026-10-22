@@ -303,6 +303,22 @@ fn get_native_view(window: &gpui_kit::Window) -> &NSView {
     return unsafe { handle.ns_view.cast::<NSView>().as_ref() };
 }
 
+pub fn retain_window_view(window: &gpui_kit::Window) -> Retained<NSView> {
+    return get_native_view(window).retain();
+}
+
+/// GPUI's display link only draws visible windows, so a reused hidden window would first show
+/// its last frame. Displaying the layer runs GPUI's draw synchronously instead. Must not be
+/// called while the app is borrowed.
+pub fn draw_hidden_window(view: &NSView) {
+    // SAFETY: the view is layer-backed and GPUI draws its layer in displayLayer:.
+    unsafe {
+        let layer: Retained<AnyObject> = msg_send![view, layer];
+        let _: () = msg_send![&*layer, setNeedsDisplay];
+        let _: () = msg_send![&*layer, displayIfNeeded];
+    }
+}
+
 fn get_native_window(window: &gpui_kit::Window) -> Retained<NSWindow> {
     return get_native_view(window)
         .window()

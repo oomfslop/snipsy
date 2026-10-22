@@ -69,9 +69,23 @@ pub fn start(cx: &mut App) {
     };
     let _ = view.update(cx, |view, window, cx| {
         view.cursor = cursor;
-        view.activate(window, cx);
         view.request_capture(window, cx);
     });
+    present_overlay(view, cx);
+}
+
+fn present_overlay(view: View<CaptureView>, cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let native =
+            cx.update(|cx| view.update(cx, |_, window, _| platform::retain_window_view(window)));
+        if let Ok(native) = native {
+            platform::draw_hidden_window(&native);
+        }
+        cx.update(|cx| {
+            let _ = view.update(cx, |capture, window, cx| capture.activate(window, cx));
+        });
+    })
+    .detach();
 }
 
 struct LoadedCapture {
@@ -116,9 +130,7 @@ pub fn start_whiteboard(color: [u8; 4], cx: &mut App) {
         windows: Vec::new(),
     };
     match show_overlay(bounds, Mode::Whiteboard, Some(screenshot), cx) {
-        Ok(view) => {
-            let _ = view.update(cx, |capture, window, cx| capture.activate(window, cx));
-        }
+        Ok(view) => present_overlay(view, cx),
         Err(error) => app::show_error(error),
     }
 }
@@ -210,8 +222,8 @@ pub fn open_pin_editor(
     });
     return match view {
         Ok(view) => {
-            let _ = view.update(cx, |capture, window, cx| capture.activate(window, cx));
-            cx.global_mut::<Captures>().pin_editor = Some(view);
+            cx.global_mut::<Captures>().pin_editor = Some(view.clone());
+            present_overlay(view, cx);
             true
         }
         Err(error) => {
@@ -318,6 +330,7 @@ struct CaptureView {
     show_layers: bool,
     show_toolbar: bool,
     show_record_options: bool,
+    hidden: bool,
     confirming_discard: bool,
     layer_drop_target: Option<(u64, bool)>,
     capture_history: Vec<Screenshot>,
@@ -375,6 +388,7 @@ impl CaptureView {
             show_layers: false,
             show_toolbar: true,
             show_record_options: false,
+            hidden: false,
             confirming_discard: false,
             layer_drop_target: None,
             capture_history: Vec::new(),
@@ -489,6 +503,7 @@ impl CaptureView {
             window,
             cx,
         );
+        self.hidden = true;
     }
 
     fn request_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1479,6 +1494,9 @@ fn get_cursor_style(
 
 impl Render for CaptureView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.hidden {
+            return div().into_any_element();
+        }
         let mut gpu_annotations: Vec<_> = self.editor.get_visible_annotations().cloned().collect();
         let split = self.update_raster_preview(&gpu_annotations, window, cx);
         self.sync_intensity_slider(window, cx);
@@ -1693,7 +1711,8 @@ impl Render for CaptureView {
                         .text_color(cx.theme().danger)
                         .child(error),
                 )
-            });
+            })
+            .into_any_element();
     }
 }
 
