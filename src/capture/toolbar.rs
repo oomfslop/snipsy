@@ -301,6 +301,7 @@ impl CaptureView {
             .cursor(CursorStyle::Arrow)
             .overflow_x_scroll()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(
                 canvas(
                     move |bounds, _, cx| {
@@ -486,6 +487,7 @@ impl CaptureView {
             .cursor(CursorStyle::Arrow)
             .overflow_x_scroll()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(toolbar);
     }
 
@@ -610,6 +612,7 @@ impl CaptureView {
             .flex_col()
             .cursor(CursorStyle::Arrow)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .on_drag_move(cx.listener(|capture, event: &DragMoveEvent<u64>, _, cx| {
                 if !event.bounds.contains(&event.event.position)
                     && capture.layer_drop_target.take().is_some()

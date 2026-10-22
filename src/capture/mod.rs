@@ -1401,6 +1401,19 @@ impl Render for CaptureView {
                 }),
             )
             .on_key_down(cx.listener(Self::handle_key))
+            .on_scroll_wheel(cx.listener(|capture, event: &ScrollWheelEvent, _, cx| {
+                let delta: f32 = event.delta.pixel_delta(px(16.)).y.into();
+                let pointer = capture.get_pointer(event.position);
+                if delta == 0.0
+                    || !capture
+                        .selection
+                        .is_some_and(|selection| selection.contains(pointer))
+                {
+                    return;
+                }
+                capture.editor.adjust_size(delta.signum());
+                cx.notify();
+            }))
             .on_modifiers_changed(cx.listener(|capture, _, _, cx| {
                 if capture.get_shows_magnifier() {
                     cx.notify();
@@ -1564,8 +1577,9 @@ mod tests {
     };
     use glam::{Vec2, vec2};
     use gpui_kit::{
-        AppContext, CursorStyle, KeyDownEvent, Keystroke, MouseDownEvent, MouseMoveEvent,
-        TestAppContext, WindowHandle, component::WindowExt as _, point, px,
+        AppContext, CursorStyle, InputEvent, KeyDownEvent, Keystroke, MouseDownEvent,
+        MouseMoveEvent, TestAppContext, WindowHandle, component::WindowExt as _, point, px,
+        test::TestWindowExt,
     };
     use image::RgbaImage;
     use std::sync::Arc;
@@ -2074,6 +2088,49 @@ mod tests {
             get_cursor_style(None, Tool::Pen, vec2(250.0, 150.0), Some(rect), canvas),
             CursorStyle::Arrow
         );
+    }
+
+    #[gpui_kit::test]
+    fn scrolling_inside_the_selection_changes_stroke_width(cx: &mut TestAppContext) {
+        let window = create_capture(cx);
+        let width = window
+            .update(cx, |capture, _, cx| {
+                cx.set_global(crate::app::AppState::default());
+                capture.selection = Some(Rect {
+                    pos: vec2(20.0, 20.0),
+                    size: vec2(100.0, 50.0),
+                });
+                capture.editor.select_tool(Tool::Pen);
+                capture.show_toolbar = false;
+                capture.editor.get_current_width()
+            })
+            .unwrap();
+        let scroll = |cx: &mut TestAppContext, x: f32, delta: f32| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.render_frame(cx);
+                window.dispatch_event(
+                    gpui_kit::ScrollWheelEvent {
+                        position: point(px(x), px(40.0)),
+                        delta: gpui_kit::ScrollDelta::Pixels(point(px(0.0), px(delta))),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            })
+            .unwrap();
+        };
+        scroll(cx, 60.0, 10.0);
+        scroll(cx, 60.0, 10.0);
+        scroll(cx, 180.0, 10.0);
+        let current = |cx: &mut TestAppContext| {
+            window
+                .update(cx, |capture, _, _| capture.editor.get_current_width())
+                .unwrap()
+        };
+        assert_eq!(current(cx), width + 2.0);
+        scroll(cx, 60.0, -10.0);
+        assert_eq!(current(cx), width + 1.0);
     }
 
     #[gpui_kit::test]
