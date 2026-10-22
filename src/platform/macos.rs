@@ -41,6 +41,7 @@ use objc2_screen_capture_kit::{
     SCStreamConfiguration, SCStreamDelegate, SCStreamFrameInfoStatus, SCStreamOutput,
     SCStreamOutputType, SCWindow,
 };
+use objc2_service_management::{SMAppService, SMAppServiceStatus};
 use objc2_uniform_type_identifiers::{UTType, UTTypeMPEG4Movie};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
@@ -187,22 +188,53 @@ pub fn get_clipboard_change_count() -> i64 {
 }
 
 pub fn get_app_data_dir() -> Result<PathBuf> {
-    return get_user_directory(NSSearchPathDirectory::ApplicationSupportDirectory);
+    let name = if cfg!(debug_assertions) {
+        "Snipsy Debug"
+    } else {
+        "Snipsy"
+    };
+    return get_user_directory(NSSearchPathDirectory::ApplicationSupportDirectory, name);
 }
 
 pub fn get_quick_save_dir() -> Result<PathBuf> {
-    return get_user_directory(NSSearchPathDirectory::PicturesDirectory);
+    return get_user_directory(NSSearchPathDirectory::PicturesDirectory, "Snipsy");
 }
 
-fn get_user_directory(directory: NSSearchPathDirectory) -> Result<PathBuf> {
+fn get_user_directory(directory: NSSearchPathDirectory, name: &str) -> Result<PathBuf> {
     let path = NSFileManager::defaultManager()
         .URLsForDirectory_inDomains(directory, NSSearchPathDomainMask::UserDomainMask)
         .firstObject()
         .and_then(|url| url.to_file_path())
         .context("Requested user directory is unavailable")?
-        .join("Snipsy");
+        .join(name);
     std::fs::create_dir_all(&path)?;
     return Ok(path);
+}
+
+pub fn get_launches_at_login() -> bool {
+    // SAFETY: SMAppService methods have no preconditions beyond running on macOS 13+.
+    let status = unsafe { SMAppService::mainAppService().status() };
+    return matches!(
+        status,
+        SMAppServiceStatus::Enabled | SMAppServiceStatus::RequiresApproval
+    );
+}
+
+pub fn set_launches_at_login(enabled: bool) -> Result<()> {
+    // SAFETY: SMAppService methods have no preconditions beyond running on macOS 13+.
+    unsafe {
+        let service = SMAppService::mainAppService();
+        if enabled {
+            service.registerAndReturnError()
+        } else {
+            service.unregisterAndReturnError()
+        }
+        .map_err(|error| anyhow!("{}", error.localizedDescription()))?;
+        if service.status() == SMAppServiceStatus::RequiresApproval {
+            SMAppService::openSystemSettingsLoginItems();
+        }
+    }
+    return Ok(());
 }
 
 pub fn get_capture_bounds() -> Result<Rect> {

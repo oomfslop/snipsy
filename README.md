@@ -13,9 +13,11 @@ cargo build --release
 python3 scripts/bundle_macos.py release
 ```
 
-Open `target/release/Snipsy.app`. Grant it Screen Recording in System Settings → Privacy & Security; when run from a terminal, macOS attributes the permission to the terminal instead.
+Open `target/release/Snipsy.app`. Grant it Screen Recording in System Settings → Privacy & Security; when run from a terminal, macOS attributes the permission to the terminal instead. The bundle script signs the app with a self-signed `snipsy-dev` identity, created in the login keychain on first run, so the grant survives rebuilds.
 
-Snipsy runs in the background with a menu-bar item. Settings, history, and pin backups live in `~/Library/Application Support/Snipsy`.
+To install, copy it with `ditto target/release/Snipsy.app /Applications/Snipsy.app` and run `open /Applications/Snipsy.app`. Enable Launch at login in Preferences → General.
+
+Snipsy runs in the background with a menu-bar item. Settings, history, and pin backups live in `~/Library/Application Support/Snipsy`. Debug builds use `Snipsy Debug` instead, so `cargo run` starts its own instance next to the installed one.
 
 ## Command line
 

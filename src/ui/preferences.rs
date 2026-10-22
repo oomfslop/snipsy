@@ -5,7 +5,7 @@ use crate::{
         toolbar_layout::{self, ToolbarItem, ToolbarLayout},
     },
     capture::toolbar::get_item_spec,
-    ui,
+    platform, ui,
 };
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use gpui_kit::{
@@ -117,6 +117,17 @@ fn move_item(items: &mut Vec<ToolbarItem>, dragged: &DraggedItem, mut index: usi
 impl Render for PreferencesView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
+        let general = SettingGroup::new().item(SettingItem::new(
+            "Launch at login",
+            SettingField::switch(
+                |_| platform::get_launches_at_login(),
+                |enabled, _| {
+                    if let Err(error) = platform::set_launches_at_login(enabled) {
+                        app::show_error(error);
+                    }
+                },
+            ),
+        ));
         let shortcuts = SettingGroup::new()
             .description("Available everywhere, even while Snipsy is in the background.")
             .items(HotkeyKind::ALL.map(|kind| {
@@ -169,6 +180,12 @@ impl Render for PreferencesView {
                     .sidebar_size_range(SIDEBAR_WIDTH..SIDEBAR_WIDTH)
                     .with_group_variant(GroupBoxVariant::Fill)
                     .header_style(&StyleRefinement::default().pt(px(44.)))
+                    .page(
+                        SettingPage::new("General")
+                            .icon(IconName::Settings)
+                            .header_style(&header)
+                            .group(general),
+                    )
                     .page(
                         SettingPage::new("Shortcuts")
                             .icon(IconName::Keyboard)
