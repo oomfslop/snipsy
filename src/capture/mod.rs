@@ -401,6 +401,22 @@ impl CaptureView {
         };
     }
 
+    fn resize_video(&mut self, bounds: Rect, canvas: Rect, cx: &mut Context<Self>) {
+        let previous = self.get_canvas();
+        self.bounds = bounds;
+        if let Some(screenshot) = &mut self.screenshot {
+            screenshot.bounds = canvas;
+        }
+        let canvas = self.get_canvas();
+        let scale = canvas.size.x / previous.size.x;
+        self.editor.map_layers(previous, canvas);
+        self.selection = self.selection.map(|selection| Rect {
+            pos: canvas.pos + (selection.pos - previous.pos) * scale,
+            size: selection.size * scale,
+        });
+        cx.notify();
+    }
+
     fn set_screenshot(&mut self, screenshot: Screenshot) {
         self.windows = screenshot.windows.clone();
         self.background = (!matches!(self.mode, Mode::Video))
@@ -669,13 +685,21 @@ impl CaptureView {
     }
 
     fn get_annotation_at(&self, point: Vec2, window: &Window) -> Option<usize> {
-        return self.editor.layers.iter().rposition(|annotation| {
-            if annotation.tool == Tool::Text {
-                text::get_annotation_bounds(annotation, window).contains(point)
-            } else {
-                annotation.contains_point(point)
-            }
-        });
+        return self
+            .editor
+            .layers
+            .iter()
+            .enumerate()
+            .rposition(|(index, annotation)| {
+                if !self.editor.get_is_layer_visible(index) {
+                    return false;
+                }
+                if annotation.tool == Tool::Text {
+                    text::get_annotation_bounds(annotation, window).contains(point)
+                } else {
+                    annotation.contains_point(point)
+                }
+            });
     }
 
     fn begin_drag(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2018,6 +2042,40 @@ mod tests {
                     capture.editor.layers[0].points,
                     vec![vec2(100.0, 30.0), vec2(150.0, 30.0)]
                 );
+            })
+            .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn timed_layers_only_show_and_select_within_their_range(cx: &mut TestAppContext) {
+        let window = create_capture(cx);
+        window
+            .update(cx, |capture, window, _| {
+                capture.selection = Some(capture.bounds);
+                capture.editor.draft = Some(Annotation {
+                    tool: Tool::Rectangle,
+                    points: vec![vec2(20.0, 20.0), vec2(60.0, 60.0)],
+                    filled: true,
+                    ..Default::default()
+                });
+                capture.editor.commit_draft();
+                capture.editor.set_layer_time(0, (1.0, 1.5));
+                capture.editor.set_layer_time(0, (1.0, 2.0));
+                capture.editor.finish_settings_change();
+                let point = vec2(40.0, 40.0);
+                assert_eq!(capture.editor.get_visible_annotations().count(), 0);
+                assert_eq!(capture.get_annotation_at(point, window), None);
+                assert!(capture.editor.set_time(1.5));
+                assert!(!capture.editor.set_time(1.6));
+                assert_eq!(capture.editor.selected, Some(0));
+                assert_eq!(capture.editor.get_visible_annotations().count(), 1);
+                assert_eq!(capture.get_annotation_at(point, window), Some(0));
+                assert!(capture.editor.set_time(2.5));
+                assert_eq!(capture.editor.selected, None);
+                assert_eq!(capture.get_annotation_at(point, window), None);
+                capture.editor.undo_change();
+                assert_eq!(capture.editor.layers[0].time, None);
+                assert_eq!(capture.get_annotation_at(point, window), Some(0));
             })
             .unwrap();
     }

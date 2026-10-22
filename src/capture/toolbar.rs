@@ -5,7 +5,7 @@ use crate::{
         toolbar_layout::{self, ToolbarItem},
     },
     capture::{CaptureView, EditorAction, Mode, get_tool_family, layout},
-    editor::{BlurMode, TextAttribute, Tool},
+    editor::{BlurMode, Layer, TextAttribute, Tool},
     geometry::{Color, Rect},
     ui,
 };
@@ -107,7 +107,11 @@ const COLORS: [u32; 8] = [
 const LAYERS_PANEL_WIDTH: f32 = 176.0;
 const LAYER_ROW_HEIGHT: f32 = 24.0;
 
-fn get_tool_spec(tool: Tool) -> &'static ToolSpec {
+pub(super) fn get_layer_label(layer: &Layer) -> SharedString {
+    return format!("{} {}", get_tool_spec(layer.tool).label, layer.id).into();
+}
+
+pub(super) fn get_tool_spec(tool: Tool) -> &'static ToolSpec {
     return TOOLS.iter().find(|spec| spec.tool == tool).unwrap();
 }
 
@@ -713,8 +717,7 @@ impl CaptureView {
             .rev()
             .map(|(index, layer)| {
                 let id = layer.id;
-                let label: SharedString =
-                    format!("{} {}", get_tool_spec(layer.tool).label, id).into();
+                let label = get_layer_label(layer);
                 let drag_label = label.clone();
                 let drop_target = self.layer_drop_target;
                 let drag_entity = cx.entity();
@@ -846,7 +849,12 @@ impl CaptureView {
             );
     }
 
-    fn select_layer_by_id(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn select_layer_by_id(
+        &mut self,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.editor.commit_draft();
         self.editor.selected = self.editor.layers.iter().position(|layer| layer.id == id);
         self.editor.tool = Tool::Select;

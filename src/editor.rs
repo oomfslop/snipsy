@@ -95,6 +95,7 @@ impl Default for Annotation {
 pub struct Layer {
     pub id: u64,
     pub annotation: Annotation,
+    pub time: Option<(f64, f64)>,
 }
 impl std::ops::Deref for Layer {
     type Target = Annotation;
@@ -272,6 +273,7 @@ pub struct Editor {
     pub selected: Option<usize>,
     pub undo: Vec<Vec<Layer>>,
     pub redo: Vec<Vec<Layer>>,
+    pub time: f64,
     next_layer_id: u64,
     settings_history: Option<(u64, &'static str)>,
     pub filled: bool,
@@ -294,6 +296,7 @@ impl Editor {
             selected: None,
             undo: Vec::new(),
             redo: Vec::new(),
+            time: 0.0,
             next_layer_id: 1,
             settings_history: None,
             filled: false,
@@ -345,6 +348,7 @@ impl Editor {
             self.layers.push(Layer {
                 id: self.next_layer_id,
                 annotation: draft,
+                time: None,
             });
             self.next_layer_id += 1;
             index
@@ -399,19 +403,84 @@ impl Editor {
         self.selected = None;
     }
 
-    pub fn get_visible_annotations(&self) -> impl Iterator<Item = &Annotation> {
+    pub fn get_timed_annotations(&self) -> impl Iterator<Item = (&Annotation, Option<(f64, f64)>)> {
         return self
             .layers
             .iter()
             .enumerate()
             .map(|(index, layer)| {
-                if Some(index) == self.editing_index {
+                let annotation = if Some(index) == self.editing_index {
                     self.draft.as_ref().unwrap_or(&layer.annotation)
                 } else {
                     &layer.annotation
-                }
+                };
+                (annotation, layer.time)
             })
-            .chain(self.draft.iter().filter(|_| self.editing_index.is_none()));
+            .chain(
+                self.draft
+                    .iter()
+                    .filter(|_| self.editing_index.is_none())
+                    .map(|draft| (draft, None)),
+            );
+    }
+
+    pub fn get_visible_annotations(&self) -> impl Iterator<Item = &Annotation> {
+        return self
+            .get_timed_annotations()
+            .filter(|(_, range)| get_is_in_time_range(*range, self.time))
+            .map(|(annotation, _)| annotation);
+    }
+
+    pub fn get_is_layer_visible(&self, index: usize) -> bool {
+        return get_is_in_time_range(self.layers[index].time, self.time);
+    }
+
+    pub fn set_time(&mut self, time: f64) -> bool {
+        if time == self.time {
+            return false;
+        }
+        let previous = std::mem::replace(&mut self.time, time);
+        let changed = self.layers.iter().any(|layer| {
+            get_is_in_time_range(layer.time, previous) != get_is_in_time_range(layer.time, time)
+        });
+        if self
+            .selected
+            .is_some_and(|index| !self.get_is_layer_visible(index))
+        {
+            self.selected = None;
+            return true;
+        }
+        return changed;
+    }
+
+    pub fn map_layers(&mut self, from: Rect, to: Rect) {
+        let scale = to.size.x / from.size.x;
+        let map = |annotation: &mut Annotation| {
+            for point in &mut annotation.points {
+                *point = to.pos + (*point - from.pos) * scale;
+            }
+            annotation.width *= scale;
+            annotation.intensity *= scale;
+        };
+        for layers in std::iter::once(&mut self.layers)
+            .chain(&mut self.undo)
+            .chain(&mut self.redo)
+        {
+            layers.iter_mut().for_each(|layer| map(layer));
+        }
+        self.draft.iter_mut().for_each(map);
+    }
+
+    pub fn set_layer_time(&mut self, index: usize, time: (f64, f64)) {
+        if self.layers[index].time == Some(time) {
+            return;
+        }
+        let id = self.layers[index].id;
+        if self.settings_history != Some((id, "time")) {
+            self.record_change();
+        }
+        self.settings_history = Some((id, "time"));
+        self.layers[index].time = Some(time);
     }
 
     pub fn get_current_annotation(&self) -> Option<&Annotation> {
@@ -571,6 +640,10 @@ impl Editor {
             }
         });
     }
+}
+
+pub fn get_is_in_time_range(range: Option<(f64, f64)>, time: f64) -> bool {
+    return range.is_none_or(|(start, end)| (start..=end).contains(&time));
 }
 
 pub fn get_byte_offset(text: &str, utf16_offset: usize) -> usize {

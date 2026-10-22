@@ -89,7 +89,7 @@ Save and quick-save preserve animated GIF frames and timing. `P` enters frame se
 
 Click record in the capture toolbar to pick the codec, frame rate, and bitrate (remembered in `config.toml`), then press Record. Double-click the toolbar button to record with the last options. The region stays outlined on screen, and a stop button appears in the menu bar; pins and other windows are recorded.
 
-When it stops, the recording opens in an editor. Drag the timeline handles to trim, annotate with the capture tools (blurs apply to every frame, and resizing the selection crops), then export to MP4. Unexported recordings are discarded when the editor closes.
+When it stops, the recording opens in an editor. Drag the timeline handles to trim, annotate with the capture tools (resizing the selection crops), then export to MP4. Each annotation gets a bar under the timeline: drag its ends or body to show it only in that part of the video. Unexported recordings are discarded when the editor closes.
 
 | Action | Shortcut |
 | --- | --- |

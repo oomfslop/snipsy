@@ -268,45 +268,50 @@ fn get_blur_amount(annotation: &Annotation, scale: f32) -> f32 {
 }
 
 pub enum VideoEffect {
-    Overlay(RgbaImage),
+    Overlay {
+        image: RgbaImage,
+        time: Option<(f64, f64)>,
+    },
     Blur {
         rect: Rect,
         mode: BlurMode,
         amount: f32,
+        time: Option<(f64, f64)>,
     },
 }
 
-/// Mirrors `render_selection` for video frames: annotations between blurs are flattened into
-/// overlays, and blurs apply to everything composited below them.
+/// Mirrors `render_selection` for video frames: annotations between blurs that share a time
+/// range are flattened into overlays, and blurs apply to everything composited below them.
 pub fn create_video_effects<'a>(
     size: (u32, u32),
     canvas: Rect,
-    annotations: impl Iterator<Item = &'a Annotation>,
+    annotations: impl Iterator<Item = (&'a Annotation, Option<(f64, f64)>)>,
     fonts: &Arc<usvg::fontdb::Database>,
 ) -> Result<Vec<VideoEffect>> {
     let scale = glam::vec2(size.0 as f32, size.1 as f32) / canvas.size;
     let mut effects = Vec::new();
     let mut group = Vec::new();
-    let flush = |group: &mut Vec<&Annotation>, effects: &mut Vec<VideoEffect>| {
-        if group.is_empty() {
-            return anyhow::Ok(());
-        }
-        let image = RgbaImage::new(size.0, size.1);
-        effects.push(VideoEffect::Overlay(render_selection(
-            &image,
-            canvas,
-            canvas,
-            group.drain(..),
-            fonts,
-        )?));
-        return Ok(());
-    };
-    for annotation in annotations {
+    let mut group_time = None;
+    let flush =
+        |group: &mut Vec<&Annotation>, time: Option<(f64, f64)>, effects: &mut Vec<VideoEffect>| {
+            if group.is_empty() {
+                return anyhow::Ok(());
+            }
+            let image = RgbaImage::new(size.0, size.1);
+            let image = render_selection(&image, canvas, canvas, group.drain(..), fonts)?;
+            effects.push(VideoEffect::Overlay { image, time });
+            return Ok(());
+        };
+    for (annotation, time) in annotations {
         if annotation.tool != Tool::Mosaic {
+            if time != group_time {
+                flush(&mut group, group_time, &mut effects)?;
+                group_time = time;
+            }
             group.push(annotation);
             continue;
         }
-        flush(&mut group, &mut effects)?;
+        flush(&mut group, group_time, &mut effects)?;
         let (left, top, right, bottom) = get_mosaic_pixels(annotation, canvas.pos, scale, size);
         if right <= left || bottom <= top {
             continue;
@@ -318,9 +323,10 @@ pub fn create_video_effects<'a>(
             ),
             mode: annotation.blur_mode,
             amount: get_blur_amount(annotation, scale.x),
+            time,
         });
     }
-    flush(&mut group, &mut effects)?;
+    flush(&mut group, group_time, &mut effects)?;
     return Ok(effects);
 }
 
@@ -887,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn video_effects_flatten_annotations_between_blurs_in_video_pixels() {
+    fn video_effects_flatten_annotations_between_blurs_by_time_range_in_video_pixels() {
         let canvas = Rect {
             pos: vec2(10.0, 10.0),
             size: vec2(20.0, 10.0),
@@ -909,14 +915,33 @@ mod tests {
         let effects = create_video_effects(
             (40, 20),
             canvas,
-            [&rectangle, &mosaic, &rectangle].into_iter(),
+            [
+                (&rectangle, None),
+                (&rectangle, None),
+                (&mosaic, Some((1.0, 2.0))),
+                (&rectangle, None),
+                (&rectangle, Some((0.5, 1.0))),
+            ]
+            .into_iter(),
             &Arc::new(usvg::fontdb::Database::new()),
         )
         .unwrap();
         let [
-            VideoEffect::Overlay(overlay),
-            VideoEffect::Blur { rect, mode, amount },
-            VideoEffect::Overlay(_),
+            VideoEffect::Overlay {
+                image: overlay,
+                time: None,
+            },
+            VideoEffect::Blur {
+                rect,
+                mode,
+                amount,
+                time: Some((1.0, 2.0)),
+            },
+            VideoEffect::Overlay { time: None, .. },
+            VideoEffect::Overlay {
+                time: Some((0.5, 1.0)),
+                ..
+            },
         ] = effects.as_slice()
         else {
             panic!("unexpected effects");

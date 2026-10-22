@@ -1,6 +1,6 @@
 use crate::{
     app::recording::{RecordingSettings, VideoCodec},
-    editor::BlurMode,
+    editor::{self, BlurMode},
     geometry::{Color, Rect},
     raster::{self, CursorSnapshot, Screenshot, VideoEffect},
 };
@@ -25,12 +25,13 @@ use objc2_app_kit::{
 use objc2_av_foundation::{
     AVAsset, AVAssetExportPresetHEVCHighestQuality, AVAssetExportPresetHighestQuality,
     AVAssetExportPresetPassthrough, AVAssetExportSession, AVAssetExportSessionStatus,
-    AVAssetWriter, AVAssetWriterInput, AVAssetWriterStatus, AVAsynchronousCIImageFilteringRequest,
-    AVFileTypeMPEG4, AVMediaTypeVideo, AVMutableVideoComposition, AVPlayer,
-    AVPlayerActionAtItemEnd, AVPlayerItem, AVPlayerItemStatus, AVPlayerItemVideoOutput, AVURLAsset,
-    AVVideoAverageBitRateKey, AVVideoCodecKey, AVVideoCodecTypeH264, AVVideoCodecTypeHEVC,
-    AVVideoCompressionPropertiesKey, AVVideoExpectedSourceFrameRateKey, AVVideoHeightKey,
-    AVVideoMaxKeyFrameIntervalKey, AVVideoWidthKey,
+    AVAssetImageGenerator, AVAssetWriter, AVAssetWriterInput, AVAssetWriterStatus,
+    AVAsynchronousCIImageFilteringRequest, AVFileTypeMPEG4, AVMediaTypeVideo,
+    AVMutableVideoComposition, AVPlayer, AVPlayerActionAtItemEnd, AVPlayerItem, AVPlayerItemStatus,
+    AVPlayerItemVideoOutput, AVURLAsset, AVVideoAverageBitRateKey, AVVideoCodecKey,
+    AVVideoCodecTypeH264, AVVideoCodecTypeHEVC, AVVideoCompressionPropertiesKey,
+    AVVideoExpectedSourceFrameRateKey, AVVideoHeightKey, AVVideoMaxKeyFrameIntervalKey,
+    AVVideoWidthKey,
 };
 use objc2_core_foundation::{
     CFDictionary, CFNumber, CFRetained, CFString, CFType, CGAffineTransform, CGPoint, CGRect,
@@ -52,9 +53,9 @@ use objc2_core_video::{
     kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
 };
 use objc2_foundation::{
-    NSArray, NSData, NSDictionary, NSError, NSFileManager, NSNumber, NSObject, NSObjectProtocol,
-    NSOperationQueue, NSPoint, NSRect, NSSearchPathDirectory, NSSearchPathDomainMask, NSSize,
-    NSString, NSURL,
+    NSArray, NSData, NSDate, NSDateFormatter, NSDictionary, NSError, NSFileManager, NSNumber,
+    NSObject, NSObjectProtocol, NSOperationQueue, NSPoint, NSRect, NSSearchPathDirectory,
+    NSSearchPathDomainMask, NSSize, NSString, NSURL,
 };
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCFrameStatus, SCScreenshotManager, SCShareableContent, SCStream,
@@ -511,20 +512,34 @@ pub fn prompt_save_image(suggested_name: &str) -> Receiver<Result<Option<PathBuf
         .into_iter()
         .filter_map(|extension| UTType::typeWithFilenameExtension(&NSString::from_str(extension)))
         .collect::<Vec<_>>();
-    return prompt_save(suggested_name, &NSArray::from_retained_slice(&types));
+    return prompt_save(suggested_name, &NSArray::from_retained_slice(&types), None);
 }
 
 pub fn prompt_save_video() -> Receiver<Result<Option<PathBuf>>> {
     // SAFETY: UniformTypeIdentifiers provides this constant on every supported macOS version.
     let movie = unsafe { UTTypeMPEG4Movie };
-    return prompt_save("Snipsy Recording.mp4", &NSArray::from_slice(&[movie]));
+    let formatter = NSDateFormatter::new();
+    formatter.setDateFormat(Some(&NSString::from_str("yyyy-MM-dd 'at' HH.mm.ss")));
+    let name = format!(
+        "Snipsy Recording {}.mp4",
+        formatter.stringFromDate(&NSDate::now())
+    );
+    let directory = get_user_directory(NSSearchPathDirectory::DocumentDirectory, "Snipsy").ok();
+    return prompt_save(&name, &NSArray::from_slice(&[movie]), directory.as_deref());
 }
 
-fn prompt_save(suggested_name: &str, types: &NSArray<UTType>) -> Receiver<Result<Option<PathBuf>>> {
+fn prompt_save(
+    suggested_name: &str,
+    types: &NSArray<UTType>,
+    directory: Option<&Path>,
+) -> Receiver<Result<Option<PathBuf>>> {
     let (sender, receiver) = async_channel::bounded(1);
     let mtm = MainThreadMarker::new().expect("dialogs open on the main thread");
     let panel = NSSavePanel::savePanel(mtm);
     panel.setNameFieldStringValue(&NSString::from_str(suggested_name));
+    if let Some(url) = directory.and_then(NSURL::from_directory_path) {
+        panel.setDirectoryURL(Some(&url));
+    }
     panel.setCanCreateDirectories(true);
     panel.setAllowsOtherFileTypes(false);
     panel.setAllowedContentTypes(types);
@@ -670,6 +685,24 @@ pub fn get_cursor_snapshot() -> Option<CursorSnapshot> {
     let mut rect = NSRect::new(NSPoint::ZERO, NSSize::new(width as f64, height as f64));
     // SAFETY: `rect` is a valid in/out pointer; no context or hints are needed.
     let source = unsafe { image.CGImageForProposedRect_context_hints(&mut rect, None, None) }?;
+    let mut pixels = draw_cg_image(&source, width, height)?;
+    for pixel in pixels.pixels_mut() {
+        let alpha = pixel[3] as u32;
+        for channel in &mut pixel.0[..3] {
+            if let Some(straight) = (*channel as u32 * 255).checked_div(alpha) {
+                *channel = straight.min(255) as u8;
+            }
+        }
+    }
+    let hotspot = cursor.hotSpot();
+    return Some(CursorSnapshot {
+        image: pixels,
+        position: get_pointer_position() - vec2(hotspot.x as f32, hotspot.y as f32),
+        size,
+    });
+}
+
+fn draw_cg_image(source: &CGImage, width: u32, height: u32) -> Option<image::RgbaImage> {
     let mut pixels = image::RgbaImage::new(width, height);
     // SAFETY: kCGColorSpaceSRGB is always defined.
     let srgb = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))?;
@@ -688,23 +721,10 @@ pub fn get_cursor_snapshot() -> Option<CursorSnapshot> {
     CGContext::draw_image(
         Some(&context),
         CGRect::new(CGPoint::ZERO, CGSize::new(width as f64, height as f64)),
-        Some(&source),
+        Some(source),
     );
     drop(context);
-    for pixel in pixels.pixels_mut() {
-        let alpha = pixel[3] as u32;
-        for channel in &mut pixel.0[..3] {
-            if let Some(straight) = (*channel as u32 * 255).checked_div(alpha) {
-                *channel = straight.min(255) as u8;
-            }
-        }
-    }
-    let hotspot = cursor.hotSpot();
-    return Some(CursorSnapshot {
-        image: pixels,
-        position: get_pointer_position() - vec2(hotspot.x as f32, hotspot.y as f32),
-        size,
-    });
+    return Some(pixels);
 }
 
 pub fn get_window_id(window: &gpui_kit::Window) -> u32 {
@@ -1139,11 +1159,15 @@ pub fn stop_screen_recording(recorder: ScreenRecorder, sender: Sender<Result<Rec
 }
 
 enum CoreImageEffect {
-    Overlay(Retained<CIImage>),
+    Overlay {
+        image: Retained<CIImage>,
+        time: Option<(f64, f64)>,
+    },
     Blur {
         rect: Rect,
         mode: BlurMode,
         amount: f32,
+        time: Option<(f64, f64)>,
     },
 }
 
@@ -1160,7 +1184,7 @@ fn create_core_image_effects(effects: Vec<VideoEffect>) -> Vec<CoreImageEffect> 
     return effects
         .into_iter()
         .map(|effect| match effect {
-            VideoEffect::Overlay(mut image) => {
+            VideoEffect::Overlay { mut image, time } => {
                 raster::update_pixels(&mut image, |pixel| {
                     let alpha = pixel[3] as u32;
                     for channel in &mut pixel[..3] {
@@ -1170,7 +1194,7 @@ fn create_core_image_effects(effects: Vec<VideoEffect>) -> Vec<CoreImageEffect> 
                 let size = CGSize::new(image.width() as f64, image.height() as f64);
                 let data = NSData::with_bytes(&image);
                 // SAFETY: `data` holds premultiplied RGBA rows of `width * 4` bytes, which Core Image copies.
-                CoreImageEffect::Overlay(unsafe {
+                let overlay = unsafe {
                     CIImage::imageWithBitmapData_bytesPerRow_size_format_colorSpace(
                         &data,
                         image.width() as usize * 4,
@@ -1178,11 +1202,23 @@ fn create_core_image_effects(effects: Vec<VideoEffect>) -> Vec<CoreImageEffect> 
                         kCIFormatRGBA8,
                         srgb.as_deref(),
                     )
-                })
+                };
+                CoreImageEffect::Overlay {
+                    image: overlay,
+                    time,
+                }
             }
-            VideoEffect::Blur { rect, mode, amount } => {
-                CoreImageEffect::Blur { rect, mode, amount }
-            }
+            VideoEffect::Blur {
+                rect,
+                mode,
+                amount,
+                time,
+            } => CoreImageEffect::Blur {
+                rect,
+                mode,
+                amount,
+                time,
+            },
         })
         .collect();
 }
@@ -1191,6 +1227,7 @@ fn apply_video_effects(
     source: Retained<CIImage>,
     effects: &[CoreImageEffect],
     crop: Option<Rect>,
+    time: f64,
 ) -> Retained<CIImage> {
     // SAFETY: Core Image builds lazy, immutable filter graphs from valid images and parameters.
     unsafe {
@@ -1203,9 +1240,18 @@ fn apply_video_effects(
         };
         let mut image = source;
         for effect in effects {
+            let (CoreImageEffect::Overlay { time: range, .. }
+            | CoreImageEffect::Blur { time: range, .. }) = effect;
+            if !editor::get_is_in_time_range(*range, time) {
+                continue;
+            }
             image = match effect {
-                CoreImageEffect::Overlay(overlay) => overlay.imageByCompositingOverImage(&image),
-                CoreImageEffect::Blur { rect, mode, amount } => {
+                CoreImageEffect::Overlay { image: overlay, .. } => {
+                    overlay.imageByCompositingOverImage(&image)
+                }
+                CoreImageEffect::Blur {
+                    rect, mode, amount, ..
+                } => {
                     let rect = get_core_image_rect(*rect);
                     let clamped = image.imageByClampingToExtent();
                     let blurred = match mode {
@@ -1262,7 +1308,9 @@ fn create_video_composition(
                 // SAFETY: AVFoundation keeps the request alive until it is finished.
                 let request = unsafe { request.as_ref() };
                 let effects = effects.0.lock().expect("video effects poisoned");
-                let image = apply_video_effects(unsafe { request.sourceImage() }, &effects, crop);
+                let (source, time) =
+                    unsafe { (request.sourceImage(), request.compositionTime().seconds()) };
+                let image = apply_video_effects(source, &effects, crop, time);
                 unsafe { request.finishWithImage_context(&image, None) };
             });
         },
@@ -1442,6 +1490,52 @@ impl VideoPlayer {
         };
         self.seek(self.get_time() + nudge);
     }
+}
+
+pub struct VideoThumbnails(Retained<AVAssetImageGenerator>);
+
+impl Drop for VideoThumbnails {
+    fn drop(&mut self) {
+        // SAFETY: cancelling finished requests has no effect.
+        unsafe { self.0.cancelAllCGImageGeneration() };
+    }
+}
+
+pub fn generate_video_thumbnails(
+    path: &Path,
+    times: &[f64],
+    size: (u32, u32),
+    sender: Sender<(usize, image::RgbaImage)>,
+) -> Result<VideoThumbnails> {
+    let asset = open_video_asset(path)?;
+    // SAFETY: the generator is configured with plain values before any request.
+    let generator = unsafe {
+        let generator = AVAssetImageGenerator::assetImageGeneratorWithAsset(&asset);
+        generator.setAppliesPreferredTrackTransform(true);
+        generator.setMaximumSize(CGSize::new(size.0 as f64, size.1 as f64));
+        generator
+    };
+    for (index, time) in times.iter().enumerate() {
+        let sender = sender.clone();
+        let handler = RcBlock::new(move |image: *mut CGImage, _: CMTime, _: *mut NSError| {
+            // SAFETY: the image is valid for the duration of the handler when generation succeeded.
+            let Some(image) = (unsafe { image.as_ref() }) else {
+                return;
+            };
+            let (width, height) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
+            if let Some(pixels) = draw_cg_image(image, width as u32, height as u32) {
+                let _ = sender.try_send((index, pixels));
+            }
+        });
+        // SAFETY: the handler only touches the thread-safe sender.
+        unsafe {
+            generator.generateCGImageAsynchronouslyForTime_completionHandler(
+                get_media_time(*time),
+                &handler,
+            )
+        };
+    }
+    return Ok(VideoThumbnails(generator));
 }
 
 pub struct VideoExport(Retained<AVAssetExportSession>);
