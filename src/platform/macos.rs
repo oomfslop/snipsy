@@ -1,13 +1,14 @@
 use crate::{
     geometry::{Color, Rect},
-    raster::Screenshot,
+    raster::{self, Screenshot},
 };
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use async_channel::{Receiver, Sender};
 use block2::RcBlock;
 use glam::{Vec2, vec2};
 use objc2::{
-    AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message as _,
+    define_class, msg_send,
     rc::{Retained, autoreleasepool},
     runtime::{AnyObject, ProtocolObject},
     sel,
@@ -23,12 +24,15 @@ use objc2_av_foundation::{
     AVAssetWriter, AVAssetWriterInput, AVAssetWriterStatus, AVFileTypeMPEG4, AVMediaTypeVideo,
     AVVideoCodecKey, AVVideoCodecTypeH264, AVVideoHeightKey, AVVideoWidthKey,
 };
-use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{
+    CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
+};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGDisplayCopyColorSpace, CGError, CGImage,
     CGImageAlphaInfo, CGImageByteOrderInfo, CGPreflightScreenCaptureAccess,
-    CGRequestScreenCaptureAccess, CGWarpMouseCursorPosition, CGWindowListCopyWindowInfo,
-    CGWindowListOption, kCGColorSpaceSRGB, kCGWindowNumber,
+    CGRectMakeWithDictionaryRepresentation, CGRequestScreenCaptureAccess,
+    CGWarpMouseCursorPosition, CGWindowListCopyWindowInfo, CGWindowListOption, kCGColorSpaceSRGB,
+    kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer,
 };
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_foundation::{
@@ -46,7 +50,6 @@ use objc2_uniform_type_identifiers::{UTType, UTTypeMPEG4Movie};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     cell::Cell,
-    collections::HashMap,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -237,16 +240,6 @@ pub fn set_launches_at_login(enabled: bool) -> Result<()> {
     return Ok(());
 }
 
-pub fn get_capture_bounds() -> Result<Rect> {
-    if !CGPreflightScreenCaptureAccess() {
-        CGRequestScreenCaptureAccess();
-        bail!(
-            "Enable Screen Recording for Snipsy (or its terminal) in System Settings, then capture again."
-        );
-    }
-    return get_desktop_bounds();
-}
-
 fn get_primary_screen_height(mtm: MainThreadMarker) -> f32 {
     return NSScreen::screens(mtm)
         .firstObject()
@@ -407,6 +400,8 @@ pub fn configure_overlay(window: &gpui_kit::Window, bounds: Rect, resizable: boo
         view.addTrackingArea(&tracking);
     }
     native.setHasShadow(false);
+    // AppKit passes clicks through fully transparent pixels unless this is set explicitly.
+    native.setIgnoresMouseEvents(false);
     native.setHidesOnDeactivate(false);
     native.setLevel(NSPopUpMenuWindowLevel);
     native.setCollectionBehavior(
@@ -555,7 +550,14 @@ fn with_shareable_content(
             autoreleasepool(|_| {
                 // SAFETY: ScreenCaptureKit keeps callback arguments alive for this invocation.
                 let Some(content) = (unsafe { content.as_ref() }) else {
-                    callback(Err(get_ns_error(error, "Could not enumerate displays")));
+                    callback(Err(if CGPreflightScreenCaptureAccess() {
+                        get_ns_error(error, "Could not enumerate displays")
+                    } else {
+                        CGRequestScreenCaptureAccess();
+                        anyhow!(
+                            "Enable Screen Recording for Snipsy (or its terminal) in System Settings, then capture again."
+                        )
+                    }));
                     return;
                 };
                 // SAFETY: SCShareableContent getters are valid for the content's lifetime.
@@ -589,161 +591,233 @@ fn create_display_filter(
     };
 }
 
-fn get_window_stacking_order() -> HashMap<u32, usize> {
-    return CGWindowListCopyWindowInfo(CGWindowListOption::OptionOnScreenOnly, 0)
-        .map(|info| {
-            // SAFETY: CGWindowListCopyWindowInfo returns CFString-keyed dictionaries of CFType values.
-            unsafe { info.cast_unchecked::<CFDictionary<CFString, CFType>>() }
-                .to_vec()
-                .into_iter()
-                .filter_map(|item| {
-                    // SAFETY: kCGWindowNumber is a valid CFString constant.
-                    return item
-                        .get(unsafe { kCGWindowNumber })?
-                        .downcast::<CFNumber>()
-                        .ok()?
-                        .as_i64();
-                })
-                .enumerate()
-                .map(|(index, id)| (id as u32, index))
-                .collect()
-        })
-        .unwrap_or_default();
-}
-
-fn get_capture_windows(
-    content: &SCShareableContent,
-    bounds: Rect,
-    excluded: &NSArray<SCWindow>,
-) -> Vec<Rect> {
-    let order = get_window_stacking_order();
-    // SAFETY: SCWindow getters are plain property reads on valid objects.
-    let excluded = excluded
-        .iter()
-        .map(|window| unsafe { window.windowID() })
-        .collect::<Vec<_>>();
-    // SAFETY: SCWindow getters are plain property reads on valid objects.
-    let mut windows = unsafe { content.windows() }
-        .iter()
-        .filter(|window| unsafe { window.isOnScreen() && window.windowLayer() == 0 })
-        .filter(|window| !excluded.contains(&unsafe { window.windowID() }))
+pub fn get_capture_windows(bounds: Rect) -> Vec<Rect> {
+    let Some(info) = CGWindowListCopyWindowInfo(
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+        0,
+    ) else {
+        return Vec::new();
+    };
+    // SAFETY: CGWindowListCopyWindowInfo returns CFString-keyed dictionaries of CFType values, front to back.
+    return unsafe { info.cast_unchecked::<CFDictionary<CFString, CFType>>() }
+        .to_vec()
+        .into_iter()
         .filter_map(|window| {
-            let frame = get_rect(unsafe { window.frame() });
+            let number = |key: &CFString| window.get(key)?.downcast::<CFNumber>().ok();
+            // SAFETY: the window info keys are valid CFString constants.
+            let (layer, alpha, frame) = unsafe {
+                (
+                    number(kCGWindowLayer)?.as_i64()?,
+                    number(kCGWindowAlpha)?.as_f64()?,
+                    window
+                        .get(kCGWindowBounds)?
+                        .downcast::<CFDictionary>()
+                        .ok()?,
+                )
+            };
+            if layer != 0 || alpha <= 0.0 {
+                return None;
+            }
+            let mut rect = CGRect::ZERO;
+            // SAFETY: `frame` is the bounds dictionary CoreGraphics produced and `rect` is a valid out pointer.
+            if !unsafe { CGRectMakeWithDictionaryRepresentation(Some(&frame), &mut rect) } {
+                return None;
+            }
+            let frame = get_rect(rect);
             let min = frame.pos.max(bounds.pos);
             let max = frame.end().min(bounds.end());
-            ((max - min).min_element() >= 2.0).then(|| {
-                (
-                    unsafe { window.windowID() },
-                    Rect::from_corners(min - bounds.pos, max - bounds.pos),
-                )
-            })
+            return ((max - min).min_element() >= 2.0)
+                .then(|| Rect::from_corners(min - bounds.pos, max - bounds.pos));
         })
-        .collect::<Vec<_>>();
-    windows.sort_by_key(|(id, _)| order.get(id).copied().unwrap_or(usize::MAX));
-    return windows.into_iter().map(|(_, rect)| rect).collect();
+        .collect();
 }
 
 struct DisplayCapture {
     bounds: Rect,
-    image: image::RgbaImage,
+    image: CFRetained<CGImage>,
+    color_space: CFRetained<CGColorSpace>,
 }
 
-pub fn capture_screen(bounds: Rect, shows_cursor: bool, sender: Sender<Result<Screenshot>>) {
-    with_shareable_content(move |result| {
-        let result = result.and_then(|(content, excluded)| {
-            // SAFETY: SCShareableContent getters are valid for the content's lifetime.
-            let displays = unsafe { content.displays() };
-            let display_bounds = displays
-                .iter()
-                .map(|display| get_rect(unsafe { display.frame() }))
-                .collect::<Vec<_>>();
-            ensure!(
-                display_bounds.iter().copied().reduce(Rect::union) == Some(bounds),
-                "Display configuration changed; capture again"
-            );
-            let captures = displays
-                .iter()
-                .zip(display_bounds)
-                .map(|(display, display_bounds)| {
-                    let filter = create_display_filter(&display, &excluded);
-                    // SAFETY: plain property access and setters on valid objects.
-                    let (scale, config, display_space) = unsafe {
-                        let scale = filter.pointPixelScale();
-                        let display_space = CGDisplayCopyColorSpace(display.displayID());
-                        let config = SCStreamConfiguration::new();
-                        config.setWidth((display_bounds.size.x * scale).round() as usize);
-                        config.setHeight((display_bounds.size.y * scale).round() as usize);
-                        config.setShowsCursor(shows_cursor);
-                        (scale, config, display_space)
-                    };
-                    (filter, config, display_space, display_bounds, scale)
-                })
-                .collect::<Vec<_>>();
-            ensure!(!captures.is_empty(), "No display available");
-            return Ok((captures, get_capture_windows(content, bounds, &excluded)));
-        });
-        let (captures, windows) = match result {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                let _ = sender.try_send(Err(error));
-                return;
-            }
-        };
-        let scale = captures
+struct ShareableContent(Retained<SCShareableContent>);
+
+// SAFETY: SCShareableContent is an immutable snapshot that ScreenCaptureKit itself hands to arbitrary queues.
+unsafe impl Send for ShareableContent {}
+unsafe impl Sync for ShareableContent {}
+
+impl ShareableContent {
+    fn get_display_bounds(&self) -> Option<Rect> {
+        // SAFETY: SCShareableContent getters are plain property reads on a valid snapshot.
+        return unsafe { self.0.displays() }
             .iter()
-            .map(|(_, _, _, _, scale)| *scale)
-            .fold(1.0, f32::max);
-        let total = captures.len();
-        let pending = Arc::new(Mutex::new(Some(Vec::with_capacity(total))));
-        for (filter, config, display_space, display_bounds, _) in captures {
-            let pending = pending.clone();
-            let sender = sender.clone();
-            let windows = windows.clone();
-            let block = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
-                autoreleasepool(|_| {
-                    // SAFETY: callback pointers are valid until this invocation returns.
-                    let image = match unsafe { image.as_ref() } {
-                        Some(image) => convert_capture_to_srgb(image, &display_space),
-                        None => Err(get_ns_error(error, "Screen capture failed")),
-                    };
-                    let mut pending = pending.lock().expect("capture state poisoned");
-                    let Some(images) = pending.as_mut() else {
-                        return;
-                    };
-                    match image {
-                        Ok(image) => images.push(DisplayCapture {
-                            bounds: display_bounds,
-                            image,
-                        }),
-                        Err(error) => {
-                            *pending = None;
-                            let _ = sender.try_send(Err(error));
-                            return;
-                        }
-                    }
-                    if images.len() < total {
-                        return;
-                    }
-                    let images = pending.take().unwrap();
-                    let result =
-                        stitch_capture_images(bounds, images, scale).map(|image| Screenshot {
-                            image: Arc::new(image),
-                            bounds,
-                            windows: windows.clone(),
-                        });
-                    let _ = sender.try_send(result);
-                });
+            .map(|display| get_rect(unsafe { display.frame() }))
+            .reduce(Rect::union);
+    }
+
+    fn get_window(&self, id: u32) -> Option<Retained<SCWindow>> {
+        // SAFETY: SCShareableContent getters are plain property reads on a valid snapshot.
+        return unsafe { self.0.windows() }
+            .iter()
+            .find(|window| unsafe { window.windowID() } == id);
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct CaptureSource(Arc<Mutex<Option<Arc<ShareableContent>>>>);
+
+fn load_shareable_content(callback: impl Fn(Result<Arc<ShareableContent>>) + 'static) {
+    let block = RcBlock::new(
+        move |content: *mut SCShareableContent, error: *mut NSError| {
+            // SAFETY: ScreenCaptureKit keeps callback arguments alive for this invocation.
+            callback(match unsafe { content.as_ref() } {
+                Some(content) => Ok(Arc::new(ShareableContent(content.retain()))),
+                None if CGPreflightScreenCaptureAccess() => {
+                    Err(get_ns_error(error, "Could not enumerate displays"))
+                }
+                None => {
+                    CGRequestScreenCaptureAccess();
+                    Err(anyhow!(
+                        "Enable Screen Recording for Snipsy (or its terminal) in System Settings, then capture again."
+                    ))
+                }
             });
-            // SAFETY: the framework copies the completion block; filter and config live through this call.
-            unsafe {
-                SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
-                    &filter,
-                    &config,
-                    Some(&block),
-                );
+        },
+    );
+    // SAFETY: the framework copies the completion block and invokes it with valid borrowed arguments.
+    unsafe {
+        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
+            true, false, &block,
+        );
+    }
+}
+
+pub fn get_window_id(window: &gpui_kit::Window) -> u32 {
+    return u32::try_from(get_native_window(window).windowNumber()).unwrap_or_default();
+}
+
+pub fn capture_screen(
+    source: &CaptureSource,
+    overlay: u32,
+    bounds: Rect,
+    shows_cursor: bool,
+    windows: Vec<Rect>,
+    sender: Sender<Result<Screenshot>>,
+) {
+    let cached = source.0.lock().expect("capture source poisoned").clone();
+    let source = source.clone();
+    if let Some(content) = cached.filter(|content| {
+        content.get_display_bounds() == Some(bounds) && content.get_window(overlay).is_some()
+    }) {
+        capture_displays(&content, overlay, bounds, shows_cursor, windows, sender);
+        load_shareable_content(move |result| {
+            if let Ok(content) = result {
+                *source.0.lock().expect("capture source poisoned") = Some(content);
             }
+        });
+        return;
+    }
+    load_shareable_content(move |result| match result {
+        Ok(content) => {
+            *source.0.lock().expect("capture source poisoned") = Some(content.clone());
+            capture_displays(
+                &content,
+                overlay,
+                bounds,
+                shows_cursor,
+                windows.clone(),
+                sender.clone(),
+            );
+        }
+        Err(error) => {
+            let _ = sender.try_send(Err(error));
         }
     });
+}
+
+fn capture_displays(
+    content: &ShareableContent,
+    overlay: u32,
+    bounds: Rect,
+    shows_cursor: bool,
+    windows: Vec<Rect>,
+    sender: Sender<Result<Screenshot>>,
+) {
+    let prepared = (|| {
+        ensure!(
+            content.get_display_bounds() == Some(bounds),
+            "Display configuration changed; capture again"
+        );
+        let overlay = content
+            .get_window(overlay)
+            .context("Could not exclude the capture overlay from the screenshot")?;
+        let excluded = NSArray::from_retained_slice(&[overlay]);
+        // SAFETY: SCShareableContent getters are plain property reads on a valid snapshot.
+        let captures = unsafe { content.0.displays() }
+            .iter()
+            .map(|display| {
+                let display_bounds = get_rect(unsafe { display.frame() });
+                let filter = create_display_filter(&display, &excluded);
+                // SAFETY: plain property access and setters on valid objects.
+                let (scale, config, display_space) = unsafe {
+                    let scale = filter.pointPixelScale();
+                    let config = SCStreamConfiguration::new();
+                    config.setWidth((display_bounds.size.x * scale).round() as usize);
+                    config.setHeight((display_bounds.size.y * scale).round() as usize);
+                    config.setShowsCursor(shows_cursor);
+                    (scale, config, CGDisplayCopyColorSpace(display.displayID()))
+                };
+                (filter, config, display_space, display_bounds, scale)
+            })
+            .collect::<Vec<_>>();
+        ensure!(!captures.is_empty(), "No display available");
+        return Ok(captures);
+    })();
+    let captures = match prepared {
+        Ok(captures) => captures,
+        Err(error) => {
+            let _ = sender.try_send(Err(error));
+            return;
+        }
+    };
+    let scale = captures
+        .iter()
+        .map(|(_, _, _, _, scale)| *scale)
+        .fold(1.0, f32::max);
+    let total = captures.len();
+    let (displays, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result =
+            stitch_capture_images(bounds, scale, received.iter().take(total), total).map(|image| {
+                Screenshot {
+                    image: Arc::new(image),
+                    bounds,
+                    windows,
+                }
+            });
+        let _ = sender.try_send(result);
+    });
+    for (filter, config, display_space, display_bounds, _) in captures {
+        let displays = displays.clone();
+        let block = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
+            // SAFETY: callback pointers are valid until this invocation returns.
+            let capture = match unsafe { image.as_ref() } {
+                Some(image) => Ok(DisplayCapture {
+                    bounds: display_bounds,
+                    image: objc2_core_foundation::Type::retain(image),
+                    color_space: display_space.clone(),
+                }),
+                None => Err(get_ns_error(error, "Screen capture failed")),
+            };
+            let _ = displays.send(capture);
+        });
+        // SAFETY: the framework copies the completion block; filter and config live through this call.
+        unsafe {
+            SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+                &filter,
+                &config,
+                Some(&block),
+            );
+        }
+    }
 }
 
 struct RecordingOutputIvars {
@@ -1054,38 +1128,106 @@ fn save_recording(
 
 fn stitch_capture_images(
     bounds: Rect,
-    captures: Vec<DisplayCapture>,
     scale: f32,
+    captures: impl Iterator<Item = Result<DisplayCapture>>,
+    total: usize,
 ) -> Result<image::RgbaImage> {
     let (width, height) = get_scaled_size(bounds.size, scale)?;
-    let mut output = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
+    let mut output = image::RgbaImage::new(width, height);
+    let mut drawn = 0;
     for capture in captures {
+        let capture = capture?;
         let size = get_scaled_size(capture.bounds.size, scale)?;
-        let image = if capture.image.dimensions() == size {
-            capture.image
-        } else {
-            image::imageops::resize(
-                &capture.image,
-                size.0,
-                size.1,
-                image::imageops::FilterType::Triangle,
-            )
-        };
-        let offset = (capture.bounds.pos - bounds.pos) * scale;
+        let offset = ((capture.bounds.pos - bounds.pos) * scale).round();
         ensure!(
             offset.min_element() >= 0.0
                 && offset.x + size.0 as f32 <= width as f32
                 && offset.y + size.1 as f32 <= height as f32,
             "Display capture lies outside desktop bounds"
         );
-        image::imageops::replace(
-            &mut output,
-            &image,
-            offset.x.round() as i64,
-            offset.y.round() as i64,
-        );
+        let image =
+            CGImage::new_copy_with_color_space(Some(&capture.image), Some(&capture.color_space))
+                .context("Could not tag screen image with the display color space")?;
+        let stride = width as usize * 4;
+        let top = offset.y as usize * stride;
+        let rows = &mut (*output)[top..top + size.1 as usize * stride];
+        draw_display_rows(rows, width, &image, offset.x, size)?;
+        drawn += 1;
     }
+    ensure!(drawn == total, "Screen capture failed");
+    raster::update_pixels(&mut output, |pixel| pixel[3] = 255);
     return Ok(output);
+}
+
+/// ColorSync converts on one thread per draw, so same-sized captures are split into row bands
+/// converted in parallel. Scaled captures stay whole because resampling would seam at band edges.
+fn draw_display_rows(
+    rows: &mut [u8],
+    width: u32,
+    image: &CGImage,
+    left: f32,
+    size: (u32, u32),
+) -> Result<()> {
+    let stride = width as usize * 4;
+    let same_size = (CGImage::width(Some(image)), CGImage::height(Some(image)))
+        == (size.0 as usize, size.1 as usize);
+    let bands = if same_size {
+        std::thread::available_parallelism().map_or(1, |count| count.get())
+    } else {
+        1
+    };
+    let band_rows = (size.1 as usize).div_ceil(bands).max(1);
+    return std::thread::scope(|scope| {
+        let tasks = rows
+            .chunks_mut(band_rows * stride)
+            .enumerate()
+            .map(|(index, band)| {
+                scope.spawn(move || {
+                    let height = band.len() / stride;
+                    let source = if same_size {
+                        CGImage::with_image_in_rect(
+                            Some(image),
+                            CGRect::new(
+                                CGPoint::new(0.0, (index * band_rows) as f64),
+                                CGSize::new(size.0 as f64, height as f64),
+                            ),
+                        )
+                        .context("Could not split the screen image")?
+                    } else {
+                        objc2_core_foundation::Type::retain(image)
+                    };
+                    // SAFETY: kCGColorSpaceSRGB is always defined.
+                    let srgb = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))
+                        .context("sRGB color space is unavailable")?;
+                    // SAFETY: the context draws into `band`, which outlives it and has `stride` byte rows.
+                    let context = unsafe {
+                        CGBitmapContextCreate(
+                            band.as_mut_ptr().cast(),
+                            width as usize,
+                            height,
+                            8,
+                            stride,
+                            Some(&srgb),
+                            CGImageAlphaInfo::NoneSkipLast.0 | CGImageByteOrderInfo::Order32Big.0,
+                        )
+                    }
+                    .context("Could not convert screen image to sRGB")?;
+                    CGContext::draw_image(
+                        Some(&context),
+                        CGRect::new(
+                            CGPoint::new(left as f64, 0.0),
+                            CGSize::new(size.0 as f64, height as f64),
+                        ),
+                        Some(&source),
+                    );
+                    return anyhow::Ok(());
+                })
+            })
+            .collect::<Vec<_>>();
+        return tasks
+            .into_iter()
+            .try_for_each(|task| task.join().expect("capture conversion panicked"));
+    });
 }
 
 fn get_scaled_size(size: Vec2, scale: f32) -> Result<(u32, u32)> {
@@ -1118,55 +1260,18 @@ fn get_recording_size(size: Vec2, scale: f32) -> Result<(usize, usize)> {
 
 /// ScreenCaptureKit's own sRGB conversion is off by a level or two in dark tones, so captures
 /// stay in the display's color space and ColorSync converts them.
-fn convert_capture_to_srgb(
-    image: &CGImage,
-    display_space: &CGColorSpace,
-) -> Result<image::RgbaImage> {
-    let width = CGImage::width(Some(image));
-    let height = CGImage::height(Some(image));
-    let mut pixels = image::RgbaImage::new(u32::try_from(width)?, u32::try_from(height)?);
-    let image = CGImage::new_copy_with_color_space(Some(image), Some(display_space))
-        .context("Could not tag screen image with the display color space")?;
-    // SAFETY: kCGColorSpaceSRGB is always defined.
-    let srgb = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))
-        .context("sRGB color space is unavailable")?;
-    // SAFETY: the context draws into `pixels`, which outlives it and has `width * 4` byte rows.
-    let context = unsafe {
-        CGBitmapContextCreate(
-            pixels.as_mut_ptr().cast(),
-            width,
-            height,
-            8,
-            width * 4,
-            Some(&srgb),
-            CGImageAlphaInfo::NoneSkipLast.0 | CGImageByteOrderInfo::Order32Big.0,
-        )
-    }
-    .context("Could not convert screen image to sRGB")?;
-    CGContext::draw_image(
-        Some(&context),
-        CGRect::new(CGPoint::ZERO, CGSize::new(width as f64, height as f64)),
-        Some(&image),
-    );
-    drop(context);
-    for pixel in pixels.pixels_mut() {
-        pixel[3] = 255;
-    }
-    return Ok(pixels);
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIVE_COLOR_PICKER_TARGET, DisplayCapture, convert_capture_to_srgb, get_recording_region,
-        get_recording_size, get_scaled_size, is_complete_recording_frame,
-        release_color_picker_target, save_recording, set_srgb_colorspace, stitch_capture_images,
+        ACTIVE_COLOR_PICKER_TARGET, DisplayCapture, get_recording_region, get_recording_size,
+        get_scaled_size, is_complete_recording_frame, release_color_picker_target, save_recording,
+        set_srgb_colorspace, stitch_capture_images,
     };
     use crate::geometry::Rect;
     use glam::vec2;
     use image::{Rgba, RgbaImage};
     use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
-    use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType};
+    use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
     use objc2_core_graphics::{
         CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImageAlphaInfo,
         CGImageByteOrderInfo, kCGColorSpaceDisplayP3, kCGColorSpaceSRGB,
@@ -1174,26 +1279,89 @@ mod tests {
     use objc2_foundation::NSObject;
     use objc2_screen_capture_kit::{SCFrameStatus, SCStreamFrameInfoStatus};
 
-    #[test]
-    fn capture_converts_display_colors_to_srgb() {
-        let mut pixel = [30u8, 30, 45, 255];
+    fn create_display_capture(
+        bounds: Rect,
+        size: (usize, usize),
+        pixel: [u8; 4],
+        color_space: CFRetained<CGColorSpace>,
+    ) -> DisplayCapture {
+        let pixels = RgbaImage::from_pixel(size.0 as u32, size.1 as u32, Rgba(pixel));
+        return create_display_capture_from(bounds, pixels, color_space);
+    }
+
+    fn create_display_capture_from(
+        bounds: Rect,
+        mut pixels: RgbaImage,
+        color_space: CFRetained<CGColorSpace>,
+    ) -> DisplayCapture {
+        let size = (pixels.width() as usize, pixels.height() as usize);
         let device = CGColorSpace::new_device_rgb().unwrap();
-        // SAFETY: the context draws into `pixel`, which outlives it and holds one RGBA pixel.
+        // SAFETY: the context draws into `pixels`, which outlives it and has `width * 4` byte rows.
         let context = unsafe {
             CGBitmapContextCreate(
-                pixel.as_mut_ptr().cast(),
-                1,
-                1,
+                pixels.as_mut_ptr().cast(),
+                size.0,
+                size.1,
                 8,
-                4,
+                size.0 * 4,
                 Some(&device),
                 CGImageAlphaInfo::NoneSkipLast.0 | CGImageByteOrderInfo::Order32Big.0,
             )
         }
         .unwrap();
-        let image = CGBitmapContextCreateImage(Some(&context)).unwrap();
+        return DisplayCapture {
+            bounds,
+            image: CGBitmapContextCreateImage(Some(&context)).unwrap(),
+            color_space,
+        };
+    }
+
+    fn get_srgb() -> CFRetained<CGColorSpace> {
+        return CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })).unwrap();
+    }
+
+    #[test]
+    fn parallel_conversion_keeps_every_row_in_place() {
+        let bounds = Rect {
+            pos: vec2(0.0, 0.0),
+            size: vec2(64.0, 97.0),
+        };
+        let pixels = RgbaImage::from_fn(128, 194, |x, y| Rgba([y as u8, x as u8, 7, 255]));
+        let image = stitch_capture_images(
+            bounds,
+            2.0,
+            [Ok(create_display_capture_from(
+                bounds,
+                pixels.clone(),
+                get_srgb(),
+            ))]
+            .into_iter(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(image, pixels);
+    }
+
+    #[test]
+    fn capture_converts_display_colors_to_srgb() {
+        let bounds = Rect {
+            pos: vec2(0.0, 0.0),
+            size: vec2(1.0, 1.0),
+        };
         let display_p3 = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceDisplayP3 })).unwrap();
-        let converted = convert_capture_to_srgb(&image, &display_p3).unwrap();
+        let converted = stitch_capture_images(
+            bounds,
+            1.0,
+            [Ok(create_display_capture(
+                bounds,
+                (1, 1),
+                [30, 30, 45, 255],
+                display_p3,
+            ))]
+            .into_iter(),
+            1,
+        )
+        .unwrap();
         assert_eq!(converted.get_pixel(0, 0).0, [30, 30, 46, 255]);
     }
 
@@ -1308,23 +1476,69 @@ mod tests {
         };
         let image = stitch_capture_images(
             left.union(right),
-            vec![
-                DisplayCapture {
-                    bounds: left,
-                    image: RgbaImage::from_pixel(100, 100, Rgba([255, 0, 0, 255])),
-                },
-                DisplayCapture {
-                    bounds: right,
-                    image: RgbaImage::from_pixel(200, 200, Rgba([0, 0, 255, 255])),
-                },
-            ],
             2.0,
+            [
+                Ok(create_display_capture(
+                    left,
+                    (100, 100),
+                    [255, 0, 0, 255],
+                    get_srgb(),
+                )),
+                Ok(create_display_capture(
+                    right,
+                    (200, 200),
+                    [0, 0, 255, 255],
+                    get_srgb(),
+                )),
+            ]
+            .into_iter(),
+            2,
         )
         .unwrap();
         assert_eq!(image.dimensions(), (600, 200));
         assert_eq!(image.get_pixel(100, 100).0, [255, 0, 0, 255]);
         assert_eq!(image.get_pixel(300, 100).0, [0, 0, 0, 255]);
         assert_eq!(image.get_pixel(500, 100).0, [0, 0, 255, 255]);
+
+        let top = Rect {
+            pos: vec2(0.0, 0.0),
+            size: vec2(100.0, 50.0),
+        };
+        let bottom = Rect {
+            pos: vec2(50.0, 50.0),
+            size: vec2(50.0, 50.0),
+        };
+        let image = stitch_capture_images(
+            top.union(bottom),
+            1.0,
+            [
+                Ok(create_display_capture(
+                    top,
+                    (100, 50),
+                    [255, 0, 0, 255],
+                    get_srgb(),
+                )),
+                Ok(create_display_capture(
+                    bottom,
+                    (50, 50),
+                    [0, 255, 0, 255],
+                    get_srgb(),
+                )),
+            ]
+            .into_iter(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(image.get_pixel(10, 10).0, [255, 0, 0, 255]);
+        assert_eq!(image.get_pixel(10, 90).0, [0, 0, 0, 255]);
+        assert_eq!(image.get_pixel(90, 90).0, [0, 255, 0, 255]);
+        let missing = [Ok(create_display_capture(
+            top,
+            (100, 50),
+            [255, 0, 0, 255],
+            get_srgb(),
+        ))];
+        assert!(stitch_capture_images(top.union(bottom), 1.0, missing.into_iter(), 2).is_err());
         assert!(get_scaled_size(vec2(f32::MAX, 100.0), 2.0).is_err());
         assert!(get_scaled_size(vec2(100.0, 100.0), f32::NAN).is_err());
     }

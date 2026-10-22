@@ -28,6 +28,7 @@ use text::TextCursor;
 
 #[derive(Default)]
 struct Captures {
+    source: platform::CaptureSource,
     active: Option<View<CaptureView>>,
     cache: Option<View<CaptureView>>,
     pin_editor: Option<View<CaptureView>>,
@@ -49,22 +50,28 @@ pub fn start(cx: &mut App) {
         }
         cx.global_mut::<Captures>().active = None;
     }
-    let bounds = match platform::get_capture_bounds() {
+    let bounds = match platform::get_desktop_bounds() {
         Ok(bounds) => bounds,
         Err(error) => return app::show_error(error),
     };
-    let (sender, receiver) = async_channel::bounded(1);
-    platform::capture_screen(bounds, cx.global::<AppState>().capture_cursor, sender);
-    let capture = cx.background_executor().spawn(async move {
-        let screenshot = receiver.recv().await??;
-        let background = raster::create_render_image(&screenshot.image);
-        return anyhow::Ok((screenshot, background));
-    });
+    let windows = platform::get_capture_windows(bounds);
     let view = match show_overlay(bounds, Mode::Capture, None, cx) {
         Ok(view) => view,
         Err(error) => return app::show_error(error),
     };
     let _ = view.update(cx, |view, window, cx| {
+        view.windows = windows.clone();
+        view.activate(window, cx);
+        let (sender, receiver) = async_channel::bounded(1);
+        let shows_cursor = cx.global::<AppState>().capture_cursor;
+        let source = &cx.global::<Captures>().source;
+        let overlay = platform::get_window_id(window);
+        platform::capture_screen(source, overlay, bounds, shows_cursor, windows, sender);
+        let capture = cx.background_executor().spawn(async move {
+            let screenshot = receiver.recv().await??;
+            let background = raster::create_render_image(&screenshot.image);
+            return anyhow::Ok((screenshot, background));
+        });
         view.load_capture(capture, window, cx)
     });
 }
@@ -267,6 +274,7 @@ struct CaptureView {
     mode: Mode,
     bounds: Rect,
     screenshot: Option<Screenshot>,
+    windows: Vec<Rect>,
     background: Option<Arc<RenderImage>>,
     raster_preview: RasterPreview,
     selection: Option<Rect>,
@@ -320,6 +328,7 @@ impl CaptureView {
             mode,
             bounds,
             screenshot: None,
+            windows: Vec::new(),
             background: None,
             raster_preview: RasterPreview::default(),
             selection: None,
@@ -362,6 +371,7 @@ impl CaptureView {
     }
 
     fn set_screenshot(&mut self, screenshot: Screenshot) {
+        self.windows = screenshot.windows.clone();
         self.background = Some(raster::create_render_image(&screenshot.image));
         self.screenshot = Some(screenshot);
     }
@@ -386,9 +396,6 @@ impl CaptureView {
     }
 
     fn activate(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.screenshot.is_none() {
-            return;
-        }
         platform::make_key_window(window);
         cx.activate(true);
         window.activate_window();
@@ -526,13 +533,11 @@ impl CaptureView {
         if self.selection.is_some() || self.drag.is_some() {
             return None;
         }
-        return self.screenshot.as_ref().and_then(|screenshot| {
-            screenshot
-                .windows
-                .iter()
-                .find(|rect| rect.contains(self.pointer))
-                .copied()
-        });
+        return self
+            .windows
+            .iter()
+            .find(|rect| rect.contains(self.pointer))
+            .copied();
     }
 
     fn get_cursor(&self) -> CursorStyle {
@@ -1342,7 +1347,6 @@ impl Render for CaptureView {
         let entity = cx.entity();
         let caret = self.get_text_bounds(self.text.get_head(), window);
         let highlights = self.get_text_highlights(window);
-        let ready = self.background.is_some();
         let theme = cx.theme();
         let accent = theme.primary;
         let mut highlight_color = theme.selection;
@@ -1442,10 +1446,8 @@ impl Render for CaptureView {
                                 },
                             );
                         }
-                        if ready {
-                            for rect in layout::get_dim_rects(border, image_bounds) {
-                                window.paint_quad(fill(ui::to_bounds(rect), rgba(0x00000066)));
-                            }
+                        for rect in layout::get_dim_rects(border, image_bounds) {
+                            window.paint_quad(fill(ui::to_bounds(rect), rgba(0x00000066)));
                         }
                         for bounds in &highlights {
                             window.paint_quad(fill(*bounds, highlight_color));
@@ -2071,6 +2073,25 @@ mod tests {
             get_cursor_style(None, Tool::Pen, vec2(250.0, 150.0), Some(rect), canvas),
             CursorStyle::Arrow
         );
+    }
+
+    #[gpui_kit::test]
+    fn windows_are_hoverable_before_the_screenshot_arrives(cx: &mut TestAppContext) {
+        let window = create_capture(cx);
+        window
+            .update(cx, |capture, _, _| {
+                let terminal = Rect {
+                    pos: vec2(10.0, 10.0),
+                    size: vec2(80.0, 40.0),
+                };
+                capture.windows = vec![terminal];
+                capture.pointer = vec2(30.0, 30.0);
+                assert!(capture.screenshot.is_none());
+                assert_eq!(capture.get_hovered_window(), Some(terminal));
+                capture.pointer = vec2(150.0, 80.0);
+                assert_eq!(capture.get_hovered_window(), None);
+            })
+            .unwrap();
     }
 
     #[gpui_kit::test]

@@ -19,6 +19,21 @@ pub struct Screenshot {
     pub windows: Vec<Rect>,
 }
 
+pub fn update_pixels(image: &mut RgbaImage, update: impl Fn(&mut [u8]) + Sync) {
+    if image.is_empty() {
+        return;
+    }
+    let threads = std::thread::available_parallelism().map_or(1, |count| count.get());
+    let chunk_rows = (image.height() as usize).div_ceil(threads);
+    let chunk_bytes = chunk_rows * image.width() as usize * 4;
+    let update = &update;
+    std::thread::scope(|scope| {
+        for chunk in image.chunks_mut(chunk_bytes) {
+            scope.spawn(move || chunk.chunks_exact_mut(4).for_each(update));
+        }
+    });
+}
+
 pub fn create_render_image(image: &RgbaImage) -> Arc<RenderImage> {
     return create_render_frames(std::slice::from_ref(&Frame::new(image.clone())));
 }
@@ -32,9 +47,7 @@ pub fn create_render_frames(frames: &[Frame]) -> Arc<RenderImage> {
             let left = frame.left();
             let top = frame.top();
             let mut image = frame.into_buffer();
-            for pixel in image.pixels_mut() {
-                pixel.0.swap(0, 2);
-            }
+            update_pixels(&mut image, |pixel| pixel.swap(0, 2));
             return Frame::from_parts(image, left, top, delay);
         })
         .collect::<Vec<_>>();
@@ -669,6 +682,21 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn parallel_pixel_updates_cover_every_pixel() {
+        for (width, height) in [(3, 7), (1, 1), (5, 64)] {
+            let mut image =
+                RgbaImage::from_fn(width, height, |x, y| Rgba([x as u8, y as u8, 9, 1]));
+            update_pixels(&mut image, |pixel| pixel.swap(0, 2));
+            assert!(
+                image
+                    .enumerate_pixels()
+                    .all(|(x, y, pixel)| pixel.0 == [9, y as u8, x as u8, 1])
+            );
+        }
+        update_pixels(&mut RgbaImage::new(0, 0), |_| unreachable!());
     }
 
     #[test]
