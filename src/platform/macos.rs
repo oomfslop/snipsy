@@ -1,8 +1,10 @@
 use crate::{
+    app::recording::{RecordingSettings, VideoCodec},
+    editor::BlurMode,
     geometry::{Color, Rect},
-    raster::{self, CursorSnapshot, Screenshot},
+    raster::{self, CursorSnapshot, Screenshot, VideoEffect},
 };
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use anyhow::{Context as _, Result, anyhow, ensure};
 use async_channel::{Receiver, Sender};
 use block2::RcBlock;
 use glam::{Vec2, vec2};
@@ -15,26 +17,40 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSColor, NSColorPanel, NSColorSpace,
-    NSCursor, NSEvent, NSImage, NSImageView, NSModalResponseOK, NSNormalWindowLevel, NSPasteboard,
+    NSCursor, NSEvent, NSImage, NSImageView, NSModalResponseOK, NSPasteboard,
     NSPasteboardTypeFileURL, NSPopUpMenuWindowLevel, NSPrintOperation, NSSavePanel, NSScreen,
     NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowCollectionBehavior,
     NSWindowStyleMask,
 };
 use objc2_av_foundation::{
-    AVAssetWriter, AVAssetWriterInput, AVAssetWriterStatus, AVFileTypeMPEG4, AVMediaTypeVideo,
-    AVVideoCodecKey, AVVideoCodecTypeH264, AVVideoHeightKey, AVVideoWidthKey,
+    AVAsset, AVAssetExportPresetHEVCHighestQuality, AVAssetExportPresetHighestQuality,
+    AVAssetExportPresetPassthrough, AVAssetExportSession, AVAssetExportSessionStatus,
+    AVAssetWriter, AVAssetWriterInput, AVAssetWriterStatus, AVAsynchronousCIImageFilteringRequest,
+    AVFileTypeMPEG4, AVMediaTypeVideo, AVMutableVideoComposition, AVPlayer,
+    AVPlayerActionAtItemEnd, AVPlayerItem, AVPlayerItemStatus, AVPlayerItemVideoOutput, AVURLAsset,
+    AVVideoAverageBitRateKey, AVVideoCodecKey, AVVideoCodecTypeH264, AVVideoCodecTypeHEVC,
+    AVVideoCompressionPropertiesKey, AVVideoExpectedSourceFrameRateKey, AVVideoHeightKey,
+    AVVideoMaxKeyFrameIntervalKey, AVVideoWidthKey,
 };
 use objc2_core_foundation::{
-    CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
+    CFDictionary, CFNumber, CFRetained, CFString, CFType, CGAffineTransform, CGPoint, CGRect,
+    CGSize,
 };
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGDisplayCopyColorSpace, CGError, CGImage,
     CGImageAlphaInfo, CGImageByteOrderInfo, CGPreflightScreenCaptureAccess,
     CGRectMakeWithDictionaryRepresentation, CGRequestScreenCaptureAccess,
     CGWarpMouseCursorPosition, CGWindowListCopyWindowInfo, CGWindowListOption, kCGColorSpaceSRGB,
-    kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer,
+    kCGDisplayStreamYCbCrMatrix_ITU_R_709_2, kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer,
 };
-use objc2_core_media::{CMSampleBuffer, CMTime};
+use objc2_core_image::{CIImage, CIVector, kCIFormatRGBA8, kCIInputCenterKey, kCIInputScaleKey};
+use objc2_core_media::{CMSampleBuffer, CMTime, CMTimeRange, kCMTimeZero};
+use objc2_core_video::{
+    CVPixelBuffer, CVPixelBufferGetPixelFormatType, kCVPixelBufferIOSurfacePropertiesKey,
+    kCVPixelBufferMetalCompatibilityKey, kCVPixelBufferPixelFormatTypeKey,
+    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+};
 use objc2_foundation::{
     NSArray, NSData, NSDictionary, NSError, NSFileManager, NSNumber, NSObject, NSObjectProtocol,
     NSOperationQueue, NSPoint, NSRect, NSSearchPathDirectory, NSSearchPathDomainMask, NSSize,
@@ -50,7 +66,8 @@ use objc2_uniform_type_identifiers::{UTType, UTTypeMPEG4Movie};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     cell::Cell,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    ptr::NonNull,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -497,7 +514,7 @@ pub fn prompt_save_image(suggested_name: &str) -> Receiver<Result<Option<PathBuf
     return prompt_save(suggested_name, &NSArray::from_retained_slice(&types));
 }
 
-pub fn prompt_save_recording() -> Receiver<Result<Option<PathBuf>>> {
+pub fn prompt_save_video() -> Receiver<Result<Option<PathBuf>>> {
     // SAFETY: UniformTypeIdentifiers provides this constant on every supported macOS version.
     let movie = unsafe { UTTypeMPEG4Movie };
     return prompt_save("Snipsy Recording.mp4", &NSArray::from_slice(&[movie]));
@@ -527,54 +544,6 @@ fn prompt_save(suggested_name: &str, types: &NSArray<UTType>) -> Receiver<Result
     });
     panel.beginWithCompletionHandler(&callback);
     return receiver;
-}
-
-/// Overlays, pins and dialogs float above normal windows; regular windows like Preferences
-/// are captured like any other app's.
-fn get_floating_window_ids(mtm: MainThreadMarker) -> Vec<u32> {
-    return NSApplication::sharedApplication(mtm)
-        .windows()
-        .iter()
-        .filter(|window| window.isVisible() && window.level() > NSNormalWindowLevel)
-        .filter_map(|window| u32::try_from(window.windowNumber()).ok())
-        .collect();
-}
-
-fn with_shareable_content(
-    callback: impl Fn(Result<(&SCShareableContent, Retained<NSArray<SCWindow>>)>) + 'static,
-) {
-    let mtm = MainThreadMarker::new().expect("capture starts on the main thread");
-    let floating_ids = get_floating_window_ids(mtm);
-    let block = RcBlock::new(
-        move |content: *mut SCShareableContent, error: *mut NSError| {
-            autoreleasepool(|_| {
-                // SAFETY: ScreenCaptureKit keeps callback arguments alive for this invocation.
-                let Some(content) = (unsafe { content.as_ref() }) else {
-                    callback(Err(if CGPreflightScreenCaptureAccess() {
-                        get_ns_error(error, "Could not enumerate displays")
-                    } else {
-                        CGRequestScreenCaptureAccess();
-                        anyhow!(
-                            "Enable Screen Recording for Snipsy (or its terminal) in System Settings, then capture again."
-                        )
-                    }));
-                    return;
-                };
-                // SAFETY: SCShareableContent getters are valid for the content's lifetime.
-                let excluded = unsafe { content.windows() }
-                    .iter()
-                    .filter(|window| floating_ids.contains(&unsafe { window.windowID() }))
-                    .collect::<Vec<_>>();
-                callback(Ok((content, NSArray::from_retained_slice(&excluded))));
-            });
-        },
-    );
-    // SAFETY: the framework copies the completion block and invokes it with valid borrowed arguments.
-    unsafe {
-        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
-            true, true, &block,
-        );
-    }
 }
 
 fn create_display_filter(
@@ -956,33 +925,43 @@ fn get_writer_error(writer: &AVAssetWriter) -> String {
 pub struct ScreenRecorder {
     stream: Retained<SCStream>,
     output: Retained<RecordingOutput>,
-    temporary_directory: tempfile::TempDir,
-    destination: PathBuf,
+    video: RecordedVideo,
+}
+
+pub struct RecordedVideo {
+    pub path: PathBuf,
+    pub size: (u32, u32),
+    pub codec: VideoCodec,
+    _directory: tempfile::TempDir,
 }
 
 fn create_recorder(
-    content: &SCShareableContent,
-    excluded: &NSArray<SCWindow>,
+    content: &ShareableContent,
+    overlay: u32,
     bounds: Rect,
-    destination: PathBuf,
+    settings: RecordingSettings,
     errors: Sender<String>,
 ) -> Result<ScreenRecorder> {
+    let overlay = content
+        .get_window(overlay)
+        .context("Could not exclude the recording overlay")?;
+    let excluded = NSArray::from_retained_slice(&[overlay]);
     // SAFETY: SCShareableContent getters are valid for the content's lifetime.
-    let (display, region) = unsafe { content.displays() }
+    let (display, region) = unsafe { content.0.displays() }
         .iter()
         .find_map(|display| {
             get_recording_region(get_rect(unsafe { display.frame() }), bounds)
                 .map(|region| (display, region))
         })
         .context("Select an area within one display")?;
-    let filter = create_display_filter(&display, excluded);
+    let filter = create_display_filter(&display, &excluded);
     let (width, height) = get_recording_size(region.size, unsafe { filter.pointPixelScale() })?;
-    let temporary_directory = tempfile::Builder::new()
-        .prefix(".snipsy-recording-")
-        .tempdir_in(destination.parent().context("Invalid recording path")?)?;
-    let url = NSURL::from_file_path(temporary_directory.path().join("recording.mp4"))
-        .context("Invalid temporary recording path")?;
-    let unavailable = "H.264 recording is unavailable";
+    let directory = tempfile::Builder::new()
+        .prefix("snipsy-recording-")
+        .tempdir()?;
+    let path = directory.path().join("Recording.mp4");
+    let url = NSURL::from_file_path(&path).context("Invalid temporary recording path")?;
+    let unavailable = "Video recording is unavailable";
     // SAFETY: ScreenCaptureKit and AVFoundation objects are configured with valid arguments
     // and the output object is fully initialized before it is handed to the stream.
     unsafe {
@@ -993,7 +972,9 @@ fn create_recorder(
         ));
         config.setWidth(width);
         config.setHeight(height);
-        config.setMinimumFrameInterval(CMTime::new(1, 60));
+        config.setMinimumFrameInterval(CMTime::new(1, settings.fps as i32));
+        config.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+        config.setColorMatrix(kCGDisplayStreamYCbCrMatrix_ITU_R_709_2);
         config.setQueueDepth(6);
         config.setColorSpaceName(kCGColorSpaceSRGB);
         config.setShowsCursor(true);
@@ -1004,23 +985,39 @@ fn create_recorder(
             AVFileTypeMPEG4.context(unavailable)?,
         )
         .map_err(|error| anyhow!("{}", error.localizedDescription()))?;
-        let width_number = NSNumber::new_usize(width);
-        let height_number = NSNumber::new_usize(height);
-        let settings = NSDictionary::<NSString, AnyObject>::from_slices(
+        let codec = match settings.codec {
+            VideoCodec::H264 => AVVideoCodecTypeH264,
+            VideoCodec::Hevc => AVVideoCodecTypeHEVC,
+        };
+        let compression = NSDictionary::<NSString, AnyObject>::from_slices(
+            &[
+                AVVideoAverageBitRateKey.context(unavailable)?,
+                AVVideoExpectedSourceFrameRateKey.context(unavailable)?,
+                AVVideoMaxKeyFrameIntervalKey.context(unavailable)?,
+            ],
+            &[
+                NSNumber::new_u64(u64::from(settings.bitrate_mbps) * 1_000_000).as_ref(),
+                NSNumber::new_u32(settings.fps).as_ref(),
+                NSNumber::new_u32(settings.fps).as_ref(),
+            ],
+        );
+        let video_settings = NSDictionary::<NSString, AnyObject>::from_slices(
             &[
                 AVVideoCodecKey.context(unavailable)?,
                 AVVideoWidthKey.context(unavailable)?,
                 AVVideoHeightKey.context(unavailable)?,
+                AVVideoCompressionPropertiesKey.context(unavailable)?,
             ],
             &[
-                AVVideoCodecTypeH264.context(unavailable)?.as_ref(),
-                width_number.as_ref(),
-                height_number.as_ref(),
+                codec.context(unavailable)?.as_ref(),
+                NSNumber::new_usize(width).as_ref(),
+                NSNumber::new_usize(height).as_ref(),
+                compression.as_ref(),
             ],
         );
         let input = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(
             AVMediaTypeVideo.context(unavailable)?,
-            Some(&settings),
+            Some(&video_settings),
         );
         input.setExpectsMediaDataInRealTime(true);
         ensure!(
@@ -1054,15 +1051,20 @@ fn create_recorder(
         return Ok(ScreenRecorder {
             stream,
             output,
-            temporary_directory,
-            destination,
+            video: RecordedVideo {
+                path,
+                size: (width as u32, height as u32),
+                codec: settings.codec,
+                _directory: directory,
+            },
         });
     }
 }
 
 pub fn start_screen_recording(
     bounds: Rect,
-    destination: PathBuf,
+    settings: RecordingSettings,
+    overlay: u32,
     sender: Sender<Result<ScreenRecorder>>,
     errors: Sender<String>,
 ) {
@@ -1070,15 +1072,9 @@ pub fn start_screen_recording(
         let _ = sender.try_send(Err(anyhow!("Invalid recording region")));
         return;
     }
-    with_shareable_content(move |result| {
-        let recorder = match result.and_then(|(content, excluded)| {
-            create_recorder(
-                content,
-                &excluded,
-                bounds,
-                destination.clone(),
-                errors.clone(),
-            )
+    load_shareable_content(move |result| {
+        let recorder = match result.and_then(|content| {
+            create_recorder(&content, overlay, bounds, settings, errors.clone())
         }) {
             Ok(recorder) => recorder,
             Err(error) => {
@@ -1105,16 +1101,19 @@ pub fn start_screen_recording(
     });
 }
 
-pub fn stop_screen_recording(recorder: ScreenRecorder, sender: Sender<Result<PathBuf>>) {
+pub fn stop_screen_recording(recorder: ScreenRecorder, sender: Sender<Result<RecordedVideo>>) {
     let stream = recorder.stream.clone();
     let recorder = Mutex::new(Some(recorder));
-    let block = RcBlock::new(move |error: *mut NSError| {
+    let block = RcBlock::new(move |_: *mut NSError| {
         let Some(recorder) = recorder.lock().expect("recorder poisoned").take() else {
             return;
         };
-        let stop_error =
-            (!error.is_null()).then(|| get_ns_error(error, "Recording stopped").to_string());
         let ivars = recorder.output.ivars();
+        if !*ivars.started.lock().expect("video writer poisoned") {
+            unsafe { ivars.writer.cancelWriting() };
+            let _ = sender.try_send(Err(anyhow!("The recording has no frames")));
+            return;
+        }
         unsafe { ivars.input.markAsFinished() };
         let writer = ivars.writer.clone();
         let recorder = Mutex::new(Some(recorder));
@@ -1124,16 +1123,13 @@ pub fn stop_screen_recording(recorder: ScreenRecorder, sender: Sender<Result<Pat
                 return;
             };
             let writer = &recorder.output.ivars().writer;
-            let result = if unsafe { writer.status() } != AVAssetWriterStatus::Completed {
-                Err(anyhow!(get_writer_error(writer)))
-            } else {
-                save_recording(
-                    recorder.temporary_directory,
-                    recorder.destination,
-                    stop_error.as_deref(),
-                )
-            };
-            let _ = sender.try_send(result);
+            let _ = sender.try_send(
+                if unsafe { writer.status() } == AVAssetWriterStatus::Completed {
+                    Ok(recorder.video)
+                } else {
+                    Err(anyhow!(get_writer_error(writer)))
+                },
+            );
         });
         // SAFETY: the framework copies the completion block; the recorder it captures keeps the stream and files alive.
         unsafe { writer.finishWritingWithCompletionHandler(&finish) };
@@ -1142,27 +1138,394 @@ pub fn stop_screen_recording(recorder: ScreenRecorder, sender: Sender<Result<Pat
     unsafe { stream.stopCaptureWithCompletionHandler(Some(&block)) };
 }
 
-fn save_recording(
-    temporary_directory: tempfile::TempDir,
-    destination: PathBuf,
-    stop_error: Option<&str>,
-) -> Result<PathBuf> {
-    if let Err(error) = std::fs::rename(
-        temporary_directory.path().join("recording.mp4"),
-        &destination,
-    ) {
-        let recovery_path = temporary_directory.keep().join("recording.mp4");
-        return Err(error).with_context(|| {
-            format!(
-                "Could not save recording; recover it at {}",
-                recovery_path.display()
+enum CoreImageEffect {
+    Overlay(Retained<CIImage>),
+    Blur {
+        rect: Rect,
+        mode: BlurMode,
+        amount: f32,
+    },
+}
+
+#[derive(Default)]
+struct VideoEffects(Mutex<Vec<CoreImageEffect>>);
+
+// SAFETY: CIImage is immutable and Core Image documents it as safe to share between threads.
+unsafe impl Send for VideoEffects {}
+unsafe impl Sync for VideoEffects {}
+
+fn create_core_image_effects(effects: Vec<VideoEffect>) -> Vec<CoreImageEffect> {
+    // SAFETY: kCGColorSpaceSRGB is always defined.
+    let srgb = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }));
+    return effects
+        .into_iter()
+        .map(|effect| match effect {
+            VideoEffect::Overlay(mut image) => {
+                raster::update_pixels(&mut image, |pixel| {
+                    let alpha = pixel[3] as u32;
+                    for channel in &mut pixel[..3] {
+                        *channel = ((*channel as u32 * alpha + 127) / 255) as u8;
+                    }
+                });
+                let size = CGSize::new(image.width() as f64, image.height() as f64);
+                let data = NSData::with_bytes(&image);
+                // SAFETY: `data` holds premultiplied RGBA rows of `width * 4` bytes, which Core Image copies.
+                CoreImageEffect::Overlay(unsafe {
+                    CIImage::imageWithBitmapData_bytesPerRow_size_format_colorSpace(
+                        &data,
+                        image.width() as usize * 4,
+                        size,
+                        kCIFormatRGBA8,
+                        srgb.as_deref(),
+                    )
+                })
+            }
+            VideoEffect::Blur { rect, mode, amount } => {
+                CoreImageEffect::Blur { rect, mode, amount }
+            }
+        })
+        .collect();
+}
+
+fn apply_video_effects(
+    source: Retained<CIImage>,
+    effects: &[CoreImageEffect],
+    crop: Option<Rect>,
+) -> Retained<CIImage> {
+    // SAFETY: Core Image builds lazy, immutable filter graphs from valid images and parameters.
+    unsafe {
+        let height = source.extent().size.height;
+        let get_core_image_rect = |rect: Rect| {
+            CGRect::new(
+                CGPoint::new(rect.pos.x as f64, height - rect.end().y as f64),
+                CGSize::new(rect.size.x as f64, rect.size.y as f64),
             )
+        };
+        let mut image = source;
+        for effect in effects {
+            image = match effect {
+                CoreImageEffect::Overlay(overlay) => overlay.imageByCompositingOverImage(&image),
+                CoreImageEffect::Blur { rect, mode, amount } => {
+                    let rect = get_core_image_rect(*rect);
+                    let clamped = image.imageByClampingToExtent();
+                    let blurred = match mode {
+                        BlurMode::Gaussian => {
+                            clamped.imageByApplyingGaussianBlurWithSigma(*amount as f64)
+                        }
+                        BlurMode::Pixelated => {
+                            let center = CIVector::vectorWithX_Y(
+                                rect.origin.x,
+                                rect.origin.y + rect.size.height,
+                            );
+                            let scale = NSNumber::new_f32(*amount);
+                            let parameters = NSDictionary::<NSString, AnyObject>::from_slices(
+                                &[kCIInputScaleKey, kCIInputCenterKey],
+                                &[scale.as_ref(), center.as_ref()],
+                            );
+                            clamped.imageByApplyingFilter_withInputParameters(
+                                &NSString::from_str("CIPixellate"),
+                                &parameters,
+                            )
+                        }
+                    };
+                    blurred
+                        .imageByCroppingToRect(rect)
+                        .imageByCompositingOverImage(&image)
+                }
+            };
+        }
+        let Some(crop) = crop else {
+            return image;
+        };
+        let crop = get_core_image_rect(crop);
+        return image
+            .imageByCroppingToRect(crop)
+            .imageByApplyingTransform(CGAffineTransform {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                tx: -crop.origin.x,
+                ty: -crop.origin.y,
+            });
+    }
+}
+
+fn create_video_composition(
+    asset: &AVAsset,
+    effects: Arc<VideoEffects>,
+    crop: Option<Rect>,
+) -> Retained<AVMutableVideoComposition> {
+    let handler = RcBlock::new(
+        move |request: NonNull<AVAsynchronousCIImageFilteringRequest>| {
+            autoreleasepool(|_| {
+                // SAFETY: AVFoundation keeps the request alive until it is finished.
+                let request = unsafe { request.as_ref() };
+                let effects = effects.0.lock().expect("video effects poisoned");
+                let image = apply_video_effects(unsafe { request.sourceImage() }, &effects, crop);
+                unsafe { request.finishWithImage_context(&image, None) };
+            });
+        },
+    );
+    // SAFETY: the framework copies the handler, which only touches thread-safe effects.
+    unsafe {
+        // Only the mutable variant accepts a renderSize, which cropping needs.
+        #[allow(deprecated)]
+        let composition =
+            AVMutableVideoComposition::videoCompositionWithAsset_applyingCIFiltersWithHandler(
+                asset, &handler,
+            );
+        if let Some(crop) = crop {
+            composition.setRenderSize(CGSize::new(crop.size.x as f64, crop.size.y as f64));
+        }
+        return composition;
+    }
+}
+
+fn get_media_time(seconds: f64) -> CMTime {
+    // SAFETY: plain value conversion.
+    return unsafe { CMTime::with_seconds(seconds, 60_000) };
+}
+
+fn open_video_asset(path: &Path) -> Result<Retained<AVURLAsset>> {
+    let url = NSURL::from_file_path(path).context("Invalid video path")?;
+    // SAFETY: the URL is a valid file URL; no options are needed.
+    return Ok(unsafe { AVURLAsset::URLAssetWithURL_options(&url, None) });
+}
+
+pub struct VideoPlayer {
+    asset: Retained<AVURLAsset>,
+    player: Retained<AVPlayer>,
+    item: Retained<AVPlayerItem>,
+    output: Retained<AVPlayerItemVideoOutput>,
+    effects: Arc<VideoEffects>,
+    nudged: Cell<bool>,
+}
+
+impl VideoPlayer {
+    pub fn open(path: &Path) -> Result<Self> {
+        let mtm = MainThreadMarker::new().expect("video playback starts on the main thread");
+        let asset = open_video_asset(path)?;
+        let effects = Arc::new(VideoEffects::default());
+        // SAFETY: AVFoundation objects are created on the main thread with valid arguments;
+        // the toll-free bridged CoreVideo keys are valid NSString dictionary keys.
+        unsafe {
+            let item = AVPlayerItem::playerItemWithAsset(&asset, mtm);
+            let get_key = |key: &CFString| &*(key as *const CFString).cast::<NSString>();
+            let format = NSNumber::new_u32(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
+            let metal = NSNumber::new_bool(true);
+            let surface = NSDictionary::<NSString, AnyObject>::new();
+            let attributes = NSDictionary::<NSString, AnyObject>::from_slices(
+                &[
+                    get_key(kCVPixelBufferPixelFormatTypeKey),
+                    get_key(kCVPixelBufferMetalCompatibilityKey),
+                    get_key(kCVPixelBufferIOSurfacePropertiesKey),
+                ],
+                &[format.as_ref(), metal.as_ref(), surface.as_ref()],
+            );
+            let output = AVPlayerItemVideoOutput::initWithPixelBufferAttributes(
+                AVPlayerItemVideoOutput::alloc(),
+                Some(&attributes),
+            );
+            item.addOutput(&output);
+            let player = AVPlayer::playerWithPlayerItem(Some(&item), mtm);
+            player.setActionAtItemEnd(AVPlayerActionAtItemEnd::Pause);
+            return Ok(Self {
+                asset,
+                player,
+                item,
+                output,
+                effects,
+                nudged: Cell::new(false),
+            });
+        }
+    }
+
+    pub fn get_is_ready(&self) -> Result<bool> {
+        // SAFETY: plain property reads on a valid item.
+        return match unsafe { self.item.status() } {
+            AVPlayerItemStatus::ReadyToPlay => Ok(true),
+            AVPlayerItemStatus::Failed => Err(unsafe { self.item.error() }.map_or_else(
+                || anyhow!("Could not play the recording"),
+                |error| anyhow!("{}", error.localizedDescription()),
+            )),
+            _ => Ok(false),
+        };
+    }
+
+    pub fn get_duration(&self) -> f64 {
+        // SAFETY: plain property reads on valid objects.
+        let duration = unsafe { self.asset.duration().seconds() };
+        return if duration.is_finite() {
+            duration.max(0.0)
+        } else {
+            0.0
+        };
+    }
+
+    pub fn get_time(&self) -> f64 {
+        // SAFETY: plain property read on a valid item.
+        let time = unsafe { self.item.currentTime().seconds() };
+        return if time.is_finite() { time } else { 0.0 };
+    }
+
+    pub fn get_is_playing(&self) -> bool {
+        // SAFETY: plain property read on a valid player.
+        return unsafe { self.player.rate() } != 0.0;
+    }
+
+    pub fn play(&self, end: f64) {
+        // SAFETY: plain setters on valid objects.
+        unsafe {
+            self.item.setForwardPlaybackEndTime(get_media_time(end));
+            self.player.play();
+        }
+    }
+
+    pub fn pause(&self) {
+        // SAFETY: plain call on a valid player.
+        unsafe { self.player.pause() };
+    }
+
+    pub fn seek(&self, time: f64) {
+        // SAFETY: zero tolerances request the exact frame.
+        unsafe {
+            self.player.seekToTime_toleranceBefore_toleranceAfter(
+                get_media_time(time),
+                kCMTimeZero,
+                kCMTimeZero,
+            );
+        }
+    }
+
+    pub fn copy_frame(&self) -> Option<gpui_kit::SurfaceSource> {
+        // SAFETY: the output vends retained pixel buffers for valid item times.
+        let buffer = unsafe {
+            let time = self.item.currentTime();
+            if !self.output.hasNewPixelBufferForItemTime(time) {
+                return None;
+            }
+            self.output
+                .copyPixelBufferForItemTime_itemTimeForDisplay(time, std::ptr::null_mut())?
+        };
+        // SAFETY: both wrappers own a single +1 reference to the same CoreVideo object.
+        let buffer: CFRetained<CVPixelBuffer> =
+            unsafe { CFRetained::from_raw(NonNull::new_unchecked(Retained::into_raw(buffer))) };
+        // GPUI's surface renderer asserts this format.
+        return (CVPixelBufferGetPixelFormatType(&buffer)
+            == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
+            .then(|| buffer.into());
+    }
+
+    pub fn set_effects(&self, effects: Vec<VideoEffect>) {
+        let composited = !effects.is_empty();
+        *self.effects.0.lock().expect("video effects poisoned") =
+            create_core_image_effects(effects);
+        // SAFETY: plain property access on a valid item; the composition is created from its own asset.
+        unsafe {
+            if composited != self.item.videoComposition().is_some() {
+                let composition = composited
+                    .then(|| create_video_composition(&self.asset, self.effects.clone(), None));
+                self.item
+                    .setVideoComposition(composition.as_deref().map(|composition| &**composition));
+            }
+        }
+        if self.get_is_playing() {
+            return;
+        }
+        // AVPlayer only composes frames it decodes and ignores seeks to the current time,
+        // so a paused frame is redrawn by nudging the time back and forth within the frame.
+        let nudge = if self.nudged.replace(!self.nudged.get()) {
+            -1e-4
+        } else {
+            1e-4
+        };
+        self.seek(self.get_time() + nudge);
+    }
+}
+
+pub struct VideoExport(Retained<AVAssetExportSession>);
+
+impl VideoExport {
+    pub fn get_progress(&self) -> f32 {
+        // SAFETY: plain property read on a valid session.
+        return unsafe { self.0.progress() };
+    }
+}
+
+impl Drop for VideoExport {
+    fn drop(&mut self) {
+        // SAFETY: cancelling a finished session has no effect.
+        unsafe { self.0.cancelExport() };
+    }
+}
+
+pub fn export_video(
+    source: &Path,
+    destination: PathBuf,
+    range: (f64, f64),
+    crop: Option<Rect>,
+    effects: Vec<VideoEffect>,
+    codec: VideoCodec,
+    sender: Sender<Result<()>>,
+) -> Result<VideoExport> {
+    let asset = open_video_asset(source)?;
+    let directory = tempfile::Builder::new()
+        .prefix(".snipsy-export-")
+        .tempdir_in(destination.parent().context("Invalid export path")?)?;
+    let output = directory.path().join("export.mp4");
+    let url = NSURL::from_file_path(&output).context("Invalid export path")?;
+    let reencode = crop.is_some() || !effects.is_empty();
+    let unavailable = "Video export is unavailable";
+    // SAFETY: the export session is configured with valid objects before it starts.
+    let session = unsafe {
+        let preset = match (reencode, codec) {
+            (false, _) => AVAssetExportPresetPassthrough,
+            (true, VideoCodec::H264) => AVAssetExportPresetHighestQuality,
+            (true, VideoCodec::Hevc) => AVAssetExportPresetHEVCHighestQuality,
+        };
+        let session = AVAssetExportSession::exportSessionWithAsset_presetName(&asset, preset)
+            .context(unavailable)?;
+        session.setOutputURL(Some(&url));
+        session.setOutputFileType(Some(AVFileTypeMPEG4.context(unavailable)?));
+        session.setShouldOptimizeForNetworkUse(true);
+        session.setTimeRange(CMTimeRange {
+            start: get_media_time(range.0),
+            duration: get_media_time(range.1 - range.0),
         });
-    }
-    if let Some(error) = stop_error {
-        bail!("{error}; recording saved to {}", destination.display());
-    }
-    return Ok(destination);
+        if reencode {
+            let effects = VideoEffects(Mutex::new(create_core_image_effects(effects)));
+            session.setVideoComposition(Some(&create_video_composition(
+                &asset,
+                Arc::new(effects),
+                crop,
+            )));
+        }
+        session
+    };
+    let callback_session = session.clone();
+    let directory = Mutex::new(Some(directory));
+    let handler = RcBlock::new(move || {
+        let Some(directory) = directory.lock().expect("export directory poisoned").take() else {
+            return;
+        };
+        // SAFETY: plain property reads on a finished session.
+        let result = match unsafe { callback_session.status() } {
+            AVAssetExportSessionStatus::Completed => {
+                std::fs::rename(&output, &destination).context("Could not save the video")
+            }
+            AVAssetExportSessionStatus::Cancelled => Err(anyhow!("Export cancelled")),
+            _ => Err(unsafe { callback_session.error() }.map_or_else(
+                || anyhow!("Could not export the video"),
+                |error| anyhow!("{}", error.localizedDescription()),
+            )),
+        };
+        drop(directory);
+        let _ = sender.try_send(result);
+    });
+    // SAFETY: the framework copies the completion handler.
+    unsafe { session.exportAsynchronouslyWithCompletionHandler(&handler) };
+    return Ok(VideoExport(session));
 }
 
 fn stitch_capture_images(
@@ -1303,7 +1666,7 @@ fn get_recording_size(size: Vec2, scale: f32) -> Result<(usize, usize)> {
 mod tests {
     use super::{
         ACTIVE_COLOR_PICKER_TARGET, DisplayCapture, get_recording_region, get_recording_size,
-        get_scaled_size, is_complete_recording_frame, release_color_picker_target, save_recording,
+        get_scaled_size, is_complete_recording_frame, release_color_picker_target,
         set_srgb_colorspace, stitch_capture_images,
     };
     use crate::geometry::Rect;
@@ -1463,38 +1826,6 @@ mod tests {
             &[key],
             &[&CFString::from_str("0")]
         )));
-    }
-
-    #[test]
-    fn completed_recording_is_saved_after_stream_stop_error() {
-        let directory = tempfile::tempdir().unwrap();
-        let temporary = tempfile::tempdir_in(directory.path()).unwrap();
-        let temporary_path = temporary.path().to_path_buf();
-        let destination = directory.path().join("capture.mp4");
-        std::fs::write(temporary.path().join("recording.mp4"), b"completed video").unwrap();
-
-        let error =
-            save_recording(temporary, destination.clone(), Some("Stream stopped")).unwrap_err();
-
-        assert_eq!(std::fs::read(&destination).unwrap(), b"completed video");
-        assert!(error.to_string().contains(destination.to_str().unwrap()));
-        assert!(!temporary_path.exists());
-    }
-
-    #[test]
-    fn completed_recording_survives_destination_failure() {
-        let directory = tempfile::tempdir().unwrap();
-        let temporary = tempfile::tempdir_in(directory.path()).unwrap();
-        let recovery_path = temporary.path().join("recording.mp4");
-        let destination = directory.path().join("capture.mp4");
-        std::fs::create_dir(&destination).unwrap();
-        std::fs::write(&recovery_path, b"completed video").unwrap();
-
-        let error = save_recording(temporary, destination.clone(), None).unwrap_err();
-
-        assert_eq!(std::fs::read(&recovery_path).unwrap(), b"completed video");
-        assert!(error.to_string().contains(recovery_path.to_str().unwrap()));
-        assert!(destination.is_dir());
     }
 
     #[test]

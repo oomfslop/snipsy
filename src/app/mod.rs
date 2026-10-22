@@ -14,13 +14,13 @@ use anyhow::Result;
 use cli::Command;
 use gpui_kit::*;
 use resvg::usvg::fontdb;
-use std::{collections::HashMap, os::unix::net::UnixListener, path::Path, sync::Arc};
+use std::{os::unix::net::UnixListener, path::Path, sync::Arc};
 
 #[derive(Default)]
 pub struct AppState {
     pub fonts: Arc<fontdb::Database>,
     pub capture_cursor: bool,
-    windows: HashMap<&'static str, AnyWindowHandle>,
+    windows: Vec<(&'static str, AnyWindowHandle)>,
 }
 
 impl Global for AppState {}
@@ -44,7 +44,7 @@ pub fn run(command: Option<Command>, data_dir: &Path, listener: UnixListener) {
         cx.set_global(AppState {
             fonts: Arc::new(fonts),
             capture_cursor: false,
-            windows: HashMap::new(),
+            windows: Vec::new(),
         });
         let (sender, commands) = async_channel::unbounded();
         cx.set_global(recording::Recording::Idle);
@@ -111,7 +111,7 @@ fn init_actions(cx: &mut App) {
     ]);
     cx.on_window_closed(|cx, id| {
         let state = cx.global_mut::<AppState>();
-        state.windows.retain(|_, handle| handle.window_id() != id);
+        state.windows.retain(|(_, handle)| handle.window_id() != id);
         if state.windows.is_empty() {
             cx.set_activation_policy(ActivationPolicy::Accessory);
         }
@@ -165,7 +165,11 @@ fn show_window<V: Render>(
     cx: &mut App,
     build: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
 ) -> Result<()> {
-    if let Some(handle) = cx.global::<AppState>().windows.get(key)
+    if let Some((_, handle)) = cx
+        .global::<AppState>()
+        .windows
+        .iter()
+        .find(|(existing, _)| *existing == key)
         && handle
             .update(cx, |_, window, _| {
                 platform::make_key_window(window);
@@ -176,7 +180,6 @@ fn show_window<V: Render>(
         cx.activate(true);
         return Ok(());
     }
-    cx.set_activation_policy(ActivationPolicy::Regular);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
         titlebar: Some(TitlebarOptions {
@@ -192,15 +195,26 @@ fn show_window<V: Render>(
         window_min_size: Some(gpui_kit::size(px(280.), px(220.))),
         ..Default::default()
     };
+    open_window(key, options, cx, build)?;
+    return Ok(());
+}
+
+pub fn open_window<V: Render>(
+    key: &'static str,
+    options: WindowOptions,
+    cx: &mut App,
+    build: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
+) -> Result<WindowHandle<base::Root>> {
+    cx.set_activation_policy(ActivationPolicy::Regular);
     let handle = cx.open_window(options, |window, cx| {
         let view = build(window, cx);
         cx.new(|cx| base::Root::new(view, window, cx).bg(transparent_black()))
     })?;
     cx.global_mut::<AppState>()
         .windows
-        .insert(key, handle.into());
+        .push((key, handle.into()));
     cx.activate(true);
-    return Ok(());
+    return Ok(handle);
 }
 
 pub fn show_error(error: anyhow::Error) {

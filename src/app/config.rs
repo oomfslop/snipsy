@@ -1,5 +1,6 @@
 use crate::app::{
     hotkeys::HotkeySettings,
+    recording::RecordingSettings,
     storage,
     toolbar_layout::{self, DEFAULT_ITEMS, ToolbarItem},
 };
@@ -14,6 +15,7 @@ pub struct Config {
     pub toolbar: Vec<ToolbarItem>,
     pub pin_frame: bool,
     pub hotkeys: HotkeySettings,
+    pub recording: RecordingSettings,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -24,6 +26,7 @@ impl Default for Config {
             toolbar: DEFAULT_ITEMS.to_vec(),
             pin_frame: true,
             hotkeys: HotkeySettings::default(),
+            recording: RecordingSettings::default(),
             path: PathBuf::new(),
         };
     }
@@ -35,6 +38,7 @@ fn load(path: &Path) -> Result<Config> {
     let config: Config = storage::read_toml(path)?;
     toolbar_layout::validate(&config.toolbar)?;
     config.hotkeys.validate()?;
+    config.recording.validate()?;
     return Ok(config);
 }
 
@@ -102,5 +106,11 @@ mod tests {
         )
         .unwrap();
         assert!(load(&path).is_err());
+        std::fs::write(&path, "[recording]\nfps = 0\n").unwrap();
+        assert!(load(&path).is_err());
+        std::fs::write(&path, "[recording]\ncodec = \"hevc\"\n").unwrap();
+        let recording = load(&path).unwrap().recording;
+        assert_eq!(recording.codec, crate::app::recording::VideoCodec::Hevc);
+        assert_eq!(recording.fps, 60);
     }
 }

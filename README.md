@@ -85,14 +85,26 @@ Right-click a pin for the full menu.
 
 Save and quick-save preserve animated GIF frames and timing. `P` enters frame selection at the first frame; use `1`/`2` to choose a frame to copy, save, print, or annotate. Selected frames save as PNG by default. Choose another image extension in Save to export a still image.
 
+## Recording
+
+Click record in the capture toolbar to pick the codec, frame rate, and bitrate (remembered in `config.toml`), then press Record. Double-click the toolbar button to record with the last options. The region stays outlined on screen, and a stop button appears in the menu bar; pins and other windows are recorded.
+
+When it stops, the recording opens in an editor. Drag the timeline handles to trim, annotate with the capture tools (blurs apply to every frame, and resizing the selection crops), then export to MP4. Unexported recordings are discarded when the editor closes.
+
+| Action | Shortcut |
+| --- | --- |
+| Play / pause | `Space` |
+| Export | `Enter` or `⌘S` |
+| Discard | `Esc` or `⌘W` |
+
 ## Layout
 
 - `editor.rs`, `geometry.rs`, `raster.rs`: annotation model, undo, hit testing, and CPU rendering for exports. No UI types.
-- `capture/`: the capture overlay. `layout.rs` holds the placement math, `paint.rs` draws annotations on the GPU, `text.rs` handles text editing and IME, `toolbar.rs` renders the toolbars.
+- `capture/`: the capture overlay. `layout.rs` holds the placement math, `paint.rs` draws annotations on the GPU, `text.rs` handles text editing and IME, `toolbar.rs` renders the toolbars, `video.rs` is the recording editor.
 - `pin/`: pin windows and their backups.
 - `app/`: startup, command dispatch, CLI and single-instance IPC, hotkeys, tray, history, recording, and persistence.
 - `ui/`: shared widgets and the History and Preferences windows.
-- `platform/macos.rs`: ScreenCaptureKit capture and recording, overlay windows, and native dialogs. This is the boundary to port for other platforms.
+- `platform/macos.rs`: ScreenCaptureKit capture and recording, AVFoundation playback and export, overlay windows, and native dialogs. This is the boundary to port for other platforms.
 - `lens.rs`: Google Lens handoff.
 
 ```sh

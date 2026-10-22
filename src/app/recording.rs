@@ -1,23 +1,77 @@
 use crate::{
-    app::{self, tray},
-    capture,
+    app::{self, AppState, config::Config, tray},
+    capture::{self, layout},
     geometry::Rect,
     platform::{self, ScreenRecorder},
+    ui::{self, View},
 };
-use anyhow::anyhow;
-use gpui_kit::{App, Global};
+use anyhow::{Result, anyhow, ensure};
+use gpui_kit::{component::ActiveTheme as _, *};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoCodec {
+    H264,
+    Hevc,
+}
+
+impl VideoCodec {
+    pub const ALL: [Self; 2] = [Self::H264, Self::Hevc];
+
+    pub fn get_label(self) -> &'static str {
+        return match self {
+            Self::H264 => "H.264",
+            Self::Hevc => "HEVC",
+        };
+    }
+}
+
+pub const FPS_OPTIONS: [u32; 3] = [15, 30, 60];
+pub const BITRATE_OPTIONS: [u32; 5] = [2, 5, 10, 20, 40];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecordingSettings {
+    pub codec: VideoCodec,
+    pub fps: u32,
+    pub bitrate_mbps: u32,
+}
+
+impl Default for RecordingSettings {
+    fn default() -> Self {
+        return Self {
+            codec: VideoCodec::H264,
+            fps: 60,
+            bitrate_mbps: 10,
+        };
+    }
+}
+
+impl RecordingSettings {
+    pub fn validate(self) -> Result<()> {
+        ensure!(
+            (1..=120).contains(&self.fps),
+            "Recording frame rate must be between 1 and 120"
+        );
+        ensure!(
+            (1..=500).contains(&self.bitrate_mbps),
+            "Recording bitrate must be between 1 and 500 Mbps"
+        );
+        return Ok(());
+    }
+}
 
 #[derive(Default)]
 pub enum Recording {
     #[default]
     Idle,
-    Starting {
-        quit_after: bool,
+    Starting(View<RegionOverlay>),
+    Active {
+        recorder: ScreenRecorder,
+        overlay: View<RegionOverlay>,
     },
-    Active(ScreenRecorder),
-    Stopping {
-        quit_after: bool,
-    },
+    Stopping,
 }
 
 impl Global for Recording {}
@@ -25,8 +79,8 @@ impl Global for Recording {}
 pub fn toggle(cx: &mut App) {
     match cx.global::<Recording>() {
         Recording::Idle => capture::start(cx),
-        Recording::Active(_) => stop(None, false, cx),
-        Recording::Starting { .. } | Recording::Stopping { .. } => {}
+        Recording::Active { .. } => stop(None, cx),
+        Recording::Starting(_) | Recording::Stopping => {}
     }
 }
 
@@ -35,74 +89,64 @@ pub fn start(bounds: Rect, cx: &mut App) {
         app::show_error(anyhow!("A screen recording is already active"));
         return;
     }
-    cx.set_global(Recording::Starting { quit_after: false });
-    let path = platform::prompt_save_recording();
+    let overlay = match open_overlay(bounds, cx) {
+        Ok(overlay) => overlay,
+        Err(error) => return app::show_error(error),
+    };
+    let overlay_id = overlay
+        .update(cx, |_, window, _| platform::get_window_id(window))
+        .unwrap_or_default();
+    cx.set_global(Recording::Starting(overlay));
+    let (sender, receiver) = async_channel::bounded(1);
+    let (error_sender, errors) = async_channel::bounded(1);
+    platform::start_screen_recording(
+        bounds,
+        cx.global::<Config>().recording,
+        overlay_id,
+        sender,
+        error_sender,
+    );
     cx.spawn(async move |cx| {
-        let path = match path.recv().await.unwrap_or_else(|error| Err(error.into())) {
-            Ok(Some(path)) => path,
-            Ok(None) => return cx.update(|cx| finish_start(None, cx)),
-            Err(error) => return cx.update(|cx| finish_start(Some(error), cx)),
-        };
-        let (sender, receiver) = async_channel::bounded(1);
-        let (error_sender, errors) = async_channel::bounded(1);
-        platform::start_screen_recording(bounds, path, sender, error_sender);
         let result = receiver
             .recv()
             .await
             .unwrap_or_else(|error| Err(error.into()));
-        cx.update(|cx| match result {
-            Ok(recorder) => {
-                let Recording::Starting { quit_after } =
-                    std::mem::replace(cx.global_mut::<Recording>(), Recording::Active(recorder))
-                else {
-                    unreachable!("recording state changed while starting");
-                };
-                tray::set_recording(true, cx);
-                if quit_after {
-                    return stop(None, true, cx);
+        cx.update(|cx| {
+            let Recording::Starting(overlay) = std::mem::take(cx.global_mut::<Recording>()) else {
+                unreachable!("recording state changed while starting");
+            };
+            let recorder = match result {
+                Ok(recorder) => recorder,
+                Err(error) => {
+                    close_overlay(overlay, cx);
+                    return app::show_error(error);
                 }
-                cx.spawn(async move |cx| {
-                    if let Ok(error) = errors.recv().await {
-                        cx.update(|cx| {
-                            if matches!(cx.global::<Recording>(), Recording::Active(_)) {
-                                stop(Some(anyhow!(error)), false, cx);
-                            }
-                        });
-                    }
-                })
-                .detach();
-            }
-            Err(error) => finish_start(Some(error), cx),
+            };
+            cx.set_global(Recording::Active { recorder, overlay });
+            tray::set_recording(true, cx);
+            cx.spawn(async move |cx| {
+                if let Ok(error) = errors.recv().await {
+                    cx.update(|cx| {
+                        if matches!(cx.global::<Recording>(), Recording::Active { .. }) {
+                            stop(Some(anyhow!(error)), cx);
+                        }
+                    });
+                }
+            })
+            .detach();
         });
     })
     .detach();
 }
 
-fn finish_start(error: Option<anyhow::Error>, cx: &mut App) {
-    let Recording::Starting { quit_after } = std::mem::take(cx.global_mut::<Recording>()) else {
-        unreachable!("recording state changed while starting");
-    };
-    report_error(error, quit_after);
-    if quit_after {
-        cx.quit();
-    }
-}
-
-fn report_error(error: Option<anyhow::Error>, quitting: bool) {
-    match error {
-        Some(error) if quitting => eprintln!("could not record: {error:#}"),
-        Some(error) => app::show_error(error),
-        None => {}
-    }
-}
-
-fn stop(error: Option<anyhow::Error>, quit_after: bool, cx: &mut App) {
-    let Recording::Active(recorder) = std::mem::replace(
-        cx.global_mut::<Recording>(),
-        Recording::Stopping { quit_after },
-    ) else {
+fn stop(error: Option<anyhow::Error>, cx: &mut App) {
+    let Recording::Active { recorder, overlay } =
+        std::mem::replace(cx.global_mut::<Recording>(), Recording::Stopping)
+    else {
         unreachable!("only an active recording can stop");
     };
+    close_overlay(overlay, cx);
+    tray::set_recording(false, cx);
     let (sender, receiver) = async_channel::bounded(1);
     platform::stop_screen_recording(recorder, sender);
     cx.spawn(async move |cx| {
@@ -111,27 +155,82 @@ fn stop(error: Option<anyhow::Error>, quit_after: bool, cx: &mut App) {
             .await
             .unwrap_or_else(|error| Err(error.into()));
         cx.update(|cx| {
-            let Recording::Stopping { quit_after } = std::mem::take(cx.global_mut::<Recording>())
-            else {
-                unreachable!("recording state changed while stopping");
-            };
-            tray::set_recording(false, cx);
-            report_error(result.err().or(error), quit_after);
-            if quit_after {
-                cx.quit();
+            cx.set_global(Recording::Idle);
+            if let Some(error) = error {
+                app::show_error(error);
+            }
+            match result {
+                Ok(video) => capture::open_video_editor(video, cx),
+                Err(error) => app::show_error(error),
             }
         });
     })
     .detach();
 }
 
-/// Quits after finalizing an active recording so the file is not left truncated.
 pub fn quit(cx: &mut App) {
-    match cx.global_mut::<Recording>() {
-        Recording::Active(_) => stop(None, true, cx),
-        Recording::Starting { quit_after } | Recording::Stopping { quit_after } => {
-            *quit_after = true
-        }
-        Recording::Idle => cx.quit(),
+    let unsaved = !matches!(cx.global::<Recording>(), Recording::Idle)
+        || cx
+            .global::<AppState>()
+            .windows
+            .iter()
+            .any(|(key, _)| *key == capture::VIDEO_EDITOR_WINDOW);
+    if unsaved
+        && !platform::confirm(
+            "Quit Snipsy?",
+            "Recordings that have not been exported will be lost.",
+            "Quit",
+        )
+    {
+        return;
     }
+    cx.quit();
+}
+
+pub struct RegionOverlay {
+    region: Rect,
+}
+
+impl Render for RegionOverlay {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let region = self.region;
+        let accent = cx.theme().primary;
+        return canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                for rect in layout::get_dim_rects(Some(region), ui::to_rect(bounds)) {
+                    window.paint_quad(fill(ui::to_bounds(rect), rgba(0x00000066)));
+                }
+                window.paint_quad(outline(
+                    ui::to_bounds(Rect {
+                        pos: region.pos - 1.0,
+                        size: region.size + 2.0,
+                    }),
+                    accent,
+                    BorderStyle::Solid,
+                ));
+            },
+        )
+        .size_full();
+    }
+}
+
+fn open_overlay(region: Rect, cx: &mut App) -> Result<View<RegionOverlay>> {
+    let desktop = platform::get_desktop_bounds()?;
+    let region = Rect {
+        pos: region.pos - desktop.pos,
+        size: region.size,
+    };
+    let overlay = ui::open_overlay(desktop, false, cx, |_, cx| {
+        cx.new(|_| RegionOverlay { region })
+    })?;
+    overlay.update(cx, |_, window, _| {
+        platform::set_window_click_through(window, true);
+        platform::set_window_visible(window, true);
+    })?;
+    return Ok(overlay);
+}
+
+fn close_overlay(overlay: View<RegionOverlay>, cx: &mut App) {
+    let _ = overlay.update(cx, |_, window, _| window.remove_window());
 }

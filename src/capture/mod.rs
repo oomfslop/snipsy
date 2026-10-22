@@ -1,10 +1,18 @@
-mod layout;
+pub mod layout;
 mod paint;
 mod text;
 pub mod toolbar;
+mod video;
+
+pub use video::{VIDEO_EDITOR_WINDOW, open_video_editor};
 
 use crate::{
-    app::{self, AppState, content::PinContent, export, history, recording},
+    app::{
+        self, AppState, config,
+        content::PinContent,
+        export, history,
+        recording::{self, RecordingSettings},
+    },
     editor::{Annotation, BlurMode, Editor, TextAttribute, Tool},
     geometry::{Color, Rect},
     pin, platform,
@@ -218,6 +226,7 @@ enum Mode {
     Capture,
     Whiteboard,
     PinEditor(View<pin::Pin>),
+    Video,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -264,6 +273,8 @@ enum EditorAction {
     Undo,
     Redo,
     Cancel,
+    RecordOptions,
+    SetRecording(RecordingSettings),
     Record,
     Copy,
     Save,
@@ -306,6 +317,7 @@ struct CaptureView {
     custom_color: Option<Color>,
     show_layers: bool,
     show_toolbar: bool,
+    show_record_options: bool,
     confirming_discard: bool,
     layer_drop_target: Option<(u64, bool)>,
     capture_history: Vec<Screenshot>,
@@ -362,6 +374,7 @@ impl CaptureView {
             custom_color: None,
             show_layers: false,
             show_toolbar: true,
+            show_record_options: false,
             confirming_discard: false,
             layer_drop_target: None,
             capture_history: Vec::new(),
@@ -390,7 +403,8 @@ impl CaptureView {
 
     fn set_screenshot(&mut self, screenshot: Screenshot) {
         self.windows = screenshot.windows.clone();
-        self.background = Some(raster::create_render_image(&screenshot.image));
+        self.background = (!matches!(self.mode, Mode::Video))
+            .then(|| raster::create_render_image(&screenshot.image));
         self.screenshot = Some(screenshot);
     }
 
@@ -421,7 +435,7 @@ impl CaptureView {
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.editor.layers.is_empty() {
+        if self.editor.layers.is_empty() && !matches!(self.mode, Mode::Video) {
             return self.dismiss(window, cx);
         }
         self.confirming_discard = true;
@@ -429,6 +443,10 @@ impl CaptureView {
     }
 
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.mode, Mode::Video) {
+            window.remove_window();
+            return;
+        }
         if let Mode::PinEditor(target) = &self.mode {
             let target = target.clone();
             let _ = target.update(cx, |pin, window, cx| {
@@ -635,6 +653,7 @@ impl CaptureView {
 
     fn get_shows_magnifier(&self) -> bool {
         return self.screenshot.is_some()
+            && !matches!(self.mode, Mode::Video)
             && (self.selection.is_none() || self.get_drag_mode() == Some(DragMode::New))
             && self.get_cursor() == CursorStyle::Crosshair;
     }
@@ -980,6 +999,9 @@ impl CaptureView {
         ) {
             self.drag = None;
         }
+        if matches!(action, EditorAction::Tool(_) | EditorAction::Variant(_)) {
+            self.show_record_options = false;
+        }
         if action == EditorAction::Record {
             let Some(bounds) = self.get_screen_selection() else {
                 self.error = Some("Select an area first".into());
@@ -1014,6 +1036,12 @@ impl CaptureView {
             EditorAction::TextStyle(attribute) => self.toggle_text_attribute(attribute),
             EditorAction::ColorPicker => self.pick_color(cx),
             EditorAction::Layers => self.show_layers = !self.show_layers,
+            EditorAction::RecordOptions => self.show_record_options = !self.show_record_options,
+            EditorAction::SetRecording(settings) => {
+                if let Err(error) = config::update(cx, |config| config.recording = settings) {
+                    self.error = Some(format!("{error:#}").into());
+                }
+            }
             EditorAction::Delete => self.editor.delete_selected(),
             EditorAction::Undo => self.editor.undo_change(),
             EditorAction::Redo => self.editor.redo_change(),
@@ -1037,6 +1065,15 @@ impl CaptureView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<bool> {
+        if matches!(self.mode, Mode::Video) {
+            if matches!(
+                action,
+                EditorAction::Copy | EditorAction::Save | EditorAction::QuickSave
+            ) {
+                cx.emit(video::VideoRequest::Export);
+            }
+            return Ok(false);
+        }
         let image = Arc::new(self.create_export_image(cx)?);
         let screenshot = self.screenshot.clone();
         if action == EditorAction::Apply {
@@ -1153,6 +1190,10 @@ impl CaptureView {
                 state.capture_cursor = !state.capture_cursor;
                 self.apply_cursor(window, cx);
             }
+            return;
+        }
+        if key == "space" && matches!(self.mode, Mode::Video) {
+            cx.emit(video::VideoRequest::TogglePlayback);
             return;
         }
         if key == "c" && self.get_shows_magnifier() {
@@ -1272,8 +1313,12 @@ impl CaptureView {
         let selection = self
             .selection
             .filter(|selection| layout::get_is_valid_selection(*selection));
+        let blurs_only_video = matches!(self.mode, Mode::Video)
+            && scene
+                .iter()
+                .all(|annotation| annotation.tool == Tool::Mosaic);
         let preview = &mut self.raster_preview;
-        if split == 0 || selection.is_none() {
+        if split == 0 || selection.is_none() || blurs_only_video {
             if let Some(image) = preview.image.take() {
                 cx.drop_image(image, Some(window));
             }
@@ -1336,6 +1381,8 @@ impl CaptureView {
         }
     }
 }
+
+impl EventEmitter<video::VideoRequest> for CaptureView {}
 
 fn get_command_action(key: &str, shift: bool) -> Option<EditorAction> {
     return Some(match key {
@@ -1630,7 +1677,7 @@ impl Render for CaptureView {
 mod tests {
     use super::{
         CaptureView, DragMode, EditorAction, Mode, constrain_point, get_cursor_style,
-        prepare_screenshot,
+        prepare_screenshot, video::VideoRequest,
     };
     use crate::{
         capture::layout::ResizeHandle,
@@ -1640,11 +1687,11 @@ mod tests {
     };
     use glam::{Vec2, vec2};
     use gpui_kit::{
-        AppContext, CursorStyle, InputEvent, KeyDownEvent, Keystroke, MouseDownEvent,
-        MouseMoveEvent, TestAppContext, WindowHandle, point, px, test::TestWindowExt,
+        AppContext, Context, CursorStyle, InputEvent, KeyDownEvent, Keystroke, MouseDownEvent,
+        MouseMoveEvent, TestAppContext, Window, WindowHandle, point, px, test::TestWindowExt,
     };
     use image::RgbaImage;
-    use std::sync::Arc;
+    use std::{cell::RefCell, rc::Rc, sync::Arc};
 
     fn create_capture(cx: &mut TestAppContext) -> WindowHandle<CaptureView> {
         cx.update(|cx| {
@@ -1664,6 +1711,97 @@ mod tests {
                 cx,
             )
         });
+    }
+
+    fn press_key(
+        key: &str,
+        capture: &mut CaptureView,
+        window: &mut Window,
+        cx: &mut Context<CaptureView>,
+    ) {
+        capture.handle_key(
+            &KeyDownEvent {
+                keystroke: Keystroke::parse(key).unwrap(),
+                is_held: false,
+                prefer_character_input: false,
+            },
+            window,
+            cx,
+        );
+    }
+
+    #[gpui_kit::test]
+    fn video_editor_keys_request_export_and_playback_and_closing_always_confirms(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(crate::app::config::Config::default());
+        });
+        let canvas = Rect {
+            pos: vec2(10.0, 20.0),
+            size: vec2(100.0, 50.0),
+        };
+        let window = cx.add_window(|window, cx| {
+            CaptureView::new(
+                Rect {
+                    pos: Vec2::ZERO,
+                    size: vec2(200.0, 150.0),
+                },
+                Mode::Video,
+                Some(Screenshot {
+                    image: Arc::new(RgbaImage::new(200, 100)),
+                    bounds: canvas,
+                    windows: Vec::new(),
+                }),
+                Vec2::ZERO,
+                window,
+                cx,
+            )
+        });
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let entity = window.root(cx).unwrap();
+        let received = requests.clone();
+        cx.update(|cx| {
+            cx.subscribe(&entity, move |_, request: &VideoRequest, _| {
+                received
+                    .borrow_mut()
+                    .push(matches!(request, VideoRequest::Export));
+            })
+            .detach();
+        });
+        window
+            .update(cx, |capture, window, cx| {
+                assert!(capture.background.is_none());
+                assert_eq!(capture.selection, Some(canvas));
+                let blur = Annotation {
+                    tool: Tool::Mosaic,
+                    points: vec![vec2(20.0, 30.0), vec2(60.0, 50.0)],
+                    ..Default::default()
+                };
+                assert_eq!(capture.update_raster_preview(&[blur], window, cx), 1);
+                assert!(capture.raster_preview.task.is_none());
+                for key in ["enter", "cmd-s", "space", "escape"] {
+                    press_key(key, capture, window, cx);
+                }
+                assert!(capture.confirming_discard);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(*requests.borrow(), [true, true, false]);
+    }
+
+    #[gpui_kit::test]
+    fn record_options_close_when_choosing_a_tool(cx: &mut TestAppContext) {
+        let window = create_capture(cx);
+        window
+            .update(cx, |capture, window, cx| {
+                capture.perform_action(EditorAction::RecordOptions, window, cx);
+                assert!(capture.show_record_options);
+                capture.perform_action(EditorAction::Tool(Tool::Pen), window, cx);
+                assert!(!capture.show_record_options);
+            })
+            .unwrap();
     }
 
     #[gpui_kit::test]

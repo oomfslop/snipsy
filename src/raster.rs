@@ -196,26 +196,24 @@ pub fn render_selection(
                 composite_svg(&mut output, &svg, offset, scale_x, scale_y, fonts)?;
                 svg.clear();
             }
-            let start = annotation.points[0].min(*annotation.points.last().unwrap()) - offset;
-            let end = annotation.points[0].max(*annotation.points.last().unwrap()) - offset;
-            let left = (start.x * scale_x).max(0.0) as u32;
-            let top = (start.y * scale_y).max(0.0) as u32;
-            let right = (end.x * scale_x).ceil().clamp(0.0, output.width() as f32) as u32;
-            let bottom = (end.y * scale_y).ceil().clamp(0.0, output.height() as f32) as u32;
+            let (left, top, right, bottom) = get_mosaic_pixels(
+                annotation,
+                offset,
+                glam::vec2(scale_x, scale_y),
+                output.dimensions(),
+            );
+            let amount = get_blur_amount(annotation, scale_x);
             if annotation.blur_mode == BlurMode::Gaussian {
                 if right > left && bottom > top {
                     let region =
                         image::imageops::crop_imm(&output, left, top, right - left, bottom - top)
                             .to_image();
-                    let blurred = image::imageops::blur(
-                        &region,
-                        (annotation.intensity * scale_x / 3.0).max(0.5),
-                    );
+                    let blurred = image::imageops::blur(&region, amount);
                     image::imageops::replace(&mut output, &blurred, left as i64, top as i64);
                 }
                 continue;
             }
-            let block = (annotation.intensity * scale_x).max(1.0) as u32;
+            let block = amount as u32;
             for y in (top..bottom).step_by(block as usize) {
                 for x in (left..right).step_by(block as usize) {
                     let mut sum = [0u64; 4];
@@ -244,6 +242,86 @@ pub fn render_selection(
         composite_svg(&mut output, &svg, offset, scale_x, scale_y, fonts)?;
     }
     return Ok(output);
+}
+
+fn get_mosaic_pixels(
+    annotation: &Annotation,
+    offset: glam::Vec2,
+    scale: glam::Vec2,
+    (width, height): (u32, u32),
+) -> (u32, u32, u32, u32) {
+    let start = annotation.points[0].min(*annotation.points.last().unwrap()) - offset;
+    let end = annotation.points[0].max(*annotation.points.last().unwrap()) - offset;
+    return (
+        (start.x * scale.x).max(0.0) as u32,
+        (start.y * scale.y).max(0.0) as u32,
+        (end.x * scale.x).ceil().clamp(0.0, width as f32) as u32,
+        (end.y * scale.y).ceil().clamp(0.0, height as f32) as u32,
+    );
+}
+
+fn get_blur_amount(annotation: &Annotation, scale: f32) -> f32 {
+    return match annotation.blur_mode {
+        BlurMode::Gaussian => (annotation.intensity * scale / 3.0).max(0.5),
+        BlurMode::Pixelated => (annotation.intensity * scale).max(1.0).floor(),
+    };
+}
+
+pub enum VideoEffect {
+    Overlay(RgbaImage),
+    Blur {
+        rect: Rect,
+        mode: BlurMode,
+        amount: f32,
+    },
+}
+
+/// Mirrors `render_selection` for video frames: annotations between blurs are flattened into
+/// overlays, and blurs apply to everything composited below them.
+pub fn create_video_effects<'a>(
+    size: (u32, u32),
+    canvas: Rect,
+    annotations: impl Iterator<Item = &'a Annotation>,
+    fonts: &Arc<usvg::fontdb::Database>,
+) -> Result<Vec<VideoEffect>> {
+    let scale = glam::vec2(size.0 as f32, size.1 as f32) / canvas.size;
+    let mut effects = Vec::new();
+    let mut group = Vec::new();
+    let flush = |group: &mut Vec<&Annotation>, effects: &mut Vec<VideoEffect>| {
+        if group.is_empty() {
+            return anyhow::Ok(());
+        }
+        let image = RgbaImage::new(size.0, size.1);
+        effects.push(VideoEffect::Overlay(render_selection(
+            &image,
+            canvas,
+            canvas,
+            group.drain(..),
+            fonts,
+        )?));
+        return Ok(());
+    };
+    for annotation in annotations {
+        if annotation.tool != Tool::Mosaic {
+            group.push(annotation);
+            continue;
+        }
+        flush(&mut group, &mut effects)?;
+        let (left, top, right, bottom) = get_mosaic_pixels(annotation, canvas.pos, scale, size);
+        if right <= left || bottom <= top {
+            continue;
+        }
+        effects.push(VideoEffect::Blur {
+            rect: Rect::from_corners(
+                glam::vec2(left as f32, top as f32),
+                glam::vec2(right as f32, bottom as f32),
+            ),
+            mode: annotation.blur_mode,
+            amount: get_blur_amount(annotation, scale.x),
+        });
+    }
+    flush(&mut group, &mut effects)?;
+    return Ok(effects);
 }
 
 fn composite_svg(
@@ -806,5 +884,47 @@ mod tests {
         .unwrap();
         assert_eq!(output.get_pixel(2, 2), output.get_pixel(3, 2));
         assert_eq!(output.get_pixel(0, 0), image.get_pixel(0, 0));
+    }
+
+    #[test]
+    fn video_effects_flatten_annotations_between_blurs_in_video_pixels() {
+        let canvas = Rect {
+            pos: vec2(10.0, 10.0),
+            size: vec2(20.0, 10.0),
+        };
+        let rectangle = Annotation {
+            tool: Tool::Rectangle,
+            points: vec![vec2(12.0, 12.0), vec2(16.0, 16.0)],
+            filled: true,
+            color: Color(0xff0000),
+            ..Default::default()
+        };
+        let mosaic = Annotation {
+            tool: Tool::Mosaic,
+            points: vec![vec2(25.0, 18.0), vec2(20.0, 12.0)],
+            intensity: 2.0,
+            blur_mode: BlurMode::Pixelated,
+            ..Default::default()
+        };
+        let effects = create_video_effects(
+            (40, 20),
+            canvas,
+            [&rectangle, &mosaic, &rectangle].into_iter(),
+            &Arc::new(usvg::fontdb::Database::new()),
+        )
+        .unwrap();
+        let [
+            VideoEffect::Overlay(overlay),
+            VideoEffect::Blur { rect, mode, amount },
+            VideoEffect::Overlay(_),
+        ] = effects.as_slice()
+        else {
+            panic!("unexpected effects");
+        };
+        assert_eq!(overlay.dimensions(), (40, 20));
+        assert_eq!(*overlay.get_pixel(8, 8), Rgba([255, 0, 0, 255]));
+        assert_eq!(overlay.get_pixel(0, 0)[3], 0);
+        assert_eq!(*rect, Rect::from_corners(vec2(20.0, 4.0), vec2(30.0, 16.0)));
+        assert_eq!((*mode, *amount), (BlurMode::Pixelated, 4.0));
     }
 }

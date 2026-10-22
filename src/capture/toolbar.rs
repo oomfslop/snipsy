@@ -1,6 +1,7 @@
 use crate::{
     app::{
         config::Config,
+        recording::{BITRATE_OPTIONS, FPS_OPTIONS, RecordingSettings, VideoCodec},
         toolbar_layout::{self, ToolbarItem},
     },
     capture::{CaptureView, EditorAction, Mode, get_tool_family, layout},
@@ -146,8 +147,8 @@ pub fn get_item_spec(item: ToolbarItem, pin_editor: bool) -> Option<ToolbarItemS
         ToolbarItem::Record => create(
             IconName::CircleDot,
             "Record region",
-            None,
-            EditorAction::Record,
+            Some("double-click to start"),
+            EditorAction::RecordOptions,
         ),
         ToolbarItem::Select => create_tool(Tool::Select),
         ToolbarItem::Shape => create_tool(Tool::Rectangle),
@@ -198,8 +199,13 @@ impl CaptureView {
         return Button::new(id)
             .icon(icon)
             .tooltip(tooltip)
-            .on_click(cx.listener(move |capture, _, window, cx| {
+            .on_click(cx.listener(move |capture, event: &ClickEvent, window, cx| {
                 cx.stop_propagation();
+                let action = if action == EditorAction::RecordOptions && event.click_count() >= 2 {
+                    EditorAction::Record
+                } else {
+                    action
+                };
                 capture.perform_action(action, window, cx);
             }));
     }
@@ -235,6 +241,17 @@ impl CaptureView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let prompt = layout::create_centered_rect(selection, vec2(260.0, 124.0), self.bounds.size);
+        let (title, detail) = if matches!(self.mode, Mode::Video) {
+            (
+                "Discard recording?",
+                "This recording has not been exported.",
+            )
+        } else {
+            (
+                "Discard annotations?",
+                "Your annotations on this capture will be lost.",
+            )
+        };
         return ui::panel(cx)
             .id("discard-prompt")
             .absolute()
@@ -248,12 +265,12 @@ impl CaptureView {
             .text_center()
             .cursor(CursorStyle::Arrow)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(div().font_semibold().child("Discard annotations?"))
+            .child(div().font_semibold().child(title))
             .child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Your annotations on this capture will be lost."),
+                    .child(detail),
             )
             .child(
                 h_flex()
@@ -319,7 +336,9 @@ impl CaptureView {
             elements.push(self.render_action_bar(bar, cx).into_any_element());
         }
         let tool = self.editor.get_current_tool();
-        if !matches!(tool, Tool::Select | Tool::Eraser) {
+        if self.show_record_options && matches!(self.mode, Mode::Capture) {
+            elements.push(self.render_record_options(bar, cx).into_any_element());
+        } else if !matches!(tool, Tool::Select | Tool::Eraser) {
             elements.push(
                 self.render_tool_options(tool, bar, layers_panel, cx)
                     .into_any_element(),
@@ -337,7 +356,19 @@ impl CaptureView {
         let family = get_tool_family(self.editor.tool);
         let pin_editor = matches!(self.mode, Mode::PinEditor(_));
         let items = toolbar_layout::get_visible_items(&cx.global::<Config>().toolbar, |item| {
-            item == ToolbarItem::Record && !matches!(self.mode, Mode::Capture)
+            match self.mode {
+                Mode::Capture => false,
+                Mode::Video => matches!(
+                    item,
+                    ToolbarItem::Record
+                        | ToolbarItem::Copy
+                        | ToolbarItem::Save
+                        | ToolbarItem::Pin
+                        | ToolbarItem::Search
+                        | ToolbarItem::Print
+                ),
+                Mode::Whiteboard | Mode::PinEditor(_) => item == ToolbarItem::Record,
+            }
         });
         let toolbar = items
             .into_iter()
@@ -355,6 +386,7 @@ impl CaptureView {
                 toolbar.child(match spec.action {
                     EditorAction::Tool(tool) => button.selected(family == tool),
                     EditorAction::Layers => button.selected(self.show_layers),
+                    EditorAction::RecordOptions => button.selected(self.show_record_options),
                     EditorAction::Undo => {
                         button.disabled(self.editor.undo.is_empty() && self.editor.draft.is_none())
                     }
@@ -385,6 +417,85 @@ impl CaptureView {
                 .absolute()
                 .size_full(),
             )
+            .child(toolbar);
+    }
+
+    fn render_record_options(&self, bar: Rect, cx: &mut Context<Self>) -> impl IntoElement {
+        let settings = cx.global::<Config>().recording;
+        let option = |id: ElementId, label: String, next: RecordingSettings, cx: &Context<Self>| {
+            Button::new(id)
+                .label(label)
+                .selected(next == settings)
+                .on_click(cx.listener(move |capture, _, window, cx| {
+                    cx.stop_propagation();
+                    capture.perform_action(EditorAction::SetRecording(next), window, cx);
+                }))
+        };
+        let unit = |label: &'static str| {
+            div()
+                .px_1()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(label)
+        };
+        let toolbar = VideoCodec::ALL
+            .into_iter()
+            .fold(ui::create_toolbar("record-options"), |toolbar, codec| {
+                toolbar.child(option(
+                    ("codec", codec as usize).into(),
+                    codec.get_label().into(),
+                    RecordingSettings { codec, ..settings },
+                    cx,
+                ))
+            })
+            .content(Separator::vertical().h_4());
+        let toolbar = FPS_OPTIONS
+            .into_iter()
+            .fold(toolbar, |toolbar, fps| {
+                toolbar.child(option(
+                    ("fps", fps as usize).into(),
+                    fps.to_string(),
+                    RecordingSettings { fps, ..settings },
+                    cx,
+                ))
+            })
+            .content(unit("fps"))
+            .content(Separator::vertical().h_4());
+        let toolbar = BITRATE_OPTIONS
+            .into_iter()
+            .fold(toolbar, |toolbar, bitrate_mbps| {
+                toolbar.child(option(
+                    ("bitrate", bitrate_mbps as usize).into(),
+                    bitrate_mbps.to_string(),
+                    RecordingSettings {
+                        bitrate_mbps,
+                        ..settings
+                    },
+                    cx,
+                ))
+            })
+            .content(unit("Mbps"))
+            .content(Separator::vertical().h_4())
+            .child(
+                Button::new("start-recording")
+                    .icon(IconName::CircleDot)
+                    .label("Record")
+                    .primary()
+                    .on_click(cx.listener(|capture, _, window, cx| {
+                        cx.stop_propagation();
+                        capture.perform_action(EditorAction::Record, window, cx);
+                    })),
+            );
+        return ui::create_toolbar_panel(cx)
+            .id("record-options")
+            .absolute()
+            .left(px(bar.pos.x))
+            .top(px(layout::get_options_bar_y(bar, self.bounds.size)))
+            .max_w(px(self.bounds.size.x - bar.pos.x - layout::MARGIN))
+            .cursor(CursorStyle::Arrow)
+            .overflow_x_scroll()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(toolbar);
     }
 
