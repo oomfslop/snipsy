@@ -17,7 +17,7 @@ shutil.copy2(binary, destination / "snipsy")
 with (bundle / "Contents" / "Info.plist").open("wb") as file:
     plistlib.dump({
         "CFBundleExecutable": "snipsy",
-        "CFBundleIdentifier": "app.snipsy.Snipsy",
+        "CFBundleIdentifier": "desu.tei.snipsy",
         "CFBundleName": "Snipsy",
         "CFBundleDisplayName": "Snipsy",
         "CFBundlePackageType": "APPL",
