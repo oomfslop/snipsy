@@ -1,6 +1,6 @@
 use crate::{
     geometry::{Color, Rect},
-    raster::{self, Screenshot},
+    raster::{self, CursorSnapshot, Screenshot},
 };
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use async_channel::{Receiver, Sender};
@@ -690,6 +690,54 @@ fn load_shareable_content(callback: impl Fn(Result<Arc<ShareableContent>>) + 'st
     }
 }
 
+pub fn get_cursor_snapshot() -> Option<CursorSnapshot> {
+    // Deprecated in favor of ScreenCaptureKit's showsCursor, which would capture the overlay's cursor instead.
+    #[allow(deprecated)]
+    let cursor = NSCursor::currentSystemCursor()?;
+    let image = cursor.image();
+    let size = image.size();
+    let size = vec2(size.width as f32, size.height as f32);
+    let (width, height) = get_scaled_size(size, get_desktop_scale()).ok()?;
+    let mut rect = NSRect::new(NSPoint::ZERO, NSSize::new(width as f64, height as f64));
+    // SAFETY: `rect` is a valid in/out pointer; no context or hints are needed.
+    let source = unsafe { image.CGImageForProposedRect_context_hints(&mut rect, None, None) }?;
+    let mut pixels = image::RgbaImage::new(width, height);
+    // SAFETY: kCGColorSpaceSRGB is always defined.
+    let srgb = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))?;
+    // SAFETY: the context draws into `pixels`, which outlives it and has `width * 4` byte rows.
+    let context = unsafe {
+        CGBitmapContextCreate(
+            pixels.as_mut_ptr().cast(),
+            width as usize,
+            height as usize,
+            8,
+            width as usize * 4,
+            Some(&srgb),
+            CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0,
+        )
+    }?;
+    CGContext::draw_image(
+        Some(&context),
+        CGRect::new(CGPoint::ZERO, CGSize::new(width as f64, height as f64)),
+        Some(&source),
+    );
+    drop(context);
+    for pixel in pixels.pixels_mut() {
+        let alpha = pixel[3] as u32;
+        for channel in &mut pixel.0[..3] {
+            if let Some(straight) = (*channel as u32 * 255).checked_div(alpha) {
+                *channel = straight.min(255) as u8;
+            }
+        }
+    }
+    let hotspot = cursor.hotSpot();
+    return Some(CursorSnapshot {
+        image: pixels,
+        position: get_pointer_position() - vec2(hotspot.x as f32, hotspot.y as f32),
+        size,
+    });
+}
+
 pub fn get_window_id(window: &gpui_kit::Window) -> u32 {
     return u32::try_from(get_native_window(window).windowNumber()).unwrap_or_default();
 }
@@ -698,7 +746,6 @@ pub fn capture_screen(
     source: &CaptureSource,
     overlay: u32,
     bounds: Rect,
-    shows_cursor: bool,
     windows: Vec<Rect>,
     sender: Sender<Result<Screenshot>>,
 ) {
@@ -707,7 +754,7 @@ pub fn capture_screen(
     if let Some(content) = cached.filter(|content| {
         content.get_display_bounds() == Some(bounds) && content.get_window(overlay).is_some()
     }) {
-        capture_displays(&content, overlay, bounds, shows_cursor, windows, sender);
+        capture_displays(&content, overlay, bounds, windows, sender);
         load_shareable_content(move |result| {
             if let Ok(content) = result {
                 *source.0.lock().expect("capture source poisoned") = Some(content);
@@ -718,14 +765,7 @@ pub fn capture_screen(
     load_shareable_content(move |result| match result {
         Ok(content) => {
             *source.0.lock().expect("capture source poisoned") = Some(content.clone());
-            capture_displays(
-                &content,
-                overlay,
-                bounds,
-                shows_cursor,
-                windows.clone(),
-                sender.clone(),
-            );
+            capture_displays(&content, overlay, bounds, windows.clone(), sender.clone());
         }
         Err(error) => {
             let _ = sender.try_send(Err(error));
@@ -737,7 +777,6 @@ fn capture_displays(
     content: &ShareableContent,
     overlay: u32,
     bounds: Rect,
-    shows_cursor: bool,
     windows: Vec<Rect>,
     sender: Sender<Result<Screenshot>>,
 ) {
@@ -762,7 +801,7 @@ fn capture_displays(
                     let config = SCStreamConfiguration::new();
                     config.setWidth((display_bounds.size.x * scale).round() as usize);
                     config.setHeight((display_bounds.size.y * scale).round() as usize);
-                    config.setShowsCursor(shows_cursor);
+                    config.setShowsCursor(false);
                     (scale, config, CGDisplayCopyColorSpace(display.displayID()))
                 };
                 (filter, config, display_space, display_bounds, scale)

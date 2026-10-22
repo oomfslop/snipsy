@@ -19,6 +19,31 @@ pub struct Screenshot {
     pub windows: Vec<Rect>,
 }
 
+pub struct CursorSnapshot {
+    pub image: RgbaImage,
+    pub position: glam::Vec2,
+    pub size: glam::Vec2,
+}
+
+pub fn draw_cursor(image: &mut RgbaImage, bounds: Rect, cursor: &CursorSnapshot) {
+    let scale = image.width() as f32 / bounds.size.x;
+    let size = (cursor.size * scale).round().max(glam::Vec2::ONE);
+    let offset = ((cursor.position - bounds.pos) * scale).round();
+    let resized;
+    let pixels = if cursor.image.dimensions() == (size.x as u32, size.y as u32) {
+        &cursor.image
+    } else {
+        resized = image::imageops::resize(
+            &cursor.image,
+            size.x as u32,
+            size.y as u32,
+            image::imageops::FilterType::Triangle,
+        );
+        &resized
+    };
+    image::imageops::overlay(image, pixels, offset.x as i64, offset.y as i64);
+}
+
 pub fn update_pixels(image: &mut RgbaImage, update: impl Fn(&mut [u8]) + Sync) {
     if image.is_empty() {
         return;
@@ -682,6 +707,31 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn cursor_is_drawn_at_its_position_scaled_and_blended() {
+        let bounds = Rect {
+            pos: vec2(100.0, 50.0),
+            size: vec2(20.0, 10.0),
+        };
+        let mut image = RgbaImage::from_pixel(40, 20, Rgba([0, 0, 255, 255]));
+        let mut cursor = RgbaImage::from_pixel(4, 4, Rgba([255, 0, 0, 255]));
+        cursor.put_pixel(0, 0, Rgba([255, 0, 0, 0]));
+        draw_cursor(
+            &mut image,
+            bounds,
+            &CursorSnapshot {
+                image: cursor,
+                position: vec2(105.0, 52.0),
+                size: vec2(4.0, 4.0),
+            },
+        );
+        assert_eq!(image.get_pixel(9, 3).0, [0, 0, 255, 255]);
+        assert_eq!(image.get_pixel(10, 4).0, [0, 0, 255, 255]);
+        assert_eq!(image.get_pixel(13, 7).0, [255, 0, 0, 255]);
+        assert_eq!(image.get_pixel(17, 11).0, [255, 0, 0, 255]);
+        assert_eq!(image.get_pixel(18, 12).0, [0, 0, 255, 255]);
     }
 
     #[test]

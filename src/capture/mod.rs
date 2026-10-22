@@ -8,7 +8,7 @@ use crate::{
     editor::{Annotation, BlurMode, Editor, TextAttribute, Tool},
     geometry::{Color, Rect},
     pin, platform,
-    raster::{self, Screenshot},
+    raster::{self, CursorSnapshot, Screenshot},
     ui::{self, View, magnifier},
 };
 use anyhow::{Result, anyhow};
@@ -54,26 +54,40 @@ pub fn start(cx: &mut App) {
         Ok(bounds) => bounds,
         Err(error) => return app::show_error(error),
     };
-    let windows = platform::get_capture_windows(bounds);
+    let cursor = platform::get_cursor_snapshot().map(Arc::new);
     let view = match show_overlay(bounds, Mode::Capture, None, cx) {
         Ok(view) => view,
         Err(error) => return app::show_error(error),
     };
     let _ = view.update(cx, |view, window, cx| {
-        view.windows = windows.clone();
+        view.cursor = cursor;
         view.activate(window, cx);
-        let (sender, receiver) = async_channel::bounded(1);
-        let shows_cursor = cx.global::<AppState>().capture_cursor;
-        let source = &cx.global::<Captures>().source;
-        let overlay = platform::get_window_id(window);
-        platform::capture_screen(source, overlay, bounds, shows_cursor, windows, sender);
-        let capture = cx.background_executor().spawn(async move {
-            let screenshot = receiver.recv().await??;
-            let background = raster::create_render_image(&screenshot.image);
-            return anyhow::Ok((screenshot, background));
-        });
-        view.load_capture(capture, window, cx)
+        view.request_capture(window, cx);
     });
+}
+
+struct LoadedCapture {
+    screenshot: Screenshot,
+    background: Arc<RenderImage>,
+    cursorless: Arc<RgbaImage>,
+}
+
+fn prepare_screenshot(
+    mut screenshot: Screenshot,
+    cursor: Option<Arc<CursorSnapshot>>,
+) -> LoadedCapture {
+    let cursorless = screenshot.image.clone();
+    if let Some(cursor) = cursor {
+        let mut image = (*cursorless).clone();
+        raster::draw_cursor(&mut image, screenshot.bounds, &cursor);
+        screenshot.image = Arc::new(image);
+    }
+    let background = raster::create_render_image(&screenshot.image);
+    return LoadedCapture {
+        screenshot,
+        background,
+        cursorless,
+    };
 }
 
 pub fn start_whiteboard(color: [u8; 4], cx: &mut App) {
@@ -274,6 +288,8 @@ struct CaptureView {
     mode: Mode,
     bounds: Rect,
     screenshot: Option<Screenshot>,
+    cursorless: Option<Arc<RgbaImage>>,
+    cursor: Option<Arc<CursorSnapshot>>,
     windows: Vec<Rect>,
     background: Option<Arc<RenderImage>>,
     raster_preview: RasterPreview,
@@ -328,6 +344,8 @@ impl CaptureView {
             mode,
             bounds,
             screenshot: None,
+            cursorless: None,
+            cursor: None,
             windows: Vec::new(),
             background: None,
             raster_preview: RasterPreview::default(),
@@ -439,18 +457,60 @@ impl CaptureView {
         );
     }
 
+    fn request_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.windows = platform::get_capture_windows(self.bounds);
+        let (sender, receiver) = async_channel::bounded(1);
+        platform::capture_screen(
+            &cx.global::<Captures>().source,
+            platform::get_window_id(window),
+            self.bounds,
+            self.windows.clone(),
+            sender,
+        );
+        let cursor = self.get_visible_cursor(cx);
+        let capture = cx.background_executor().spawn(async move {
+            let screenshot = receiver.recv().await??;
+            return anyhow::Ok(prepare_screenshot(screenshot, cursor));
+        });
+        self.load_capture(capture, window, cx);
+    }
+
+    fn get_visible_cursor(&self, cx: &App) -> Option<Arc<CursorSnapshot>> {
+        return cx
+            .global::<AppState>()
+            .capture_cursor
+            .then(|| self.cursor.clone())
+            .flatten();
+    }
+
+    fn apply_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(screenshot), Some(cursorless)) = (&self.screenshot, &self.cursorless) else {
+            return;
+        };
+        if self.capture_history_index != 0 {
+            return;
+        }
+        let screenshot = Screenshot {
+            image: cursorless.clone(),
+            ..screenshot.clone()
+        };
+        let cursor = self.get_visible_cursor(cx);
+        let capture = cx
+            .background_executor()
+            .spawn(async move { anyhow::Ok(prepare_screenshot(screenshot, cursor)) });
+        self.load_capture(capture, window, cx);
+    }
+
     fn load_capture(
         &mut self,
-        capture: Task<Result<(Screenshot, Arc<RenderImage>)>>,
+        capture: Task<Result<LoadedCapture>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.capture_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = capture.await;
             let _ = this.update_in(cx, |capture, window, cx| match result {
-                Ok((screenshot, background)) => {
-                    capture.complete_capture(screenshot, background, window, cx)
-                }
+                Ok(loaded) => capture.complete_capture(loaded, window, cx),
                 Err(error) => {
                     capture.dismiss(window, cx);
                     app::show_error(error);
@@ -461,11 +521,15 @@ impl CaptureView {
 
     fn complete_capture(
         &mut self,
-        screenshot: Screenshot,
-        background: Arc<RenderImage>,
+        loaded: LoadedCapture,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let LoadedCapture {
+            screenshot,
+            background,
+            cursorless,
+        } = loaded;
         if screenshot.bounds != self.bounds {
             self.dismiss(window, cx);
             app::show_error(anyhow!("Display configuration changed; capture again"));
@@ -476,8 +540,18 @@ impl CaptureView {
             .take(11)
             .collect();
         self.capture_history_index = 0;
-        self.background = Some(background);
+        for image in [
+            self.background.replace(background),
+            self.raster_preview.image.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            cx.drop_image(image, Some(window));
+        }
+        self.raster_preview = RasterPreview::default();
         self.screenshot = Some(screenshot);
+        self.cursorless = Some(cursorless);
         self.activate(window, cx);
         if let Some(action) = self.pending_action.take() {
             self.perform_action(action, window, cx);
@@ -508,6 +582,7 @@ impl CaptureView {
             return;
         };
         let history = std::mem::take(&mut self.capture_history);
+        let (cursor, cursorless) = (self.cursor.take(), self.cursorless.take());
         self.reset(
             self.bounds,
             self.mode.clone(),
@@ -519,6 +594,9 @@ impl CaptureView {
         self.set_screenshot(history[index].clone());
         self.capture_history = history;
         self.capture_history_index = index;
+        self.cursor = cursor;
+        self.cursorless = cursorless;
+        self.apply_cursor(window, cx);
     }
 
     fn get_pointer(&self, position: Point<Pixels>) -> Vec2 {
@@ -1070,10 +1148,11 @@ impl CaptureView {
             return self.perform_action(action, window, cx);
         }
         if key == "`" && matches!(self.mode, Mode::Capture) {
-            let state = cx.global_mut::<AppState>();
-            state.capture_cursor = !state.capture_cursor;
-            self.dismiss(window, cx);
-            cx.defer(start);
+            if !event.is_held {
+                let state = cx.global_mut::<AppState>();
+                state.capture_cursor = !state.capture_cursor;
+                self.apply_cursor(window, cx);
+            }
             return;
         }
         if key == "c" && self.get_shows_magnifier() {
@@ -1549,12 +1628,15 @@ impl Render for CaptureView {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaptureView, DragMode, EditorAction, Mode, constrain_point, get_cursor_style};
+    use super::{
+        CaptureView, DragMode, EditorAction, Mode, constrain_point, get_cursor_style,
+        prepare_screenshot,
+    };
     use crate::{
         capture::layout::ResizeHandle,
         editor::{Annotation, Editor, Tool},
         geometry::{Color, Rect},
-        raster::Screenshot,
+        raster::{CursorSnapshot, Screenshot},
     };
     use glam::{Vec2, vec2};
     use gpui_kit::{
@@ -2073,6 +2155,51 @@ mod tests {
             get_cursor_style(None, Tool::Pen, vec2(250.0, 150.0), Some(rect), canvas),
             CursorStyle::Arrow
         );
+    }
+
+    #[test]
+    fn cursor_is_drawn_on_a_copy_of_the_screenshot() {
+        let image = Arc::new(RgbaImage::from_pixel(20, 10, image::Rgba([0, 0, 255, 255])));
+        let screenshot = Screenshot {
+            image: image.clone(),
+            bounds: Rect {
+                pos: vec2(0.0, 0.0),
+                size: vec2(20.0, 10.0),
+            },
+            windows: Vec::new(),
+        };
+        let cursor = Arc::new(CursorSnapshot {
+            image: RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255])),
+            position: vec2(4.0, 4.0),
+            size: vec2(2.0, 2.0),
+        });
+        let loaded = prepare_screenshot(screenshot.clone(), Some(cursor));
+        assert!(Arc::ptr_eq(&loaded.cursorless, &image));
+        assert_eq!(loaded.screenshot.image.get_pixel(4, 4).0, [255, 0, 0, 255]);
+        assert_eq!(image.get_pixel(4, 4).0, [0, 0, 255, 255]);
+        let plain = prepare_screenshot(screenshot, None);
+        assert!(Arc::ptr_eq(&plain.screenshot.image, &image));
+    }
+
+    #[gpui_kit::test]
+    fn held_backtick_does_not_recapture(cx: &mut TestAppContext) {
+        let window = create_capture(cx);
+        window
+            .update(cx, |capture, window, cx| {
+                cx.set_global(crate::app::AppState::default());
+                capture.handle_key(
+                    &KeyDownEvent {
+                        keystroke: Keystroke::parse("`").unwrap(),
+                        is_held: true,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+                assert!(!cx.global::<crate::app::AppState>().capture_cursor);
+                assert!(capture.capture_task.is_none());
+            })
+            .unwrap();
     }
 
     #[gpui_kit::test]
