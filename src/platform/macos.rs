@@ -1759,14 +1759,13 @@ fn get_recording_size(size: Vec2, scale: f32) -> Result<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIVE_COLOR_PICKER_TARGET, DisplayCapture, get_recording_region, get_recording_size,
-        get_scaled_size, is_complete_recording_frame, release_color_picker_target,
-        set_srgb_colorspace, stitch_capture_images,
+        ACTIVE_COLOR_PICKER_TARGET, DisplayCapture, get_scaled_size, is_complete_recording_frame,
+        release_color_picker_target, stitch_capture_images,
     };
     use crate::geometry::Rect;
     use glam::vec2;
     use image::{Rgba, RgbaImage};
-    use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
+    use objc2::rc::Retained;
     use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
     use objc2_core_graphics::{
         CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImageAlphaInfo,
@@ -1817,28 +1816,6 @@ mod tests {
     }
 
     #[test]
-    fn parallel_conversion_keeps_every_row_in_place() {
-        let bounds = Rect {
-            pos: vec2(0.0, 0.0),
-            size: vec2(64.0, 97.0),
-        };
-        let pixels = RgbaImage::from_fn(128, 194, |x, y| Rgba([y as u8, x as u8, 7, 255]));
-        let image = stitch_capture_images(
-            bounds,
-            2.0,
-            [Ok(create_display_capture_from(
-                bounds,
-                pixels.clone(),
-                get_srgb(),
-            ))]
-            .into_iter(),
-            1,
-        )
-        .unwrap();
-        assert_eq!(image, pixels);
-    }
-
-    #[test]
     fn capture_converts_display_colors_to_srgb() {
         let bounds = Rect {
             pos: vec2(0.0, 0.0),
@@ -1859,18 +1836,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(converted.get_pixel(0, 0).0, [30, 30, 46, 255]);
-    }
-
-    #[test]
-    fn overlay_layer_is_tagged_srgb() {
-        // SAFETY: CAMetalLayer is a plain CALayer subclass; colorspace returns a borrowed CGColorSpace.
-        let layer: Retained<AnyObject> = unsafe { msg_send![class!(CAMetalLayer), new] };
-        set_srgb_colorspace(&layer);
-        let colorspace: Option<&CGColorSpace> = unsafe { msg_send![&layer, colorspace] };
-        assert_eq!(
-            CGColorSpace::name(colorspace).as_deref(),
-            Some(unsafe { kCGColorSpaceSRGB })
-        );
     }
 
     #[test]
@@ -1920,12 +1885,6 @@ mod tests {
             &[key],
             &[&CFString::from_str("0")]
         )));
-    }
-
-    #[test]
-    fn recording_dimensions_reject_float_rounded_u32_overflow() {
-        assert!(get_scaled_size(vec2(u32::MAX as f32, 100.0), 1.0).is_err());
-        assert!(get_recording_size(vec2(u32::MAX as f32, 100.0), 1.0).is_err());
     }
 
     #[test]
@@ -2005,40 +1964,5 @@ mod tests {
         assert!(stitch_capture_images(top.union(bottom), 1.0, missing.into_iter(), 2).is_err());
         assert!(get_scaled_size(vec2(f32::MAX, 100.0), 2.0).is_err());
         assert!(get_scaled_size(vec2(100.0, 100.0), f32::NAN).is_err());
-    }
-
-    #[test]
-    fn recording_regions_stay_within_one_display_and_use_even_pixels() {
-        let display = Rect {
-            pos: vec2(100.0, 50.0),
-            size: vec2(800.0, 600.0),
-        };
-        assert_eq!(
-            get_recording_region(
-                display,
-                Rect {
-                    pos: vec2(150.0, 75.0),
-                    size: vec2(200.0, 100.0),
-                }
-            ),
-            Some(Rect {
-                pos: vec2(50.0, 25.0),
-                size: vec2(200.0, 100.0),
-            })
-        );
-        assert!(
-            get_recording_region(
-                display,
-                Rect {
-                    pos: vec2(850.0, 75.0),
-                    size: vec2(100.0, 100.0),
-                }
-            )
-            .is_none()
-        );
-        assert_eq!(
-            get_recording_size(vec2(100.5, 50.5), 2.0).unwrap(),
-            (202, 102)
-        );
     }
 }

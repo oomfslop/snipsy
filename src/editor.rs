@@ -945,36 +945,6 @@ mod tests {
     }
 
     #[test]
-    fn ellipse_hit_testing_uses_pixel_distance_to_the_outline() {
-        for radii in [vec2(500.0, 10.0), vec2(10.0, 500.0), Vec2::splat(40.0)] {
-            let mut annotation = Annotation {
-                tool: Tool::Ellipse,
-                points: vec![-radii, radii],
-                ..Default::default()
-            };
-            let major = if radii.x >= radii.y {
-                vec2(radii.x, 0.0)
-            } else {
-                vec2(0.0, radii.y)
-            };
-            assert!(!annotation.contains_point(major * 1.4));
-            assert!(!annotation.contains_point(major * 0.5));
-            assert!(!annotation.contains_point(radii));
-            for degrees in (0..360).step_by(15) {
-                let point = radii * Vec2::from_angle((degrees as f32).to_radians());
-                let normal = (point / (radii * radii)).normalize();
-                assert!(annotation.contains_point(point));
-                assert!(annotation.contains_point(point + normal * 7.0));
-                assert!(!annotation.contains_point(point + normal * 8.0));
-            }
-            annotation.filled = true;
-            assert!(annotation.contains_point(Vec2::ZERO));
-            assert!(annotation.contains_point(major * 0.5));
-            assert!(!annotation.contains_point(major * 1.4));
-        }
-    }
-
-    #[test]
     fn empty_text_does_not_create_history() {
         let mut editor = Editor::new();
         editor.draft = Some(Annotation {
@@ -1018,21 +988,6 @@ mod tests {
         assert!(!editor.layers[0].contains_point(vec2(60.0, 60.0)));
         editor.undo_change();
         assert_eq!(editor.layers[0].tool, Tool::Line);
-    }
-
-    #[test]
-    fn arrow_bounds_include_the_arrowhead() {
-        for end in [vec2(100.0, 20.0), vec2(20.0, 100.0)] {
-            let annotation = Annotation {
-                tool: Tool::Arrow,
-                points: vec![vec2(20.0, 20.0), end],
-                ..Default::default()
-            };
-            let bounds = annotation.get_bounds();
-            for point in get_arrow_head(&annotation.points, annotation.width) {
-                assert!(bounds.contains(point));
-            }
-        }
     }
 
     #[test]

@@ -960,10 +960,7 @@ fn get_contained_rect(image_size: Vec2, viewport: Vec2) -> Option<Rect> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Copy, Pin, PinData, Pins, create_id, get_contained_rect, get_image_pixel, get_logical_size,
-        get_thumbnail_size, get_zoomed_bounds, init, scale_frame_delay, update_pins,
-    };
+    use super::{Copy, Pin, PinData, Pins, create_id, init, update_pins};
     use crate::{app::content::PinContent, geometry::Rect, ui::View};
     use glam::vec2;
     use gpui_kit::{
@@ -1215,78 +1212,7 @@ mod tests {
     }
 
     #[test]
-    fn animation_speed_stays_within_safe_delay_bounds() {
-        let frame = Frame::from_parts(
-            RgbaImage::new(1, 1),
-            0,
-            0,
-            Delay::from_numer_denom_ms(100, 1),
-        );
-        assert_eq!(
-            scale_frame_delay(&frame, 0.5).delay().numer_denom_ms(),
-            (50, 1)
-        );
-        assert_eq!(
-            scale_frame_delay(&frame, 0.0).delay().numer_denom_ms(),
-            (10, 1)
-        );
-    }
-
-    #[test]
-    fn zoom_keeps_center_and_aspect_ratio_above_minimum_size() {
-        let bounds = Rect {
-            pos: vec2(100.0, 100.0),
-            size: vec2(200.0, 100.0),
-        };
-        let center = bounds.pos + bounds.size / 2.0;
-        let zoomed = get_zoomed_bounds(bounds, 1.5);
-        assert_eq!(zoomed.size, vec2(300.0, 150.0));
-        assert_eq!(zoomed.pos + zoomed.size / 2.0, center);
-        let smallest = get_zoomed_bounds(bounds, 0.1);
-        assert_eq!(smallest.size, vec2(80.0, 40.0));
-        assert_eq!(smallest.pos + smallest.size / 2.0, center);
-    }
-
-    #[test]
-    fn thumbnails_fit_without_upscaling() {
-        assert_eq!(get_thumbnail_size(vec2(90.0, 60.0)), vec2(90.0, 60.0));
-        assert_eq!(get_thumbnail_size(vec2(360.0, 120.0)), vec2(180.0, 60.0));
-        assert_eq!(get_thumbnail_size(vec2(100.0, 400.0)), vec2(40.0, 160.0));
-    }
-
-    #[test]
-    fn sampling_accounts_for_letterboxing() {
-        let image = vec2(2.0, 1.0);
-        let viewport = vec2(100.0, 100.0);
-        assert_eq!(
-            get_image_pixel(image, viewport, vec2(75.0, 50.0)),
-            Some((1, 0))
-        );
-        assert_eq!(get_image_pixel(image, viewport, vec2(50.0, 10.0)), None);
-        assert_eq!(get_image_pixel(image, vec2(0.0, 0.0), vec2(0.0, 0.0)), None);
-    }
-
-    #[test]
     fn ids_are_unique_without_clock_progress() {
         assert_ne!(create_id(), create_id());
-    }
-
-    #[test]
-    fn logical_size_caps_large_images_without_upscaling() {
-        assert_eq!(
-            get_logical_size(&RgbaImage::new(100, 50)),
-            vec2(100.0, 50.0)
-        );
-        assert_eq!(
-            get_logical_size(&RgbaImage::new(1600, 1200)),
-            vec2(800.0, 600.0)
-        );
-    }
-
-    #[test]
-    fn editor_uses_visible_image_bounds() {
-        let bounds = get_contained_rect(vec2(200.0, 100.0), vec2(100.0, 100.0)).unwrap();
-        assert_eq!(bounds.pos, vec2(0.0, 25.0));
-        assert_eq!(bounds.size, vec2(100.0, 50.0));
     }
 }

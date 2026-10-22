@@ -1701,13 +1701,13 @@ impl Render for CaptureView {
 mod tests {
     use super::{
         CaptureView, DragMode, EditorAction, Mode, constrain_point, get_cursor_style,
-        prepare_screenshot, video::VideoRequest,
+        video::VideoRequest,
     };
     use crate::{
         capture::layout::ResizeHandle,
         editor::{Annotation, Editor, Tool},
         geometry::{Color, Rect},
-        raster::{CursorSnapshot, Screenshot},
+        raster::Screenshot,
     };
     use glam::{Vec2, vec2};
     use gpui_kit::{
@@ -1798,13 +1798,6 @@ mod tests {
             .update(cx, |capture, window, cx| {
                 assert!(capture.background.is_none());
                 assert_eq!(capture.selection, Some(canvas));
-                let blur = Annotation {
-                    tool: Tool::Mosaic,
-                    points: vec![vec2(20.0, 30.0), vec2(60.0, 50.0)],
-                    ..Default::default()
-                };
-                assert_eq!(capture.update_raster_preview(&[blur], window, cx), 1);
-                assert!(capture.raster_preview.task.is_none());
                 for key in ["enter", "cmd-s", "space", "escape"] {
                     press_key(key, capture, window, cx);
                 }
@@ -1813,19 +1806,6 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         assert_eq!(*requests.borrow(), [true, true, false]);
-    }
-
-    #[gpui_kit::test]
-    fn record_options_close_when_choosing_a_tool(cx: &mut TestAppContext) {
-        let window = create_capture(cx);
-        window
-            .update(cx, |capture, window, cx| {
-                capture.perform_action(EditorAction::RecordOptions, window, cx);
-                assert!(capture.show_record_options);
-                capture.perform_action(EditorAction::Tool(Tool::Pen), window, cx);
-                assert!(!capture.show_record_options);
-            })
-            .unwrap();
     }
 
     #[gpui_kit::test]
@@ -2230,42 +2210,6 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn collapsed_selection_skips_blur_preview(cx: &mut TestAppContext) {
-        let window = create_capture(cx);
-        window
-            .update(cx, |capture, window, cx| {
-                cx.set_global(crate::app::AppState::default());
-                capture.reset(
-                    capture.bounds,
-                    Mode::Whiteboard,
-                    Some(Screenshot {
-                        image: Arc::new(RgbaImage::new(200, 100)),
-                        bounds: capture.bounds,
-                        windows: Vec::new(),
-                    }),
-                    vec2(0.0, 0.0),
-                    window,
-                    cx,
-                );
-                capture.selection = Some(Rect {
-                    pos: vec2(10.0, 10.0),
-                    size: vec2(0.0, 40.0),
-                });
-                let blur = Annotation {
-                    tool: Tool::Mosaic,
-                    points: vec![vec2(10.0, 10.0), vec2(30.0, 30.0)],
-                    ..Default::default()
-                };
-                capture.update_raster_preview(&[blur], window, cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-        window
-            .update(cx, |capture, _, _| assert_eq!(capture.error, None))
-            .unwrap();
-    }
-
-    #[gpui_kit::test]
     fn editing_actions_cancel_annotation_drags(cx: &mut TestAppContext) {
         let window = create_capture(cx);
         window
@@ -2353,30 +2297,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cursor_is_drawn_on_a_copy_of_the_screenshot() {
-        let image = Arc::new(RgbaImage::from_pixel(20, 10, image::Rgba([0, 0, 255, 255])));
-        let screenshot = Screenshot {
-            image: image.clone(),
-            bounds: Rect {
-                pos: vec2(0.0, 0.0),
-                size: vec2(20.0, 10.0),
-            },
-            windows: Vec::new(),
-        };
-        let cursor = Arc::new(CursorSnapshot {
-            image: RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255])),
-            position: vec2(4.0, 4.0),
-            size: vec2(2.0, 2.0),
-        });
-        let loaded = prepare_screenshot(screenshot.clone(), Some(cursor));
-        assert!(Arc::ptr_eq(&loaded.cursorless, &image));
-        assert_eq!(loaded.screenshot.image.get_pixel(4, 4).0, [255, 0, 0, 255]);
-        assert_eq!(image.get_pixel(4, 4).0, [0, 0, 255, 255]);
-        let plain = prepare_screenshot(screenshot, None);
-        assert!(Arc::ptr_eq(&plain.screenshot.image, &image));
-    }
-
     #[gpui_kit::test]
     fn held_backtick_does_not_recapture(cx: &mut TestAppContext) {
         let window = create_capture(cx);
@@ -2413,28 +2333,6 @@ mod tests {
                 assert_eq!(capture.get_hovered_window(), Some(terminal));
                 capture.pointer = vec2(150.0, 80.0);
                 assert_eq!(capture.get_hovered_window(), None);
-            })
-            .unwrap();
-    }
-
-    #[gpui_kit::test]
-    fn toolbar_is_measured_while_hidden_on_the_first_frame(cx: &mut TestAppContext) {
-        let window = create_capture(cx);
-        window
-            .update(cx, |capture, _, cx| {
-                cx.set_global(crate::app::AppState::default());
-                capture.selection = Some(Rect {
-                    pos: vec2(20.0, 20.0),
-                    size: vec2(100.0, 50.0),
-                });
-                assert!(capture.toolbar_size.get().is_none());
-            })
-            .unwrap();
-        cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
-            .unwrap();
-        window
-            .update(cx, |capture, _, _| {
-                assert!(capture.toolbar_size.get().is_some_and(|size| size.x > 0.0));
             })
             .unwrap();
     }

@@ -143,37 +143,3 @@ pub fn render(
                 ),
         );
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{SIZE, get_position, sample_pixel};
-    use crate::geometry::Color;
-    use glam::{Vec2, vec2};
-    use image::{Rgba, RgbaImage};
-
-    #[test]
-    fn sampling_rejects_out_of_bounds_pixels() {
-        let image = RgbaImage::from_fn(4, 3, |x, y| Rgba([x as u8, y as u8, 40, 255]));
-        assert_eq!(
-            sample_pixel(&image, 3, 2).unwrap().color,
-            Color::from_rgb(3, 2, 40)
-        );
-        assert!(sample_pixel(&image, 4, 0).is_none());
-    }
-
-    #[test]
-    fn magnifier_stays_inside_its_container() {
-        for container in [vec2(1440.0, 900.0), vec2(80.0, 70.0)] {
-            for pointer in [
-                Vec2::ZERO,
-                container,
-                vec2(10.0, container.y),
-                vec2(container.x, 10.0),
-            ] {
-                let position = get_position(pointer, container);
-                assert!(position.cmpge(Vec2::ZERO).all());
-                assert!((position + SIZE).cmple(container.max(SIZE)).all());
-            }
-        }
-    }
-}

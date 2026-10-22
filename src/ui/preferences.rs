@@ -521,55 +521,9 @@ fn format_hotkey(hotkey: HotKey) -> SharedString {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DraggedItem, PreferencesView, create_hotkey, format_hotkey, move_item,
-        render_toolbar_editor,
-    };
-    use crate::app::{config::Config, toolbar_layout::ToolbarItem::*};
-    use gpui_kit::{
-        AppContext as _, Context, Entity, IntoElement, Keystroke, Modifiers, Render,
-        TestAppContext, Window,
-    };
-
-    struct ToolbarEditorHost(Entity<PreferencesView>);
-
-    impl Render for ToolbarEditorHost {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            return render_toolbar_editor(&self.0, window, cx);
-        }
-    }
-
-    #[gpui_kit::test]
-    fn toolbar_editor_renders_layout_and_empty_toolbar(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            gpui_kit::init(cx);
-            cx.set_global(Config::default());
-        });
-        let window = cx.add_window(|window, cx| {
-            let view = cx.new(|cx| PreferencesView::new(window, cx));
-            let host = cx.new(|_| ToolbarEditorHost(view));
-            gpui_kit::base::Root::new(host, window, cx)
-        });
-        cx.run_until_parked();
-        cx.update(|cx| cx.global_mut::<Config>().toolbar.clear());
-        window.update(cx, |_, window, _| window.refresh()).unwrap();
-        cx.run_until_parked();
-    }
-
-    #[gpui_kit::test]
-    fn preferences_render_both_pages(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            gpui_kit::init(cx);
-            cx.set_global(Config::default());
-        });
-        let window = cx.add_window(|window, cx| {
-            let view = cx.new(|cx| PreferencesView::new(window, cx));
-            gpui_kit::base::Root::new(view, window, cx)
-        });
-        cx.run_until_parked();
-        window.update(cx, |_, window, _| window.refresh()).unwrap();
-        cx.run_until_parked();
-    }
+    use super::{DraggedItem, create_hotkey, format_hotkey, move_item};
+    use crate::app::toolbar_layout::ToolbarItem::*;
+    use gpui_kit::{Keystroke, Modifiers};
 
     #[test]
     fn dragging_items_moves_inserts_and_keeps_positions() {

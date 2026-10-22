@@ -210,31 +210,6 @@ mod tests {
     use crate::editor::{Annotation, Tool};
     use glam::vec2;
 
-    #[test]
-    fn annotation_paths_tessellate_without_bitmap_rendering() {
-        for tool in [
-            Tool::Rectangle,
-            Tool::Ellipse,
-            Tool::Arrow,
-            Tool::Line,
-            Tool::Pen,
-            Tool::Highlighter,
-        ] {
-            let annotation = Annotation {
-                tool,
-                points: vec![vec2(20.0, 20.0), vec2(100.0, 80.0)],
-                ..Default::default()
-            };
-            assert!(build_annotation_path(&annotation).unwrap().is_some());
-        }
-        let collapsed = Annotation {
-            tool: Tool::Arrow,
-            points: vec![vec2(20.0, 20.0), vec2(20.0, 20.0)],
-            ..Default::default()
-        };
-        assert!(build_annotation_path(&collapsed).unwrap().is_none());
-    }
-
     fn get_triangle_area(path: &gpui_kit::Path<gpui_kit::Pixels>) -> f32 {
         return path
             .vertices

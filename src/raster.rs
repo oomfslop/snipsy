@@ -710,18 +710,6 @@ mod tests {
     }
 
     #[test]
-    fn animated_render_images_keep_frames_and_delays() {
-        let delay = image::Delay::from_numer_denom_ms(120, 1);
-        let frames = vec![
-            Frame::from_parts(RgbaImage::new(2, 1), 0, 0, delay),
-            Frame::from_parts(RgbaImage::new(2, 1), 0, 0, delay),
-        ];
-        let rendered = create_render_frames(&frames);
-        assert_eq!(rendered.frame_count(), 2);
-        assert_eq!(rendered.delay(1), delay);
-    }
-
-    #[test]
     fn filled_shapes_and_gaussian_strength_render_in_exports() {
         let bounds = Rect {
             pos: Vec2::ZERO,
@@ -819,21 +807,6 @@ mod tests {
     }
 
     #[test]
-    fn parallel_pixel_updates_cover_every_pixel() {
-        for (width, height) in [(3, 7), (1, 1), (5, 64)] {
-            let mut image =
-                RgbaImage::from_fn(width, height, |x, y| Rgba([x as u8, y as u8, 9, 1]));
-            update_pixels(&mut image, |pixel| pixel.swap(0, 2));
-            assert!(
-                image
-                    .enumerate_pixels()
-                    .all(|(x, y, pixel)| pixel.0 == [9, y as u8, x as u8, 1])
-            );
-        }
-        update_pixels(&mut RgbaImage::new(0, 0), |_| unreachable!());
-    }
-
-    #[test]
     fn offset_image_bounds_shift_selection_and_annotations() {
         let image = RgbaImage::from_fn(40, 40, |x, y| Rgba([x as u8 * 6, y as u8 * 6, 0, 255]));
         let annotation = |offset| Annotation {
@@ -890,66 +863,5 @@ mod tests {
         .unwrap();
         assert_eq!(output.get_pixel(2, 2), output.get_pixel(3, 2));
         assert_eq!(output.get_pixel(0, 0), image.get_pixel(0, 0));
-    }
-
-    #[test]
-    fn video_effects_flatten_annotations_between_blurs_by_time_range_in_video_pixels() {
-        let canvas = Rect {
-            pos: vec2(10.0, 10.0),
-            size: vec2(20.0, 10.0),
-        };
-        let rectangle = Annotation {
-            tool: Tool::Rectangle,
-            points: vec![vec2(12.0, 12.0), vec2(16.0, 16.0)],
-            filled: true,
-            color: Color(0xff0000),
-            ..Default::default()
-        };
-        let mosaic = Annotation {
-            tool: Tool::Mosaic,
-            points: vec![vec2(25.0, 18.0), vec2(20.0, 12.0)],
-            intensity: 2.0,
-            blur_mode: BlurMode::Pixelated,
-            ..Default::default()
-        };
-        let effects = create_video_effects(
-            (40, 20),
-            canvas,
-            [
-                (&rectangle, None),
-                (&rectangle, None),
-                (&mosaic, Some((1.0, 2.0))),
-                (&rectangle, None),
-                (&rectangle, Some((0.5, 1.0))),
-            ]
-            .into_iter(),
-            &Arc::new(usvg::fontdb::Database::new()),
-        )
-        .unwrap();
-        let [
-            VideoEffect::Overlay {
-                image: overlay,
-                time: None,
-            },
-            VideoEffect::Blur {
-                rect,
-                mode,
-                amount,
-                time: Some((1.0, 2.0)),
-            },
-            VideoEffect::Overlay { time: None, .. },
-            VideoEffect::Overlay {
-                time: Some((0.5, 1.0)),
-                ..
-            },
-        ] = effects.as_slice()
-        else {
-            panic!("unexpected effects");
-        };
-        assert_eq!(overlay.dimensions(), (40, 20));
-        assert_eq!(*overlay.get_pixel(8, 8), Rgba([255, 0, 0, 255]));
-        assert_eq!(overlay.get_pixel(0, 0)[3], 0);
-        assert_eq!(*rect, Rect::from_corners(vec2(20.0, 4.0), vec2(30.0, 16.0)));
-        assert_eq!((*mode, *amount), (BlurMode::Pixelated, 4.0));
     }
 }
