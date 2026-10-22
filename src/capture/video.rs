@@ -571,7 +571,7 @@ impl VideoEditor {
         self.export_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = async {
                 let Some(destination) = destination.recv().await?? else {
-                    return Ok(false);
+                    return Ok(None);
                 };
                 let effects = cx
                     .background_spawn(async move {
@@ -585,7 +585,7 @@ impl VideoEditor {
                 this.update(cx, |editor, cx| {
                     editor.export = Some(platform::export_video(
                         &editor.video.path,
-                        destination,
+                        destination.clone(),
                         editor.trim,
                         get_crop(selection, canvas, size),
                         effects,
@@ -603,15 +603,18 @@ impl VideoEditor {
                     this.update(cx, |_, cx| cx.notify())?;
                 }
                 receiver.recv().await??;
-                anyhow::Ok(true)
+                anyhow::Ok(Some(destination))
             }
             .await;
             let _ = this.update_in(cx, |editor, window, cx| {
                 editor.export = None;
                 editor.export_task = None;
                 match result {
-                    Ok(true) => window.remove_window(),
-                    Ok(false) => {}
+                    Ok(Some(destination)) => {
+                        platform::reveal_file(&destination);
+                        window.remove_window();
+                    }
+                    Ok(None) => {}
                     Err(error) => editor.error = Some(format!("{error:#}").into()),
                 }
                 cx.notify();

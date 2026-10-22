@@ -20,7 +20,7 @@ use objc2_app_kit::{
     NSCursor, NSEvent, NSImage, NSImageView, NSModalResponseOK, NSPasteboard,
     NSPasteboardTypeFileURL, NSPopUpMenuWindowLevel, NSPrintOperation, NSSavePanel, NSScreen,
     NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowCollectionBehavior,
-    NSWindowStyleMask,
+    NSWindowStyleMask, NSWorkspace,
 };
 use objc2_av_foundation::{
     AVAsset, AVAssetExportPresetHEVCHighestQuality, AVAssetExportPresetHighestQuality,
@@ -515,6 +515,13 @@ pub fn prompt_save_image(suggested_name: &str) -> Receiver<Result<Option<PathBuf
         .filter_map(|extension| UTType::typeWithFilenameExtension(&NSString::from_str(extension)))
         .collect::<Vec<_>>();
     return prompt_save(suggested_name, &NSArray::from_retained_slice(&types), None);
+}
+
+pub fn reveal_file(path: &Path) {
+    if let Some(url) = NSURL::from_file_path(path) {
+        NSWorkspace::sharedWorkspace()
+            .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
+    }
 }
 
 pub fn prompt_save_video() -> Receiver<Result<Option<PathBuf>>> {
