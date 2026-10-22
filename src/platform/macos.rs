@@ -413,15 +413,33 @@ pub fn configure_overlay(window: &gpui_kit::Window, bounds: Rect, resizable: boo
         NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary,
     );
-    let mtm = MainThreadMarker::new().expect("window config runs on the main thread");
+    set_native_frame(&native, bounds);
+}
+
+fn set_native_frame(native: &NSWindow, bounds: Rect) {
+    let mtm = MainThreadMarker::new().expect("window frame changes on the main thread");
     let frame = bounds.flip_vertically(get_primary_screen_height(mtm));
     native.setFrame_display(
         NSRect::new(
             NSPoint::new(frame.pos.x as f64, frame.pos.y as f64),
             NSSize::new(frame.size.x as f64, frame.size.y as f64),
         ),
-        false,
+        true,
     );
+}
+
+pub fn set_window_bounds(window: &gpui_kit::Window, bounds: Rect) {
+    let native = get_native_window(window);
+    let block = RcBlock::new(move || set_native_frame(&native, bounds));
+    // SAFETY: Foundation copies the block and executes it on the main queue. GPUI drops resizes that arrive during its current update.
+    unsafe { NSOperationQueue::mainQueue().addOperationWithBlock(&block) };
+}
+
+/// AppKit derives the shadow from the window's drawn content and caches it until invalidated.
+pub fn set_window_shadow(window: &gpui_kit::Window, enabled: bool) {
+    let native = get_native_window(window);
+    native.setHasShadow(enabled);
+    native.invalidateShadow();
 }
 
 /// GPUI leaves its CAMetalLayer untagged, so macOS shows the sRGB capture in the display's

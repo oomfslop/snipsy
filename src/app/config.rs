@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 #[serde(default)]
 pub struct Config {
     pub toolbar: Vec<ToolbarItem>,
+    pub pin_frame: bool,
     pub hotkeys: HotkeySettings,
     #[serde(skip)]
     path: PathBuf,
@@ -21,6 +22,7 @@ impl Default for Config {
     fn default() -> Self {
         return Self {
             toolbar: DEFAULT_ITEMS.to_vec(),
+            pin_frame: true,
             hotkeys: HotkeySettings::default(),
             path: PathBuf::new(),
         };

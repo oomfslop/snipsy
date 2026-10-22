@@ -3,6 +3,7 @@ mod backup;
 use crate::{
     app::{
         self,
+        config::{self, Config},
         content::{self, PinContent},
         export, storage,
     },
@@ -75,6 +76,7 @@ actions!(
         Edit,
         Paste,
         ToggleThumbnail,
+        ToggleFrame,
         Reset,
         Close,
         Destroy,
@@ -286,6 +288,7 @@ fn open(data: PinData, activate: bool, cx: &mut App) {
     };
     let _ = view.update(cx, |pin, window, cx| {
         pin.schedule_backup(window, cx);
+        platform::set_window_shadow(window, cx.global::<Config>().pin_frame);
         if pin.get_is_visible(cx) {
             platform::set_window_visible(window, true);
         }
@@ -309,6 +312,17 @@ fn update_pins(cx: &mut App, mut update: impl FnMut(&mut Pin, &mut Window, &mut 
 pub fn refresh_visibility(cx: &mut App) {
     update_pins(cx, |pin, window, cx| {
         platform::set_window_visible(window, pin.get_is_visible(cx))
+    });
+}
+
+fn toggle_frame(cx: &mut App) {
+    if let Err(error) = config::update(cx, |config| config.pin_frame = !config.pin_frame) {
+        return app::show_error(error);
+    }
+    let enabled = cx.global::<Config>().pin_frame;
+    update_pins(cx, |_, window, cx| {
+        platform::set_window_shadow(window, enabled);
+        cx.notify();
     });
 }
 
@@ -341,6 +355,7 @@ pub struct Pin {
     paused_frame: Option<(usize, Arc<RgbaImage>)>,
     backup_task: Option<Task<()>>,
     replace_task: Option<Task<()>>,
+    zoom_badge_task: Option<Task<()>>,
 }
 
 fn create_preview(content: &PinContent) -> Arc<RenderImage> {
@@ -362,6 +377,7 @@ impl Pin {
             paused_frame: None,
             backup_task: None,
             replace_task: None,
+            zoom_badge_task: None,
         };
     }
 
@@ -460,12 +476,19 @@ impl Pin {
         cx.notify();
     }
 
-    fn scale(&mut self, factor: f32, window: &mut Window) {
-        let size = window.viewport_size();
-        window.resize(gpui_kit::size(
-            (size.width * factor).max(px(MIN_SIZE)),
-            (size.height * factor).max(px(MIN_SIZE)),
-        ));
+    fn scale(&mut self, factor: f32, window: &mut Window, cx: &mut Context<Self>) {
+        platform::set_window_bounds(
+            window,
+            get_zoomed_bounds(ui::to_rect(window.bounds()), factor),
+        );
+        self.zoom_badge_task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let _ = this.update(cx, |pin, cx| {
+                pin.zoom_badge_task = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     fn set_click_through(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -636,9 +659,9 @@ impl Pin {
             .separator()
             .menu("Edit", Box::new(Edit))
             .menu_with_check(
-                "Thumbnail",
-                self.data.thumbnail_size.is_some(),
-                Box::new(ToggleThumbnail),
+                "Border and Shadow",
+                cx.global::<Config>().pin_frame,
+                Box::new(ToggleFrame),
             )
             .separator()
             .menu("Close", Box::new(Close))
@@ -660,6 +683,10 @@ impl Render for Pin {
         let pointer = window.mouse_position();
         let pointer = vec2(pointer.x.into(), pointer.y.into());
         let image = self.get_image().clone();
+        let zoom = self
+            .zoom_badge_task
+            .as_ref()
+            .map(|_| (viewport.x / self.data.original_size.x * 100.0).round());
         return div()
             .id("pin")
             .group("pin")
@@ -705,8 +732,9 @@ impl Render for Pin {
             .on_action(cx.listener(Self::reset))
             .on_action(cx.listener(Self::close))
             .on_action(cx.listener(Self::destroy))
-            .on_action(cx.listener(|pin, _: &ZoomIn, window, _| pin.scale(1.1, window)))
-            .on_action(cx.listener(|pin, _: &ZoomOut, window, _| pin.scale(0.9, window)))
+            .on_action(cx.listener(|_, _: &ToggleFrame, _, cx| cx.defer(toggle_frame)))
+            .on_action(cx.listener(|pin, _: &ZoomIn, window, cx| pin.scale(1.1, window, cx)))
+            .on_action(cx.listener(|pin, _: &ZoomOut, window, cx| pin.scale(0.9, window, cx)))
             .on_action(cx.listener(|pin, _: &MoreOpaque, window, cx| {
                 pin.set_opacity(pin.data.opacity + 0.1, window, cx)
             }))
@@ -802,7 +830,7 @@ impl Render for Pin {
                 } else if event.modifiers.platform {
                     pin.set_opacity(pin.data.opacity + delta * 0.002, window, cx);
                 } else {
-                    pin.scale((1.0 + delta * 0.002).clamp(0.8, 1.2), window);
+                    pin.scale((1.0 + delta * 0.002).clamp(0.8, 1.2), window, cx);
                 }
             }))
             .child(
@@ -811,6 +839,17 @@ impl Render for Pin {
                     .size_full()
                     .object_fit(ObjectFit::Contain),
             )
+            .when_some(zoom, |root, zoom| {
+                root.child(
+                    ui::panel(cx)
+                        .absolute()
+                        .top_1()
+                        .left_1()
+                        .px_1p5()
+                        .text_xs()
+                        .child(format!("{zoom}%")),
+                )
+            })
             .when_some(sample, |root, sample| {
                 root.child(magnifier::render(
                     image,
@@ -846,7 +885,7 @@ impl Render for Pin {
                             let focus = self.focus.clone();
                             Button::new(id)
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .icon(icon)
                                 .tooltip(label)
                                 .on_click(move |_, window, cx| {
@@ -882,6 +921,15 @@ fn scale_frame_delay(frame: &Frame, factor: f64) -> Frame {
     );
 }
 
+fn get_zoomed_bounds(bounds: Rect, factor: f32) -> Rect {
+    let factor = factor.max(MIN_SIZE / bounds.size.min_element());
+    let size = bounds.size * factor;
+    return Rect {
+        pos: bounds.pos + (bounds.size - size) / 2.0,
+        size,
+    };
+}
+
 fn get_thumbnail_size(size: Vec2) -> Vec2 {
     let scale = (size / vec2(180., 120.))
         .max_element()
@@ -914,7 +962,7 @@ fn get_contained_rect(image_size: Vec2, viewport: Vec2) -> Option<Rect> {
 mod tests {
     use super::{
         Copy, Pin, PinData, Pins, create_id, get_contained_rect, get_image_pixel, get_logical_size,
-        get_thumbnail_size, init, scale_frame_delay, update_pins,
+        get_thumbnail_size, get_zoomed_bounds, init, scale_frame_delay, update_pins,
     };
     use crate::{app::content::PinContent, geometry::Rect, ui::View};
     use glam::vec2;
@@ -925,6 +973,7 @@ mod tests {
     use std::sync::Arc;
 
     fn create_pin_window(cx: &mut TestAppContext, content: PinContent) -> WindowHandle<Pin> {
+        cx.update(|cx| cx.set_global(crate::app::config::Config::default()));
         let window = cx.add_window(|window, cx| {
             Pin::new(
                 PinData {
@@ -1181,6 +1230,21 @@ mod tests {
             scale_frame_delay(&frame, 0.0).delay().numer_denom_ms(),
             (10, 1)
         );
+    }
+
+    #[test]
+    fn zoom_keeps_center_and_aspect_ratio_above_minimum_size() {
+        let bounds = Rect {
+            pos: vec2(100.0, 100.0),
+            size: vec2(200.0, 100.0),
+        };
+        let center = bounds.pos + bounds.size / 2.0;
+        let zoomed = get_zoomed_bounds(bounds, 1.5);
+        assert_eq!(zoomed.size, vec2(300.0, 150.0));
+        assert_eq!(zoomed.pos + zoomed.size / 2.0, center);
+        let smallest = get_zoomed_bounds(bounds, 0.1);
+        assert_eq!(smallest.size, vec2(80.0, 40.0));
+        assert_eq!(smallest.pos + smallest.size / 2.0, center);
     }
 
     #[test]
