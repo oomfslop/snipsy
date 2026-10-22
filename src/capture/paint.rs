@@ -261,10 +261,16 @@ mod tests {
         };
         let path = build_annotation_path(&scribble).unwrap().unwrap();
         let disc = std::f32::consts::PI * 11.0 * 11.0;
-        assert!(get_triangle_area(&path) < disc, "{}", get_triangle_area(&path));
+        assert!(
+            get_triangle_area(&path) < disc,
+            "{}",
+            get_triangle_area(&path)
+        );
 
         let line = Annotation {
-            points: (0..=100).map(|index| vec2(index as f32 * 10.0, 0.0)).collect(),
+            points: (0..=100)
+                .map(|index| vec2(index as f32 * 10.0, 0.0))
+                .collect(),
             ..scribble.clone()
         };
         let area = get_triangle_area(&build_annotation_path(&line).unwrap().unwrap());

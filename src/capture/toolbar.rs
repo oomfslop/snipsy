@@ -8,12 +8,13 @@ use crate::{
     geometry::{Color, Rect},
     ui,
 };
-use glam::vec2;
+use glam::{Vec2, vec2};
 use gpui_kit::{
     assets::IconName,
     component::{
         ActiveTheme, Disableable as _, Icon, Selectable as _, Sizable as _, StyledExt as _,
         button::{Button, ButtonVariants as _},
+        h_flex,
         separator::Separator,
         slider::Slider,
     },
@@ -228,13 +229,82 @@ impl CaptureView {
             .child(format!("{} × {}", size.x, size.y));
     }
 
+    pub(super) fn render_discard_prompt(
+        &self,
+        selection: Rect,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let prompt = layout::create_centered_rect(selection, vec2(260.0, 124.0), self.bounds.size);
+        return ui::panel(cx)
+            .id("discard-prompt")
+            .absolute()
+            .left(px(prompt.pos.x))
+            .top(px(prompt.pos.y))
+            .w(px(prompt.size.x))
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .text_center()
+            .cursor(CursorStyle::Arrow)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(div().font_semibold().child("Discard annotations?"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Your annotations on this capture will be lost."),
+            )
+            .child(
+                h_flex()
+                    .mt_3()
+                    .gap_2()
+                    .child(
+                        Button::new("cancel-discard")
+                            .label("Cancel")
+                            .flex_1()
+                            .on_click(cx.listener(|capture, _, _, cx| {
+                                capture.confirming_discard = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("discard")
+                            .label("Discard")
+                            .primary()
+                            .flex_1()
+                            .on_click(
+                                cx.listener(|capture, _, window, cx| capture.dismiss(window, cx)),
+                            ),
+                    ),
+            );
+    }
+
     pub(super) fn render_toolbars(
         &self,
         selection: Rect,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let screen = self.bounds.size;
-        let bar = layout::create_action_bar_rect(selection, self.toolbar_size.get(), screen);
+        let has_action_bar = !cx.global::<Config>().toolbar.is_empty();
+        let measured = self.toolbar_size.get();
+        if has_action_bar && measured.is_none() {
+            let probe = Rect {
+                pos: Vec2::splat(layout::MARGIN),
+                size: Vec2::ZERO,
+            };
+            return vec![
+                div()
+                    .invisible()
+                    .child(self.render_action_bar(probe, cx))
+                    .into_any_element(),
+            ];
+        }
+        let bar = layout::create_action_bar_rect(
+            selection,
+            measured.unwrap_or(vec2(600.0, 36.0)),
+            screen,
+        );
         let layers_panel = self.show_layers.then(|| {
             let height = 36.0 + self.editor.layers.len().max(1) as f32 * (LAYER_ROW_HEIGHT + 2.0);
             layout::create_layers_panel_rect(
@@ -245,7 +315,7 @@ impl CaptureView {
             )
         });
         let mut elements = Vec::new();
-        if !cx.global::<Config>().toolbar.is_empty() {
+        if has_action_bar {
             elements.push(self.render_action_bar(bar, cx).into_any_element());
         }
         let tool = self.editor.get_current_tool();
@@ -306,7 +376,7 @@ impl CaptureView {
                 canvas(
                     move |bounds, _, cx| {
                         let size = vec2(bounds.size.width.into(), bounds.size.height.into());
-                        if measured.replace(size) != size {
+                        if measured.replace(Some(size)) != Some(size) {
                             cx.notify(entity);
                         }
                     },

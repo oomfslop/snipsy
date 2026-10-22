@@ -15,10 +15,7 @@ use anyhow::{Result, anyhow};
 use glam::{Vec2, vec2};
 use gpui_kit::{
     component::{
-        ActiveTheme, WindowExt as _,
-        button::{Button, ButtonVariants as _},
-        dialog::DialogEntrance,
-        h_flex,
+        ActiveTheme,
         slider::{SliderEvent, SliderState},
     },
     prelude::*,
@@ -285,11 +282,12 @@ struct CaptureView {
     custom_color: Option<Color>,
     show_layers: bool,
     show_toolbar: bool,
+    confirming_discard: bool,
     layer_drop_target: Option<(u64, bool)>,
     capture_history: Vec<Screenshot>,
     capture_history_index: usize,
     intensity: Entity<SliderState>,
-    toolbar_size: Rc<Cell<Vec2>>,
+    toolbar_size: Rc<Cell<Option<Vec2>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -337,11 +335,12 @@ impl CaptureView {
             custom_color: None,
             show_layers: false,
             show_toolbar: true,
+            confirming_discard: false,
             layer_drop_target: None,
             capture_history: Vec::new(),
             capture_history_index: 0,
             intensity,
-            toolbar_size: Rc::new(Cell::new(vec2(600.0, 36.0))),
+            toolbar_size: Rc::new(Cell::new(None)),
             _subscriptions: vec![subscription],
         };
         if let Some(screenshot) = screenshot {
@@ -400,47 +399,8 @@ impl CaptureView {
         if self.editor.layers.is_empty() {
             return self.dismiss(window, cx);
         }
-        if window.has_active_dialog(cx) {
-            return;
-        }
-        let capture = cx.entity().downgrade();
-        let discard = move |window: &mut Window, cx: &mut App| {
-            window.close_dialog(cx);
-            let _ = capture.update(cx, |capture, cx| capture.dismiss(window, cx));
-        };
-        window.open_alert_dialog(cx, move |alert, window, _| {
-            let discard = discard.clone();
-            return alert
-                .width(px(260.))
-                .margin_top(window.viewport_size().height / 2. - px(80.))
-                .entrance(DialogEntrance::None)
-                .text_center()
-                .title("Discard annotations?")
-                .description("Your annotations on this capture will be lost.")
-                .footer(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .child(
-                            Button::new("cancel")
-                                .label("Cancel")
-                                .flex_1()
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child({
-                            let discard = discard.clone();
-                            Button::new("discard")
-                                .label("Discard")
-                                .primary()
-                                .flex_1()
-                                .on_click(move |_, window, cx| discard(window, cx))
-                        }),
-                )
-                .on_ok(move |_, window, cx| {
-                    discard(window, cx);
-                    return false;
-                });
-        });
+        self.confirming_discard = true;
+        cx.notify();
     }
 
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -617,6 +577,11 @@ impl CaptureView {
     }
 
     fn begin_drag(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirming_discard {
+            self.confirming_discard = false;
+            cx.notify();
+            return;
+        }
         self.editor.finish_settings_change();
         self.text.insertion_format = None;
         window.focus(&self.focus, cx);
@@ -1060,6 +1025,17 @@ impl CaptureView {
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
         let modifiers = event.keystroke.modifiers;
+        if self.confirming_discard {
+            match key {
+                "enter" => self.dismiss(window, cx),
+                "escape" => {
+                    self.confirming_discard = false;
+                    cx.notify();
+                }
+                _ => {}
+            }
+            return;
+        }
         if key == "escape" {
             if self.editor.draft.take().is_some() {
                 self.editor.editing_index = None;
@@ -1550,6 +1526,9 @@ impl Render for CaptureView {
                     },
                 )
             })
+            .when(self.confirming_discard, |root| {
+                root.child(self.render_discard_prompt(selection.unwrap_or(image_bounds), cx))
+            })
             .when_some(self.error.clone(), |root, error| {
                 root.child(
                     ui::panel(cx)
@@ -1578,8 +1557,7 @@ mod tests {
     use glam::{Vec2, vec2};
     use gpui_kit::{
         AppContext, CursorStyle, InputEvent, KeyDownEvent, Keystroke, MouseDownEvent,
-        MouseMoveEvent, TestAppContext, WindowHandle, component::WindowExt as _, point, px,
-        test::TestWindowExt,
+        MouseMoveEvent, TestAppContext, WindowHandle, point, px, test::TestWindowExt,
     };
     use image::RgbaImage;
     use std::sync::Arc;
@@ -1854,13 +1832,18 @@ mod tests {
                 capture.editor.commit_draft();
             })
         });
+        let state = |cx: &mut TestAppContext| {
+            cx.read(|cx| {
+                let capture = capture.read(cx);
+                (capture.confirming_discard, capture.editor.layers.len())
+            })
+        };
         cx.simulate_keystrokes(window.into(), "escape");
-        cx.run_until_parked();
-        cx.update_window(window.into(), |_, window, cx| {
-            assert!(window.has_active_dialog(cx));
-            assert_eq!(capture.read(cx).editor.layers.len(), 1);
-        })
-        .unwrap();
+        assert_eq!(state(cx), (true, 1));
+        cx.simulate_keystrokes(window.into(), "r");
+        assert_eq!(state(cx), (true, 1));
+        cx.simulate_keystrokes(window.into(), "escape");
+        assert_eq!(state(cx), (false, 1));
     }
 
     #[gpui_kit::test]
@@ -2088,6 +2071,28 @@ mod tests {
             get_cursor_style(None, Tool::Pen, vec2(250.0, 150.0), Some(rect), canvas),
             CursorStyle::Arrow
         );
+    }
+
+    #[gpui_kit::test]
+    fn toolbar_is_measured_while_hidden_on_the_first_frame(cx: &mut TestAppContext) {
+        let window = create_capture(cx);
+        window
+            .update(cx, |capture, _, cx| {
+                cx.set_global(crate::app::AppState::default());
+                capture.selection = Some(Rect {
+                    pos: vec2(20.0, 20.0),
+                    size: vec2(100.0, 50.0),
+                });
+                assert!(capture.toolbar_size.get().is_none());
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        window
+            .update(cx, |capture, _, _| {
+                assert!(capture.toolbar_size.get().is_some_and(|size| size.x > 0.0));
+            })
+            .unwrap();
     }
 
     #[gpui_kit::test]

@@ -151,6 +151,14 @@ pub fn create_action_bar_rect(selection: Rect, size: Vec2, screen: Vec2) -> Rect
     };
 }
 
+pub fn create_centered_rect(target: Rect, size: Vec2, screen: Vec2) -> Rect {
+    let pos = (target.pos + (target.size - size) / 2.0).clamp(
+        Vec2::splat(MARGIN),
+        (screen - size - MARGIN).max(Vec2::splat(MARGIN)),
+    );
+    return Rect { pos, size };
+}
+
 pub fn get_options_bar_y(bar: Rect, screen: Vec2) -> f32 {
     if bar.end().y + GAP + bar.size.y <= screen.y - MARGIN {
         return bar.end().y + GAP;
@@ -365,6 +373,28 @@ mod tests {
         assert_eq!(flipped.size, vec2(100.0, 30.0));
         let corner = create_resized_selection(origin, ResizeHandle::TopLeft, vec2(0.0, 0.0));
         assert_eq!(corner, Rect::from_corners(Vec2::ZERO, origin.end()));
+    }
+
+    #[test]
+    fn centered_rects_follow_the_target_and_stay_on_screen() {
+        let screen = vec2(3000.0, 1000.0);
+        let size = vec2(260.0, 120.0);
+        let pin = Rect {
+            pos: vec2(200.0, 100.0),
+            size: vec2(400.0, 300.0),
+        };
+        assert_eq!(
+            create_centered_rect(pin, size, screen).pos,
+            vec2(270.0, 190.0)
+        );
+        let corner = Rect {
+            pos: vec2(2950.0, 980.0),
+            size: vec2(40.0, 10.0),
+        };
+        assert_eq!(
+            create_centered_rect(corner, size, screen).end(),
+            screen - MARGIN
+        );
     }
 
     #[test]
