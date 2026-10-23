@@ -19,6 +19,7 @@ use gpui_kit::{
 use unicode_segmentation::UnicodeSegmentation;
 
 const BOX_PADDING: f32 = 2.0;
+pub const CORNER_RADIUS: f32 = 2.0;
 const CODE_CHIP_WIDTH: f32 = 320.0;
 const CODE_CHIP_HEIGHT: f32 = 28.0;
 
@@ -125,6 +126,24 @@ impl RecognizedText {
             .join("\n");
     }
 
+    fn get_links(&self) -> Vec<(Rect, &str)> {
+        return self
+            .lines
+            .iter()
+            .flat_map(|line| {
+                line.links.iter().filter_map(|(range, url)| {
+                    let rect = line
+                        .glyphs
+                        .iter()
+                        .filter(|(offset, _)| range.contains(offset))
+                        .map(|(_, glyph)| *glyph)
+                        .reduce(Rect::union)?;
+                    Some((rect, url.as_str()))
+                })
+            })
+            .collect();
+    }
+
     fn get_highlights(&self) -> Vec<Rect> {
         let (start, end) = self.range;
         if start == end {
@@ -147,6 +166,7 @@ impl RecognizedText {
 pub struct RecognitionOverlay {
     pub boxes: Vec<Rect>,
     pub codes: Vec<Rect>,
+    pub links: Vec<Rect>,
     pub highlights: Vec<Rect>,
 }
 
@@ -186,6 +206,11 @@ impl CaptureView {
                 .codes
                 .iter()
                 .map(|code| get_padded_rect(code.bounds))
+                .collect(),
+            links: result
+                .get_links()
+                .into_iter()
+                .map(|(rect, _)| get_padded_rect(rect))
                 .collect(),
             highlights: result.get_highlights(),
         });
@@ -316,6 +341,29 @@ impl CaptureView {
             return;
         };
         self.recognition.result.as_mut().unwrap().range = (start.min(head), end.max(head));
+    }
+
+    pub(super) fn get_hovered_link(&self) -> Option<String> {
+        return self.get_recognized_text().and_then(|result| {
+            result
+                .get_links()
+                .into_iter()
+                .find(|(rect, _)| get_padded_rect(*rect).contains(self.pointer))
+                .map(|(_, url)| url.to_string())
+        });
+    }
+
+    pub(super) fn open_recognized_link(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(url) = self.get_hovered_link() else {
+            return false;
+        };
+        cx.open_url(&url);
+        self.dismiss(window, cx);
+        return true;
     }
 
     pub(super) fn select_all_recognized_text(&mut self) -> bool {

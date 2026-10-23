@@ -1,6 +1,6 @@
 use crate::{
     editor::{ANNOTATION_FONT, Annotation, HIGHLIGHTER_OPACITY, LINE_HEIGHT, Tool, get_arrow_head},
-    geometry::Rect,
+    geometry::{self, Rect},
     ui,
 };
 use anyhow::Result;
@@ -51,6 +51,58 @@ pub fn shape_text_line(
         &create_text_runs(annotation, offset..offset + line.len()),
         None,
     );
+}
+
+/// Fills the union of `rects` once with rounded corners, both outer and inner, so overlaps
+/// neither show seams nor blend twice. With `outer`, the rects are cut out of it instead.
+pub fn paint_rounded_union(
+    rects: &[Rect],
+    outer: Option<Rect>,
+    radius: f32,
+    color: impl Into<Background>,
+    window: &mut Window,
+) {
+    if rects.is_empty() && outer.is_none() {
+        return;
+    }
+    let at = |point: Vec2| gpui_kit::point(px(point.x), px(point.y));
+    let mut path = PathBuilder::fill().with_style(PathStyle::Fill(FillOptions::even_odd()));
+    if let Some(outer) = outer {
+        path.add_polygon(
+            &[
+                outer.pos,
+                vec2(outer.end().x, outer.pos.y),
+                outer.end(),
+                vec2(outer.pos.x, outer.end().y),
+            ]
+            .map(at),
+            true,
+        );
+    }
+    for contour in geometry::get_union_contours(rects) {
+        let count = contour.len();
+        for index in 0..count {
+            let point = contour[index];
+            let previous = contour[(index + count - 1) % count];
+            let next = contour[(index + 1) % count];
+            let radius = radius
+                .min(point.distance(previous) / 2.0)
+                .min(point.distance(next) / 2.0);
+            let start = point + (previous - point).normalize_or_zero() * radius;
+            let end = point + (next - point).normalize_or_zero() * radius;
+            if index == 0 {
+                path.move_to(at(start));
+            } else {
+                path.line_to(at(start));
+            }
+            path.curve_to(at(end), at(point));
+        }
+        path.close();
+    }
+    match path.build() {
+        Ok(path) => window.paint_path(path, color),
+        Err(error) => eprintln!("could not build rounded union: {error:#}"),
+    }
 }
 
 /// GPUI blends each stroke triangle separately, so a translucent stroke darkens wherever its

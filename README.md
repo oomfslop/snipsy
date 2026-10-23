@@ -47,7 +47,7 @@ While capturing:
 | Select, rectangle, oval, arrow, line | `V` `R` `O` `A` `L` |
 | Pen, highlighter, text, blur, eraser | `B` `H` `T` `M` `E` |
 | Smart eraser: fill a rectangle with the color under the drag start | `F` |
-| Recognize text and QR codes: drag to select, double-click for a word | `X` |
+| Recognize text and QR codes: drag to select, double-click for a word, click a highlighted link to open it | `X` |
 | Copy recognized text (selection, all, or the codes when there is no text) / select all | `Enter` or `⌘C` / `⌘A` |
 | Copy / save / quick-save / pin / print | `Enter` or `⌘C` / `⌘S` / `⌘⇧S` / `⌘T` / `⌘P` |
 | Undo / redo | `⌘Z` / `⌘⇧Z` |

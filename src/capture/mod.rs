@@ -672,6 +672,9 @@ impl CaptureView {
     }
 
     fn get_cursor(&self) -> CursorStyle {
+        if self.drag.is_none() && self.get_hovered_link().is_some() {
+            return CursorStyle::PointingHand;
+        }
         let tool = if self.get_text_draft().is_some() {
             Tool::Text
         } else {
@@ -987,6 +990,13 @@ impl CaptureView {
             cx,
         );
         let drag = self.drag.take().unwrap();
+        if matches!(drag.mode, DragMode::SelectRecognizedText(_, _))
+            && event.click_count == 1
+            && drag.start.distance(self.pointer) < 2.0
+            && self.open_recognized_link(window, cx)
+        {
+            return;
+        }
         if drag.mode == DragMode::New && self.selection.is_none() {
             self.selection = drag.origin;
         }
@@ -1574,7 +1584,7 @@ impl Render for CaptureView {
             .clone()
             .filter(|_| self.raster_preview.selection == selection)
             .zip(selection);
-        let recognition = self.get_recognition_overlay().zip(self.background.clone());
+        let recognition = self.get_recognition_overlay();
         return div()
             .id("capture")
             .size_full()
@@ -1661,38 +1671,40 @@ impl Render for CaptureView {
                                             eprintln!("could not paint annotation: {error:#}");
                                         }
                                     }
-                                    let Some((recognition, background)) = &recognition else {
+                                    let Some(recognition) = &recognition else {
                                         return;
                                     };
-                                    window.paint_quad(fill(
-                                        ui::to_bounds(selection),
+                                    let radius = recognition::CORNER_RADIUS;
+                                    paint::paint_rounded_union(
+                                        &recognition.boxes,
+                                        Some(selection),
+                                        radius,
                                         rgba(0x00000080),
-                                    ));
-                                    for rect in &recognition.boxes {
-                                        if let Err(error) = window.paint_image(
-                                            ui::to_bounds(*rect),
-                                            ui::to_bounds(image_bounds),
-                                            Corners::default(),
-                                            background.clone(),
-                                            0,
-                                            false,
-                                        ) {
-                                            eprintln!("could not paint text box: {error:#}");
-                                        }
-                                    }
+                                        window,
+                                    );
                                     for rect in &recognition.codes {
-                                        window.paint_quad(outline(
+                                        let mut quad = outline(
                                             ui::to_bounds(*rect),
                                             accent,
                                             BorderStyle::Solid,
-                                        ));
+                                        );
+                                        quad.corner_radii = Corners::all(px(radius));
+                                        window.paint_quad(quad);
                                     }
-                                    for rect in &recognition.highlights {
-                                        window.paint_quad(fill(
-                                            ui::to_bounds(*rect),
-                                            highlight_color,
-                                        ));
-                                    }
+                                    paint::paint_rounded_union(
+                                        &recognition.links,
+                                        None,
+                                        radius,
+                                        rgba(0x4da6ff33),
+                                        window,
+                                    );
+                                    paint::paint_rounded_union(
+                                        &recognition.highlights,
+                                        None,
+                                        radius,
+                                        highlight_color,
+                                        window,
+                                    );
                                 },
                             );
                         }

@@ -56,9 +56,10 @@ use objc2_core_video::{
     kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
 };
 use objc2_foundation::{
-    NSArray, NSData, NSDate, NSDateFormatter, NSDictionary, NSError, NSFileManager, NSNumber,
-    NSObject, NSObjectProtocol, NSOperationQueue, NSPoint, NSRange, NSRect, NSSearchPathDirectory,
-    NSSearchPathDomainMask, NSSize, NSString, NSURL,
+    NSArray, NSData, NSDataDetector, NSDate, NSDateFormatter, NSDictionary, NSError, NSFileManager,
+    NSMatchingOptions, NSNumber, NSObject, NSObjectProtocol, NSOperationQueue, NSPoint, NSRange,
+    NSRect, NSSearchPathDirectory, NSSearchPathDomainMask, NSSize, NSString, NSTextCheckingType,
+    NSURL,
 };
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCFrameStatus, SCScreenshotManager, SCShareableContent, SCStream,
@@ -74,6 +75,7 @@ use objc2_vision::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     cell::Cell,
+    ops::Range,
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::{
@@ -762,6 +764,8 @@ pub struct RecognizedLine {
     pub bounds: Rect,
     /// Byte offset and box of each non-whitespace character Vision could place.
     pub glyphs: Vec<(usize, Rect)>,
+    /// Byte ranges of detected links with their URLs, e.g. `mailto:` for emails.
+    pub links: Vec<(Range<usize>, String)>,
 }
 
 pub struct RecognizedCode {
@@ -823,12 +827,29 @@ pub fn recognize_image(mut image: image::RgbaImage) -> Result<RecognizedImage> {
         handler
             .performRequests_error(&NSArray::from_slice(&requests))
             .map_err(|error| anyhow!("{}", error.localizedDescription()))?;
+        let detector = NSDataDetector::dataDetectorWithTypes_error(NSTextCheckingType::Link.0)
+            .map_err(|error| anyhow!("{}", error.localizedDescription()))?;
         let mut lines = Vec::new();
         for observation in request.results().unwrap_or_default() {
             let Some(candidate) = observation.topCandidates(1).firstObject() else {
                 continue;
             };
-            let text = candidate.string().to_string();
+            let string = candidate.string();
+            let text = string.to_string();
+            let links = detector
+                .matchesInString_options_range(
+                    &string,
+                    NSMatchingOptions::empty(),
+                    NSRange::new(0, string.length()),
+                )
+                .iter()
+                .filter_map(|link| {
+                    let range = link.range();
+                    let start = editor::get_byte_offset(&text, range.location);
+                    let end = editor::get_byte_offset(&text, range.location + range.length);
+                    Some((start..end, link.URL()?.absoluteString()?.to_string()))
+                })
+                .collect();
             let mut glyphs = Vec::new();
             let mut words: Vec<Vec<(usize, usize)>> = Vec::new();
             let mut location = 0;
@@ -878,6 +899,7 @@ pub fn recognize_image(mut image: image::RgbaImage) -> Result<RecognizedImage> {
                 // SAFETY: plain property read.
                 bounds: get_rect(unsafe { observation.boundingBox() }),
                 glyphs,
+                links,
             });
         }
         // SAFETY: the request has finished performing.
