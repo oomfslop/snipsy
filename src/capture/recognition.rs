@@ -1,5 +1,5 @@
 use crate::{
-    capture::{CaptureView, Drag, DragMode, Mode, layout},
+    capture::{CaptureView, Drag, DragMode, layout},
     editor::Tool,
     geometry::Rect,
     platform::{self, RecognizedLine},
@@ -129,10 +129,6 @@ pub struct RecognitionOverlay {
 }
 
 impl CaptureView {
-    pub(super) fn get_supports_text_recognition(&self) -> bool {
-        return matches!(self.mode, Mode::Capture | Mode::PinEditor(_));
-    }
-
     fn get_recognized_text(&self) -> Option<&RecognizedText> {
         return self.recognition.result.as_ref().filter(|result| {
             self.editor.tool == Tool::RecognizeText && Some(result.selection) == self.selection

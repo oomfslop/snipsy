@@ -703,6 +703,15 @@ impl CaptureView {
         return magnifier::sample_pixel(image, pixel.x as u32, pixel.y as u32);
     }
 
+    /// The video editor has no frame pixels to sample or recognize.
+    fn get_supports_tool(&self, tool: Tool) -> bool {
+        return match tool {
+            Tool::RecognizeText => matches!(self.mode, Mode::Capture | Mode::PinEditor(_)),
+            Tool::SmartEraser => !matches!(self.mode, Mode::Video),
+            _ => true,
+        };
+    }
+
     fn get_annotation_at(&self, point: Vec2, window: &Window) -> Option<usize> {
         return self
             .editor
@@ -815,6 +824,18 @@ impl CaptureView {
             Tool::Eraser => {
                 self.drag = Some(Drag::new(DragMode::Erase, self.pointer));
                 self.erase_at_pointer(window);
+            }
+            Tool::SmartEraser => {
+                let Some(sample) = self.get_sample() else {
+                    return;
+                };
+                self.editor.selected = None;
+                self.editor.draft = Some(Annotation {
+                    color: sample.color,
+                    filled: true,
+                    ..self.editor.create_annotation(Tool::Rectangle, self.pointer)
+                });
+                self.drag = Some(Drag::new(DragMode::Draw, self.pointer));
             }
             Tool::Line if continue_line => {
                 self.editor
@@ -987,6 +1008,9 @@ impl CaptureView {
             }
         } else if drag.mode == DragMode::Draw {
             self.editor.commit_draft();
+            if self.editor.tool == Tool::SmartEraser {
+                self.editor.selected = None;
+            }
         }
         cx.notify();
     }
@@ -1079,7 +1103,8 @@ impl CaptureView {
             return;
         }
         match action {
-            EditorAction::Tool(Tool::RecognizeText) if !self.get_supports_text_recognition() => {}
+            EditorAction::Tool(tool) | EditorAction::Variant(tool)
+                if !self.get_supports_tool(tool) => {}
             EditorAction::Tool(tool) => self.editor.select_tool(tool),
             EditorAction::Variant(tool) => self.editor.set_variant(tool),
             EditorAction::Filled(filled) => self.editor.set_filled(filled),
@@ -1457,7 +1482,9 @@ fn get_command_action(key: &str, shift: bool) -> Option<EditorAction> {
 fn constrain_point(tool: Tool, start: Vec2, point: Vec2) -> Vec2 {
     let delta = point - start;
     return match tool {
-        Tool::Rectangle | Tool::Ellipse => start + delta.signum() * delta.abs().min_element(),
+        Tool::Rectangle | Tool::Ellipse | Tool::SmartEraser => {
+            start + delta.signum() * delta.abs().min_element()
+        }
         Tool::Arrow | Tool::Line => {
             let step = std::f32::consts::FRAC_PI_4;
             let angle = (delta.y.atan2(delta.x) / step).round() * step;
@@ -1471,6 +1498,7 @@ fn get_tool_family(tool: Tool) -> Tool {
     return match tool {
         Tool::Rectangle | Tool::Ellipse => Tool::Rectangle,
         Tool::Arrow | Tool::Line => Tool::Arrow,
+        Tool::Eraser | Tool::SmartEraser => Tool::Eraser,
         other => other,
     };
 }

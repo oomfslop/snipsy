@@ -46,6 +46,7 @@ While capturing:
 | --- | --- |
 | Select, rectangle, oval, arrow, line | `V` `R` `O` `A` `L` |
 | Pen, highlighter, text, blur, eraser | `B` `H` `T` `M` `E` |
+| Smart eraser: fill a rectangle with the color under the drag start | `F` |
 | Recognize text: drag to select, double-click for a word | `X` |
 | Copy recognized text (selection or all) / select all | `Enter` or `⌘C` / `⌘A` |
 | Copy / save / quick-save / pin / print | `Enter` or `⌘C` / `⌘S` / `⌘⇧S` / `⌘T` / `⌘P` |

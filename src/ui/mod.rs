@@ -24,6 +24,7 @@ gpui_kit::assets::icon_assets!(
         Grid2x2,
         Droplet,
         Eraser,
+        PaintBucket,
         ScanSearch,
         ScanText,
         Pin,

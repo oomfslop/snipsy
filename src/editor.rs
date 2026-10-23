@@ -20,6 +20,7 @@ pub enum Tool {
     Text,
     Mosaic,
     Eraser,
+    SmartEraser,
     RecognizeText,
 }
 

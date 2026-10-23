@@ -30,7 +30,7 @@ pub struct ToolSpec {
     pub key: &'static str,
 }
 
-pub const TOOLS: [ToolSpec; 11] = [
+pub const TOOLS: [ToolSpec; 12] = [
     ToolSpec {
         tool: Tool::Select,
         icon: IconName::MousePointer2,
@@ -90,6 +90,12 @@ pub const TOOLS: [ToolSpec; 11] = [
         icon: IconName::Eraser,
         label: "Eraser",
         key: "e",
+    },
+    ToolSpec {
+        tool: Tool::SmartEraser,
+        icon: IconName::PaintBucket,
+        label: "Smart eraser",
+        key: "f",
     },
     ToolSpec {
         tool: Tool::RecognizeText,
@@ -349,7 +355,9 @@ impl CaptureView {
         let tool = self.editor.get_current_tool();
         if self.show_record_options && matches!(self.mode, Mode::Capture) {
             elements.push(self.render_record_options(bar, cx).into_any_element());
-        } else if !matches!(tool, Tool::Select | Tool::Eraser) {
+        } else if tool != Tool::Select
+            && (tool != Tool::Eraser || self.get_supports_tool(Tool::SmartEraser))
+        {
             elements.push(
                 self.render_tool_options(tool, bar, layers_panel, cx)
                     .into_any_element(),
@@ -367,7 +375,10 @@ impl CaptureView {
         let family = get_tool_family(self.editor.tool);
         let pin_editor = matches!(self.mode, Mode::PinEditor(_));
         let items = toolbar_layout::get_visible_items(&cx.global::<Config>().toolbar, |item| {
-            if item == ToolbarItem::RecognizeText && !self.get_supports_text_recognition() {
+            if let Some(EditorAction::Tool(tool)) =
+                get_item_spec(item, pin_editor).map(|spec| spec.action)
+                && !self.get_supports_tool(tool)
+            {
                 return true;
             }
             match self.mode {
@@ -617,6 +628,9 @@ impl CaptureView {
             Tool::Arrow | Tool::Line => toolbar
                 .child(variant(Tool::Arrow, cx))
                 .child(variant(Tool::Line, cx)),
+            Tool::Eraser | Tool::SmartEraser => toolbar
+                .child(variant(Tool::Eraser, cx))
+                .child(variant(Tool::SmartEraser, cx)),
             Tool::Text => [
                 (
                     "bold",
@@ -689,7 +703,10 @@ impl CaptureView {
                 ),
             _ => toolbar,
         };
-        let toolbar = if matches!(tool, Tool::Mosaic | Tool::RecognizeText) {
+        let toolbar = if matches!(
+            tool,
+            Tool::Mosaic | Tool::Eraser | Tool::SmartEraser | Tool::RecognizeText
+        ) {
             toolbar
         } else {
             toolbar
