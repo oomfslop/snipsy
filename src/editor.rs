@@ -20,6 +20,7 @@ pub enum Tool {
     Text,
     Mosaic,
     Eraser,
+    RecognizeText,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

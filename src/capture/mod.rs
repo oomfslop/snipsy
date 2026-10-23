@@ -1,5 +1,6 @@
 pub mod layout;
 mod paint;
+mod recognition;
 mod text;
 pub mod toolbar;
 mod video;
@@ -249,6 +250,7 @@ enum DragMode {
     Draw,
     MoveAnnotation(usize),
     SelectText(usize, usize),
+    SelectRecognizedText(recognition::TextPosition, recognition::TextPosition),
     Erase,
 }
 
@@ -316,6 +318,7 @@ struct CaptureView {
     windows: Vec<Rect>,
     background: Option<Arc<RenderImage>>,
     raster_preview: RasterPreview,
+    recognition: recognition::TextRecognition,
     selection: Option<Rect>,
     editor: Editor,
     pointer: Vec2,
@@ -374,6 +377,7 @@ impl CaptureView {
             windows: Vec::new(),
             background: None,
             raster_preview: RasterPreview::default(),
+            recognition: Default::default(),
             selection: None,
             editor,
             pointer: (pointer - bounds.pos).clamp(Vec2::ZERO, bounds.size),
@@ -768,6 +772,10 @@ impl CaptureView {
             return;
         }
         let tool = self.editor.tool;
+        if tool == Tool::RecognizeText {
+            self.begin_recognized_text_selection(event.click_count);
+            return;
+        }
         let hit = if continue_line {
             None
         } else {
@@ -936,6 +944,9 @@ impl CaptureView {
                         .set(start.min(offset)..end.max(offset), offset < start);
                 }
             }
+            DragMode::SelectRecognizedText(start, end) => {
+                self.update_recognized_text_selection(start, end)
+            }
             DragMode::Erase => self.erase_at_pointer(window),
         }
         cx.notify();
@@ -1068,6 +1079,7 @@ impl CaptureView {
             return;
         }
         match action {
+            EditorAction::Tool(Tool::RecognizeText) if !self.get_supports_text_recognition() => {}
             EditorAction::Tool(tool) => self.editor.select_tool(tool),
             EditorAction::Variant(tool) => self.editor.set_variant(tool),
             EditorAction::Filled(filled) => self.editor.set_filled(filled),
@@ -1085,6 +1097,11 @@ impl CaptureView {
             EditorAction::Undo => self.editor.undo_change(),
             EditorAction::Redo => self.editor.redo_change(),
             EditorAction::Cancel => return self.cancel(window, cx),
+            EditorAction::Copy if self.editor.tool == Tool::RecognizeText => {
+                if self.copy_recognized_text(window, cx) {
+                    return;
+                }
+            }
             _ => match self.export(action, window, cx) {
                 Ok(true) => return,
                 Ok(false) => {}
@@ -1214,6 +1231,7 @@ impl CaptureView {
         }
         if modifiers.platform {
             let action = match key {
+                "a" if self.select_all_recognized_text() => return cx.notify(),
                 "a" => return self.select_all(cx),
                 "c" => EditorAction::Copy,
                 _ => match get_command_action(key, modifiers.shift) {
@@ -1467,7 +1485,9 @@ fn get_cursor_style(
     let handle = match drag {
         Some(DragMode::New | DragMode::Draw | DragMode::Erase) => return CursorStyle::Crosshair,
         Some(DragMode::Move | DragMode::MoveAnnotation(_)) => return CursorStyle::ClosedHand,
-        Some(DragMode::SelectText(_, _)) => return CursorStyle::IBeam,
+        Some(DragMode::SelectText(_, _) | DragMode::SelectRecognizedText(_, _)) => {
+            return CursorStyle::IBeam;
+        }
         Some(DragMode::Resize(handle)) => Some(handle),
         None => selection.and_then(|selection| layout::get_resize_handle(pointer, selection)),
     };
@@ -1482,7 +1502,7 @@ fn get_cursor_style(
     if selection.is_some_and(|selection| selection.contains(pointer)) {
         return match tool {
             Tool::Select => CursorStyle::OpenHand,
-            Tool::Text => CursorStyle::IBeam,
+            Tool::Text | Tool::RecognizeText => CursorStyle::IBeam,
             _ => CursorStyle::Crosshair,
         };
     }
@@ -1499,6 +1519,7 @@ impl Render for CaptureView {
         }
         let mut gpu_annotations: Vec<_> = self.editor.get_visible_annotations().cloned().collect();
         let split = self.update_raster_preview(&gpu_annotations, window, cx);
+        self.update_text_recognition(cx);
         self.sync_intensity_slider(window, cx);
         gpu_annotations.drain(..split);
         let selection = self.selection;
@@ -1525,6 +1546,7 @@ impl Render for CaptureView {
             .clone()
             .filter(|_| self.raster_preview.selection == selection)
             .zip(selection);
+        let recognition = self.get_recognition_overlay().zip(self.background.clone());
         return div()
             .id("capture")
             .size_full()
@@ -1610,6 +1632,31 @@ impl Render for CaptureView {
                                         {
                                             eprintln!("could not paint annotation: {error:#}");
                                         }
+                                    }
+                                    let Some((recognition, background)) = &recognition else {
+                                        return;
+                                    };
+                                    window.paint_quad(fill(
+                                        ui::to_bounds(selection),
+                                        rgba(0x00000080),
+                                    ));
+                                    for rect in &recognition.boxes {
+                                        if let Err(error) = window.paint_image(
+                                            ui::to_bounds(*rect),
+                                            ui::to_bounds(image_bounds),
+                                            Corners::default(),
+                                            background.clone(),
+                                            0,
+                                            false,
+                                        ) {
+                                            eprintln!("could not paint text box: {error:#}");
+                                        }
+                                    }
+                                    for rect in &recognition.highlights {
+                                        window.paint_quad(fill(
+                                            ui::to_bounds(*rect),
+                                            highlight_color,
+                                        ));
                                     }
                                 },
                             );

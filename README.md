@@ -46,6 +46,8 @@ While capturing:
 | --- | --- |
 | Select, rectangle, oval, arrow, line | `V` `R` `O` `A` `L` |
 | Pen, highlighter, text, blur, eraser | `B` `H` `T` `M` `E` |
+| Recognize text: drag to select, double-click for a word | `X` |
+| Copy recognized text (selection or all) / select all | `Enter` or `⌘C` / `⌘A` |
 | Copy / save / quick-save / pin / print | `Enter` or `⌘C` / `⌘S` / `⌘⇧S` / `⌘T` / `⌘P` |
 | Undo / redo | `⌘Z` / `⌘⇧Z` |
 | Select the whole display | `⌘A`, or `Space` before selecting |
@@ -100,11 +102,11 @@ When it stops, the recording opens in an editor. Drag the timeline handles to tr
 ## Layout
 
 - `editor.rs`, `geometry.rs`, `raster.rs`: annotation model, undo, hit testing, and CPU rendering for exports. No UI types.
-- `capture/`: the capture overlay. `layout.rs` holds the placement math, `paint.rs` draws annotations on the GPU, `text.rs` handles text editing and IME, `toolbar.rs` renders the toolbars, `video.rs` is the recording editor.
+- `capture/`: the capture overlay. `layout.rs` holds the placement math, `paint.rs` draws annotations on the GPU, `text.rs` handles text editing and IME, `recognition.rs` selects text recognized by Vision, `toolbar.rs` renders the toolbars, `video.rs` is the recording editor.
 - `pin/`: pin windows and their backups.
 - `app/`: startup, command dispatch, CLI and single-instance IPC, hotkeys, tray, history, recording, and persistence.
 - `ui/`: shared widgets and the History and Preferences windows.
-- `platform/macos.rs`: ScreenCaptureKit capture and recording, AVFoundation playback and export, overlay windows, and native dialogs. This is the boundary to port for other platforms.
+- `platform/macos.rs`: ScreenCaptureKit capture and recording, Vision text recognition, AVFoundation playback and export, overlay windows, and native dialogs. This is the boundary to port for other platforms.
 - `lens.rs`: Google Lens handoff.
 
 ```sh

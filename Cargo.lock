@@ -5255,6 +5255,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-vision"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfc194758a2d5d7540b1ad283bfb9ca318ec608991892326e95b428230b2689b"
+dependencies = [
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc_exception"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7036,6 +7048,7 @@ dependencies = [
  "objc2-screen-capture-kit",
  "objc2-service-management",
  "objc2-uniform-type-identifiers",
+ "objc2-vision",
  "raw-window-handle",
  "resvg 0.45.1",
  "serde",

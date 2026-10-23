@@ -40,11 +40,12 @@ use objc2_core_foundation::{
     CGSize,
 };
 use objc2_core_graphics::{
-    CGBitmapContextCreate, CGColorSpace, CGContext, CGDisplayCopyColorSpace, CGError, CGImage,
-    CGImageAlphaInfo, CGImageByteOrderInfo, CGPreflightScreenCaptureAccess,
-    CGRectMakeWithDictionaryRepresentation, CGRequestScreenCaptureAccess,
-    CGWarpMouseCursorPosition, CGWindowListCopyWindowInfo, CGWindowListOption, kCGColorSpaceSRGB,
-    kCGDisplayStreamYCbCrMatrix_ITU_R_709_2, kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer,
+    CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext,
+    CGDisplayCopyColorSpace, CGError, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
+    CGPreflightScreenCaptureAccess, CGRectMakeWithDictionaryRepresentation,
+    CGRequestScreenCaptureAccess, CGWarpMouseCursorPosition, CGWindowListCopyWindowInfo,
+    CGWindowListOption, kCGColorSpaceSRGB, kCGDisplayStreamYCbCrMatrix_ITU_R_709_2, kCGWindowAlpha,
+    kCGWindowBounds, kCGWindowLayer,
 };
 use objc2_core_image::{CIImage, CIVector, kCIFormatRGBA8, kCIInputCenterKey, kCIInputScaleKey};
 use objc2_core_media::{CMSampleBuffer, CMTime, CMTimeRange, kCMTimeZero};
@@ -56,7 +57,7 @@ use objc2_core_video::{
 };
 use objc2_foundation::{
     NSArray, NSData, NSDate, NSDateFormatter, NSDictionary, NSError, NSFileManager, NSNumber,
-    NSObject, NSObjectProtocol, NSOperationQueue, NSPoint, NSRect, NSSearchPathDirectory,
+    NSObject, NSObjectProtocol, NSOperationQueue, NSPoint, NSRange, NSRect, NSSearchPathDirectory,
     NSSearchPathDomainMask, NSSize, NSString, NSURL,
 };
 use objc2_screen_capture_kit::{
@@ -66,6 +67,10 @@ use objc2_screen_capture_kit::{
 };
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 use objc2_uniform_type_identifiers::{UTType, UTTypeMPEG4Movie};
+use objc2_vision::{
+    VNImageRequestHandler, VNRecognizeTextRequest, VNRectangleObservation, VNRequest,
+    VNRequestTextRecognitionLevel,
+};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     cell::Cell,
@@ -750,6 +755,121 @@ fn draw_cg_image(source: &CGImage, width: u32, height: u32) -> Option<image::Rgb
     );
     drop(context);
     return Some(pixels);
+}
+
+pub struct RecognizedLine {
+    pub text: String,
+    pub bounds: Rect,
+    /// Byte offset and box of each non-whitespace character Vision could place.
+    pub glyphs: Vec<(usize, Rect)>,
+}
+
+/// Blocks until Vision finishes. Rects are in image pixels with a top-left origin.
+pub fn recognize_text(mut image: image::RgbaImage) -> Result<Vec<RecognizedLine>> {
+    let (width, height) = image.dimensions();
+    // SAFETY: kCGColorSpaceSRGB is always defined.
+    let srgb = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))
+        .context("could not create sRGB color space")?;
+    // SAFETY: the context reads `image`, which outlives it and has `width * 4` byte rows.
+    let context = unsafe {
+        CGBitmapContextCreate(
+            image.as_mut_ptr().cast(),
+            width as usize,
+            height as usize,
+            8,
+            width as usize * 4,
+            Some(&srgb),
+            CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0,
+        )
+    }
+    .context("could not create bitmap context")?;
+    let source = CGBitmapContextCreateImage(Some(&context)).context("could not create image")?;
+    let size = vec2(width as f32, height as f32);
+    let get_rect = |rect: CGRect| {
+        Rect {
+            pos: vec2(rect.origin.x as f32, rect.origin.y as f32) * size,
+            size: vec2(rect.size.width as f32, rect.size.height as f32) * size,
+        }
+        .flip_vertically(size.y)
+    };
+    return autoreleasepool(|_| {
+        // SAFETY: plain allocation of Vision objects; the options dictionary is empty.
+        let (request, handler) = unsafe {
+            (
+                VNRecognizeTextRequest::new(),
+                VNImageRequestHandler::initWithCGImage_options(
+                    VNImageRequestHandler::alloc(),
+                    &source,
+                    &NSDictionary::new(),
+                ),
+            )
+        };
+        request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
+        request.setUsesLanguageCorrection(true);
+        request.setAutomaticallyDetectsLanguage(true);
+        let requests: &VNRequest = &request;
+        handler
+            .performRequests_error(&NSArray::from_slice(&[requests]))
+            .map_err(|error| anyhow!("{}", error.localizedDescription()))?;
+        let mut lines = Vec::new();
+        for observation in request.results().unwrap_or_default() {
+            let Some(candidate) = observation.topCandidates(1).firstObject() else {
+                continue;
+            };
+            let text = candidate.string().to_string();
+            let mut glyphs = Vec::new();
+            let mut words: Vec<Vec<(usize, usize)>> = Vec::new();
+            let mut location = 0;
+            let mut previous_whitespace = true;
+            for (offset, character) in text.char_indices() {
+                if !character.is_whitespace() {
+                    if previous_whitespace {
+                        words.push(Vec::new());
+                    }
+                    words.last_mut().unwrap().push((offset, location));
+                }
+                previous_whitespace = character.is_whitespace();
+                location += character.len_utf16();
+            }
+            for word in words {
+                let start = word[0].1;
+                let end = text[word.last().unwrap().0..]
+                    .chars()
+                    .next()
+                    .unwrap()
+                    .len_utf16()
+                    + word.last().unwrap().1;
+                // Vision only places whole words: every character of a word gets the word's box.
+                // SAFETY: the range lies within the candidate string.
+                let bounds: Result<Retained<VNRectangleObservation>, Retained<NSError>> = unsafe {
+                    msg_send![&candidate, boundingBoxForRange: NSRange::new(start, end - start), error: _]
+                };
+                let Ok(bounds) = bounds else {
+                    continue;
+                };
+                // SAFETY: plain property read.
+                let bounds = get_rect(unsafe { bounds.boundingBox() });
+                let width = bounds.size.x / word.len() as f32;
+                for (index, (offset, _)) in word.into_iter().enumerate() {
+                    let pos = bounds.pos + vec2(width * index as f32, 0.0);
+                    glyphs.push((
+                        offset,
+                        Rect {
+                            pos,
+                            size: vec2(width, bounds.size.y),
+                        },
+                    ));
+                }
+            }
+            lines.push(RecognizedLine {
+                text,
+                // SAFETY: plain property read.
+                bounds: get_rect(unsafe { observation.boundingBox() }),
+                glyphs,
+            });
+        }
+        return Ok(lines);
+    });
 }
 
 pub fn get_window_id(window: &gpui_kit::Window) -> u32 {

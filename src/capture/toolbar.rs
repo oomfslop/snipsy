@@ -30,7 +30,7 @@ pub struct ToolSpec {
     pub key: &'static str,
 }
 
-pub const TOOLS: [ToolSpec; 10] = [
+pub const TOOLS: [ToolSpec; 11] = [
     ToolSpec {
         tool: Tool::Select,
         icon: IconName::MousePointer2,
@@ -90,6 +90,12 @@ pub const TOOLS: [ToolSpec; 10] = [
         icon: IconName::Eraser,
         label: "Eraser",
         key: "e",
+    },
+    ToolSpec {
+        tool: Tool::RecognizeText,
+        icon: IconName::ScanText,
+        label: "Recognize text",
+        key: "x",
     },
 ];
 
@@ -162,6 +168,7 @@ pub fn get_item_spec(item: ToolbarItem, pin_editor: bool) -> Option<ToolbarItemS
         ToolbarItem::Text => create_tool(Tool::Text),
         ToolbarItem::Blur => create_tool(Tool::Mosaic),
         ToolbarItem::Eraser => create_tool(Tool::Eraser),
+        ToolbarItem::RecognizeText => create_tool(Tool::RecognizeText),
         ToolbarItem::Undo => create(IconName::Undo2, "Undo", Some("⌘Z"), EditorAction::Undo),
         ToolbarItem::Redo => create(IconName::Redo2, "Redo", Some("⇧⌘Z"), EditorAction::Redo),
         ToolbarItem::Layers => create(IconName::Layers, "Layers", None, EditorAction::Layers),
@@ -360,6 +367,9 @@ impl CaptureView {
         let family = get_tool_family(self.editor.tool);
         let pin_editor = matches!(self.mode, Mode::PinEditor(_));
         let items = toolbar_layout::get_visible_items(&cx.global::<Config>().toolbar, |item| {
+            if item == ToolbarItem::RecognizeText && !self.get_supports_text_recognition() {
+                return true;
+            }
             match self.mode {
                 Mode::Capture => false,
                 Mode::Video => matches!(
@@ -659,9 +669,27 @@ impl CaptureView {
                     .selected(blur_mode == BlurMode::Gaussian),
                 )
                 .content(div().w(px(112.)).px_1().child(Slider::new(&self.intensity))),
+            Tool::RecognizeText => toolbar
+                .content(
+                    div()
+                        .px_1()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(self.get_recognition_status()),
+                )
+                .child(
+                    Button::new("copy-text")
+                        .icon(IconName::Copy)
+                        .label("Copy text")
+                        .tooltip("Copy the selected text, or all of it (Enter)")
+                        .on_click(cx.listener(|capture, _, window, cx| {
+                            cx.stop_propagation();
+                            capture.perform_action(EditorAction::Copy, window, cx);
+                        })),
+                ),
             _ => toolbar,
         };
-        let toolbar = if tool == Tool::Mosaic {
+        let toolbar = if matches!(tool, Tool::Mosaic | Tool::RecognizeText) {
             toolbar
         } else {
             toolbar

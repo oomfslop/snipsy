@@ -25,6 +25,7 @@ gpui_kit::assets::icon_assets!(
         Droplet,
         Eraser,
         ScanSearch,
+        ScanText,
         Pin,
         Save,
         Printer,

@@ -15,6 +15,7 @@ pub enum ToolbarItem {
     Text,
     Blur,
     Eraser,
+    RecognizeText,
     Undo,
     Redo,
     Layers,
@@ -28,7 +29,7 @@ pub enum ToolbarItem {
 }
 
 impl ToolbarItem {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::Record,
         Self::Select,
         Self::Shape,
@@ -38,6 +39,7 @@ impl ToolbarItem {
         Self::Text,
         Self::Blur,
         Self::Eraser,
+        Self::RecognizeText,
         Self::Undo,
         Self::Redo,
         Self::Layers,
@@ -51,7 +53,7 @@ impl ToolbarItem {
     ];
 }
 
-pub const DEFAULT_ITEMS: [ToolbarItem; 21] = [
+pub const DEFAULT_ITEMS: [ToolbarItem; 22] = [
     ToolbarItem::Record,
     ToolbarItem::Separator,
     ToolbarItem::Select,
@@ -62,6 +64,7 @@ pub const DEFAULT_ITEMS: [ToolbarItem; 21] = [
     ToolbarItem::Text,
     ToolbarItem::Blur,
     ToolbarItem::Eraser,
+    ToolbarItem::RecognizeText,
     ToolbarItem::Separator,
     ToolbarItem::Undo,
     ToolbarItem::Redo,
