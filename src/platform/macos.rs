@@ -68,8 +68,8 @@ use objc2_screen_capture_kit::{
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 use objc2_uniform_type_identifiers::{UTType, UTTypeMPEG4Movie};
 use objc2_vision::{
-    VNImageRequestHandler, VNRecognizeTextRequest, VNRectangleObservation, VNRequest,
-    VNRequestTextRecognitionLevel,
+    VNDetectBarcodesRequest, VNImageRequestHandler, VNRecognizeTextRequest, VNRectangleObservation,
+    VNRequest, VNRequestTextRecognitionLevel,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
@@ -764,8 +764,19 @@ pub struct RecognizedLine {
     pub glyphs: Vec<(usize, Rect)>,
 }
 
-/// Blocks until Vision finishes. Rects are in image pixels with a top-left origin.
-pub fn recognize_text(mut image: image::RgbaImage) -> Result<Vec<RecognizedLine>> {
+pub struct RecognizedCode {
+    pub payload: String,
+    pub bounds: Rect,
+}
+
+pub struct RecognizedImage {
+    pub lines: Vec<RecognizedLine>,
+    pub codes: Vec<RecognizedCode>,
+}
+
+/// Finds text and barcodes in one Vision pass and blocks until it finishes. Rects are in image
+/// pixels with a top-left origin.
+pub fn recognize_image(mut image: image::RgbaImage) -> Result<RecognizedImage> {
     let (width, height) = image.dimensions();
     // SAFETY: kCGColorSpaceSRGB is always defined.
     let srgb = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))
@@ -794,9 +805,10 @@ pub fn recognize_text(mut image: image::RgbaImage) -> Result<Vec<RecognizedLine>
     };
     return autoreleasepool(|_| {
         // SAFETY: plain allocation of Vision objects; the options dictionary is empty.
-        let (request, handler) = unsafe {
+        let (request, barcodes, handler) = unsafe {
             (
                 VNRecognizeTextRequest::new(),
+                VNDetectBarcodesRequest::new(),
                 VNImageRequestHandler::initWithCGImage_options(
                     VNImageRequestHandler::alloc(),
                     &source,
@@ -807,9 +819,9 @@ pub fn recognize_text(mut image: image::RgbaImage) -> Result<Vec<RecognizedLine>
         request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
         request.setUsesLanguageCorrection(true);
         request.setAutomaticallyDetectsLanguage(true);
-        let requests: &VNRequest = &request;
+        let requests: [&VNRequest; 2] = [&request, &barcodes];
         handler
-            .performRequests_error(&NSArray::from_slice(&[requests]))
+            .performRequests_error(&NSArray::from_slice(&requests))
             .map_err(|error| anyhow!("{}", error.localizedDescription()))?;
         let mut lines = Vec::new();
         for observation in request.results().unwrap_or_default() {
@@ -868,7 +880,21 @@ pub fn recognize_text(mut image: image::RgbaImage) -> Result<Vec<RecognizedLine>
                 glyphs,
             });
         }
-        return Ok(lines);
+        // SAFETY: the request has finished performing.
+        let codes = unsafe { barcodes.results() }
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|observation| {
+                // SAFETY: plain property reads.
+                let (payload, bounds) =
+                    unsafe { (observation.payloadStringValue()?, observation.boundingBox()) };
+                Some(RecognizedCode {
+                    payload: payload.to_string(),
+                    bounds: get_rect(bounds),
+                })
+            })
+            .collect();
+        return Ok(RecognizedImage { lines, codes });
     });
 }
 

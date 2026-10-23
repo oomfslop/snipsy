@@ -1680,6 +1680,13 @@ impl Render for CaptureView {
                                             eprintln!("could not paint text box: {error:#}");
                                         }
                                     }
+                                    for rect in &recognition.codes {
+                                        window.paint_quad(outline(
+                                            ui::to_bounds(*rect),
+                                            accent,
+                                            BorderStyle::Solid,
+                                        ));
+                                    }
                                     for rect in &recognition.highlights {
                                         window.paint_quad(fill(
                                             ui::to_bounds(*rect),
@@ -1753,6 +1760,7 @@ impl Render for CaptureView {
                         .border_color(rgb(self.editor.color.0)),
                 )
             })
+            .children(self.render_recognized_codes(cx))
             .when_some(
                 selection.filter(|_| self.show_toolbar),
                 |root, selection| root.children(self.render_toolbars(selection, cx)),

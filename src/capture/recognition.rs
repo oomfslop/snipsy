@@ -2,14 +2,25 @@ use crate::{
     capture::{CaptureView, Drag, DragMode, layout},
     editor::Tool,
     geometry::Rect,
-    platform::{self, RecognizedLine},
+    platform::{self, RecognizedCode, RecognizedLine},
+    ui,
 };
 use anyhow::anyhow;
 use glam::{Vec2, vec2};
-use gpui_kit::*;
+use gpui_kit::{
+    assets::IconName,
+    component::{
+        Sizable as _,
+        button::{Button, ButtonVariants as _},
+    },
+    prelude::*,
+    *,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 const BOX_PADDING: f32 = 2.0;
+const CODE_CHIP_WIDTH: f32 = 320.0;
+const CODE_CHIP_HEIGHT: f32 = 28.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TextPosition {
@@ -17,10 +28,12 @@ pub struct TextPosition {
     offset: usize,
 }
 
-/// Lines are in overlay coordinates and only valid for the selection they were recognized in.
+/// Lines and codes are in overlay coordinates and only valid for the selection they were
+/// recognized in.
 pub struct RecognizedText {
     selection: Rect,
     lines: Vec<RecognizedLine>,
+    codes: Vec<RecognizedCode>,
     range: (TextPosition, TextPosition),
 }
 
@@ -87,6 +100,14 @@ impl RecognizedText {
 
     fn get_selected_text(&self) -> String {
         let (start, end) = self.range;
+        if start == end && self.lines.is_empty() {
+            return self
+                .codes
+                .iter()
+                .map(|code| code.payload.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
         if start == end {
             return self
                 .lines
@@ -125,7 +146,15 @@ impl RecognizedText {
 
 pub struct RecognitionOverlay {
     pub boxes: Vec<Rect>,
+    pub codes: Vec<Rect>,
     pub highlights: Vec<Rect>,
+}
+
+fn get_padded_rect(rect: Rect) -> Rect {
+    return Rect {
+        pos: rect.pos - BOX_PADDING,
+        size: rect.size + BOX_PADDING * 2.0,
+    };
 }
 
 impl CaptureView {
@@ -137,9 +166,9 @@ impl CaptureView {
 
     pub(super) fn get_recognition_status(&self) -> &'static str {
         return match self.get_recognized_text() {
-            Some(result) if result.lines.is_empty() => "No text found",
-            Some(_) => "Drag to select text",
             None => "Recognizing text…",
+            Some(result) if !result.lines.is_empty() => "Drag to select text",
+            Some(_) => "No text found",
         };
     }
 
@@ -149,10 +178,14 @@ impl CaptureView {
             boxes: result
                 .lines
                 .iter()
-                .map(|line| Rect {
-                    pos: line.bounds.pos - BOX_PADDING,
-                    size: line.bounds.size + BOX_PADDING * 2.0,
-                })
+                .map(|line| line.bounds)
+                .chain(result.codes.iter().map(|code| code.bounds))
+                .map(get_padded_rect)
+                .collect(),
+            codes: result
+                .codes
+                .iter()
+                .map(|code| get_padded_rect(code.bounds))
                 .collect(),
             highlights: result.get_highlights(),
         });
@@ -186,7 +219,7 @@ impl CaptureView {
         let image = screenshot.image.clone();
         let canvas = self.get_canvas();
         let task = cx.spawn(async move |this, cx| {
-            let lines = cx
+            let recognized = cx
                 .background_executor()
                 .spawn(async move {
                     let scale = image.width() as f32 / canvas.size.x;
@@ -212,23 +245,27 @@ impl CaptureView {
                         pos: canvas.pos + (start + rect.pos) / scale,
                         size: rect.size / scale,
                     };
-                    let mut lines = platform::recognize_text(crop)?;
-                    for line in &mut lines {
+                    let mut recognized = platform::recognize_image(crop)?;
+                    for line in &mut recognized.lines {
                         line.bounds = to_overlay(line.bounds);
                         for (_, glyph) in &mut line.glyphs {
                             *glyph = to_overlay(*glyph);
                         }
                     }
-                    return Ok(lines);
+                    for code in &mut recognized.codes {
+                        code.bounds = to_overlay(code.bounds);
+                    }
+                    return Ok(recognized);
                 })
                 .await;
             let _ = this.update(cx, |capture, cx| {
                 capture.recognition.task = None;
-                match lines {
-                    Ok(lines) => {
+                match recognized {
+                    Ok(recognized) => {
                         capture.recognition.result = Some(RecognizedText {
                             selection,
-                            lines,
+                            lines: recognized.lines,
+                            codes: recognized.codes,
                             range: Default::default(),
                         });
                     }
@@ -237,6 +274,7 @@ impl CaptureView {
                         capture.recognition.result = Some(RecognizedText {
                             selection,
                             lines: Vec::new(),
+                            codes: Vec::new(),
                             range: Default::default(),
                         });
                     }
@@ -295,7 +333,8 @@ impl CaptureView {
         return true;
     }
 
-    /// Copies the selected text, or all of it when nothing is selected, and closes the overlay.
+    /// Copies the selected text, or all of it when nothing is selected, or the codes when there
+    /// is no text, and closes the overlay.
     pub(super) fn copy_recognized_text(
         &mut self,
         window: &mut Window,
@@ -305,12 +344,88 @@ impl CaptureView {
             self.error = Some("Text is still being recognized".into());
             return false;
         };
-        if result.lines.is_empty() {
-            self.error = Some("No text found".into());
+        if result.lines.is_empty() && result.codes.is_empty() {
+            self.error = Some("No text or codes found".into());
             return false;
         }
         cx.write_to_clipboard(ClipboardItem::new_string(result.get_selected_text()));
         self.dismiss(window, cx);
         return true;
+    }
+
+    pub(super) fn render_recognized_codes(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(result) = self.get_recognized_text() else {
+            return Vec::new();
+        };
+        let screen = self.bounds.size;
+        return result
+            .codes
+            .iter()
+            .enumerate()
+            .map(|(index, code)| {
+                let bounds = get_padded_rect(code.bounds);
+                let below = bounds.end().y + layout::GAP;
+                let y = if below + CODE_CHIP_HEIGHT <= screen.y - layout::MARGIN {
+                    below
+                } else {
+                    bounds.pos.y - layout::GAP - CODE_CHIP_HEIGHT
+                };
+                let x = bounds
+                    .pos
+                    .x
+                    .min(screen.x - CODE_CHIP_WIDTH - layout::MARGIN)
+                    .max(layout::MARGIN);
+                let payload = code.payload.clone();
+                let is_link = payload.starts_with("https://") || payload.starts_with("http://");
+                ui::panel(cx)
+                    .id(("recognized-code", index))
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .h(px(CODE_CHIP_HEIGHT))
+                    .max_w(px(CODE_CHIP_WIDTH))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .pl_2()
+                    .pr_1()
+                    .text_sm()
+                    .cursor(CursorStyle::Arrow)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(div().min_w_0().truncate().child(payload.replace('\n', " ")))
+                    .child(
+                        Button::new("copy")
+                            .icon(IconName::Copy)
+                            .tooltip("Copy")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener({
+                                let payload = payload.clone();
+                                move |capture, _, window, cx| {
+                                    cx.stop_propagation();
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        payload.clone(),
+                                    ));
+                                    capture.dismiss(window, cx);
+                                }
+                            })),
+                    )
+                    .when(is_link, |chip| {
+                        chip.child(
+                            Button::new("open")
+                                .icon(IconName::ExternalLink)
+                                .tooltip("Open link")
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(move |capture, _, window, cx| {
+                                    cx.stop_propagation();
+                                    cx.open_url(&payload);
+                                    capture.dismiss(window, cx);
+                                })),
+                        )
+                    })
+                    .into_any_element()
+            })
+            .collect();
     }
 }
