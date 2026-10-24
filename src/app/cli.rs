@@ -35,10 +35,6 @@ pub enum Command {
         #[arg(long, num_args = 1.., value_name = "FILE")]
         files: Option<Vec<PathBuf>>,
     },
-    /// Show recent captures
-    History,
-    /// Delete recent captures
-    ClearHistory,
     /// Draw on a blank full-screen canvas
     Whiteboard {
         #[arg(long, value_parser = parse_color_argument, default_value = "white")]
@@ -188,12 +184,12 @@ mod tests {
     #[test]
     fn instance_reader_accepts_a_command_after_its_sender_closes() {
         let (mut sender, receiver) = UnixStream::pair().unwrap();
-        sender.write_all(b"/tmp\0history").unwrap();
+        sender.write_all(b"/tmp\0snip").unwrap();
         drop(sender);
 
         assert_eq!(
             read_instance_command(receiver).unwrap(),
-            Some(Command::History)
+            Some(Command::Snip)
         );
     }
 
@@ -218,7 +214,7 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let socket = directory.path().join("snipsy.sock");
             drop(UnixListener::bind(&socket).unwrap());
-            let message = encode_message(directory.path(), &["history".into()]);
+            let message = encode_message(directory.path(), &["snip".into()]);
             let barrier = Barrier::new(2);
             let results = std::thread::scope(|scope| {
                 let workers = [0, 1].map(|_| {
@@ -232,10 +228,7 @@ mod tests {
             let listeners = results.into_iter().flatten().collect::<Vec<_>>();
             assert_eq!(listeners.len(), 1);
             let (stream, _) = listeners[0].accept().unwrap();
-            assert_eq!(
-                read_instance_command(stream).unwrap(),
-                Some(Command::History)
-            );
+            assert_eq!(read_instance_command(stream).unwrap(), Some(Command::Snip));
         }
     }
 

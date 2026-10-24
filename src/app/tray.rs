@@ -24,8 +24,6 @@ pub fn init(sender: async_channel::Sender<Command>, cx: &mut App) -> Result<()> 
         (create_item("New Screenshot"), Command::Snip),
         (recording_item.clone(), Command::Record),
         (create_item("Pin Clipboard"), Command::PASTE_CLIPBOARD),
-        (create_item("History"), Command::History),
-        (create_item("Clear History…"), Command::ClearHistory),
         (
             create_item("Whiteboard"),
             Command::Whiteboard { color: [255; 4] },

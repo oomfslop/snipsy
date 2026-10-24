@@ -1,4 +1,3 @@
-pub mod history;
 pub mod magnifier;
 pub mod preferences;
 
@@ -59,7 +58,7 @@ pub fn init_theme(cx: &mut App) {
     Theme::change(cx.window_appearance(), None, cx);
 }
 
-/// Regular windows (Preferences, History) answer the Window menu; overlays and pins
+/// Regular windows (Preferences) answer the Window menu; overlays and pins
 /// leave its items disabled.
 pub fn handle_window_actions(root: Stateful<Div>) -> Stateful<Div> {
     return root

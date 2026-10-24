@@ -711,10 +711,10 @@ impl Render for Pin {
                 cx.listener(|pin, _: &CopyColorRgb, window, cx| pin.copy_color(true, window, cx)),
             )
             .on_action(cx.listener(|pin, _: &Save, _, cx| {
-                export::save_content(pin.get_export_content(), None, cx)
+                export::save_content(pin.get_export_content(), cx)
             }))
             .on_action(cx.listener(|pin, _: &QuickSave, _, cx| {
-                export::quick_save_content(pin.get_export_content(), None, cx)
+                export::quick_save_content(pin.get_export_content(), cx)
             }))
             .on_action(
                 cx.listener(|pin, _: &Print, _, cx| {

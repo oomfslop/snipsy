@@ -11,7 +11,7 @@ use crate::{
     app::{
         self, AppState, config,
         content::PinContent,
-        export, history,
+        export,
         recording::{self, RecordingSettings},
     },
     editor::{Annotation, BlurMode, Editor, TextAttribute, Tool},
@@ -41,6 +41,7 @@ struct Captures {
     active: Option<View<CaptureView>>,
     cache: Option<View<CaptureView>>,
     pin_editor: Option<View<CaptureView>>,
+    last_selection: Option<(Rect, Rect)>,
 }
 
 impl Global for Captures {}
@@ -336,8 +337,6 @@ struct CaptureView {
     hidden: bool,
     confirming_discard: bool,
     layer_drop_target: Option<(u64, bool)>,
-    capture_history: Vec<Screenshot>,
-    capture_history_index: usize,
     intensity: Entity<SliderState>,
     toolbar_size: Rc<Cell<Option<Vec2>>>,
     _subscriptions: Vec<Subscription>,
@@ -395,8 +394,6 @@ impl CaptureView {
             hidden: false,
             confirming_discard: false,
             layer_drop_target: None,
-            capture_history: Vec::new(),
-            capture_history_index: 0,
             intensity,
             toolbar_size: Rc::new(Cell::new(None)),
             _subscriptions: vec![subscription],
@@ -540,9 +537,6 @@ impl CaptureView {
         let (Some(screenshot), Some(cursorless)) = (&self.screenshot, &self.cursorless) else {
             return;
         };
-        if self.capture_history_index != 0 {
-            return;
-        }
         let screenshot = Screenshot {
             image: cursorless.clone(),
             ..screenshot.clone()
@@ -588,11 +582,6 @@ impl CaptureView {
             app::show_error(anyhow!("Display configuration changed; capture again"));
             return;
         }
-        self.capture_history = std::iter::once(screenshot.clone())
-            .chain(cx.global::<history::History>().captures.iter().cloned())
-            .take(11)
-            .collect();
-        self.capture_history_index = 0;
         for image in [
             self.background.replace(background),
             self.raster_preview.image.take(),
@@ -610,46 +599,6 @@ impl CaptureView {
             self.perform_action(action, window, cx);
         }
         cx.notify();
-    }
-
-    fn navigate_capture_history(
-        &mut self,
-        direction: i32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.screenshot.is_none() {
-            return;
-        }
-        let bounds = self
-            .capture_history
-            .iter()
-            .map(|screenshot| screenshot.bounds)
-            .collect::<Vec<_>>();
-        let Some(index) = layout::get_capture_history_index(
-            &bounds,
-            self.capture_history_index,
-            direction,
-            self.bounds,
-        ) else {
-            return;
-        };
-        let history = std::mem::take(&mut self.capture_history);
-        let (cursor, cursorless) = (self.cursor.take(), self.cursorless.take());
-        self.reset(
-            self.bounds,
-            self.mode.clone(),
-            None,
-            self.bounds.pos + self.pointer,
-            window,
-            cx,
-        );
-        self.set_screenshot(history[index].clone());
-        self.capture_history = history;
-        self.capture_history_index = index;
-        self.cursor = cursor;
-        self.cursorless = cursorless;
-        self.apply_cursor(window, cx);
     }
 
     fn get_pointer(&self, position: Point<Pixels>) -> Vec2 {
@@ -1092,7 +1041,8 @@ impl CaptureView {
                 cx.notify();
                 return;
             };
-            history::remember_selection(self.bounds, self.selection.unwrap(), cx);
+            cx.global_mut::<Captures>().last_selection =
+                Some((self.bounds, self.selection.unwrap()));
             self.dismiss(window, cx);
             recording::start(bounds, cx);
             return;
@@ -1166,7 +1116,6 @@ impl CaptureView {
             return Ok(false);
         }
         let image = Arc::new(self.create_export_image(cx)?);
-        let screenshot = self.screenshot.clone();
         if action == EditorAction::Apply {
             if let Mode::PinEditor(target) = &self.mode {
                 let target = target.clone();
@@ -1179,31 +1128,26 @@ impl CaptureView {
             }
             return Ok(false);
         }
-        history::remember_selection(self.bounds, self.selection.unwrap(), cx);
+        cx.global_mut::<Captures>().last_selection = Some((self.bounds, self.selection.unwrap()));
         match action {
-            EditorAction::Save => {
-                export::save_content(PinContent::from_image(image), screenshot, cx)
-            }
+            EditorAction::Save => export::save_content(PinContent::from_image(image), cx),
             EditorAction::QuickSave => {
-                export::quick_save_content(PinContent::from_image(image), screenshot, cx)
+                export::quick_save_content(PinContent::from_image(image), cx)
             }
             EditorAction::Print => export::print_image(image, cx),
             EditorAction::Copy => {
-                export::copy_image(image.clone(), cx);
-                history::remember(image, screenshot, cx);
+                export::copy_image(image, cx);
                 self.dismiss(window, cx);
                 return Ok(true);
             }
             EditorAction::Pin => {
-                history::remember(image.clone(), screenshot, cx);
                 let bounds = self.get_screen_selection();
                 self.dismiss(window, cx);
                 cx.defer(move |cx| pin::open_image(image, bounds, cx));
                 return Ok(true);
             }
             EditorAction::Search => {
-                export::search_image(image.clone(), cx);
-                history::remember(image, screenshot, cx);
+                export::search_image(image, cx);
                 self.dismiss(window, cx);
                 return Ok(true);
             }
@@ -1312,7 +1256,10 @@ impl CaptureView {
                 return cx.notify();
             }
             if key == "r"
-                && let Some(selection) = history::get_last_selection(self.bounds, cx)
+                && let Some((_, selection)) = cx
+                    .global::<Captures>()
+                    .last_selection
+                    .filter(|(bounds, _)| *bounds == self.bounds)
             {
                 self.selection = Some(selection);
                 return cx.notify();
@@ -1325,8 +1272,6 @@ impl CaptureView {
             return self.perform_action(EditorAction::Tool(tool.tool), window, cx);
         }
         match key {
-            "," => self.navigate_capture_history(1, window, cx),
-            "." => self.navigate_capture_history(-1, window, cx),
             "enter" => self.perform_action(
                 if matches!(self.mode, Mode::PinEditor(_)) {
                     EditorAction::Apply

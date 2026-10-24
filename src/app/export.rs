@@ -2,10 +2,9 @@ use crate::{
     app::{
         self,
         content::{self, PinContent},
-        history, storage,
+        storage,
     },
-    lens, platform,
-    raster::{self, Screenshot},
+    lens, platform, raster,
 };
 use anyhow::Result;
 use gpui_kit::{App, ClipboardItem, Image, ImageFormat};
@@ -48,7 +47,7 @@ pub fn search_image(image: Arc<RgbaImage>, cx: &mut App) {
     );
 }
 
-pub fn save_content(content: PinContent, capture: Option<Screenshot>, cx: &mut App) {
+pub fn save_content(content: PinContent, cx: &mut App) {
     let name = format!(
         "Snipsy-{}.{}",
         storage::get_timestamp_id() / 1_000_000_000,
@@ -58,7 +57,7 @@ pub fn save_content(content: PinContent, capture: Option<Screenshot>, cx: &mut A
     cx.spawn(async move |cx| {
         let result = path.recv().await.unwrap_or_else(|error| Err(error.into()));
         cx.update(|cx| match result {
-            Ok(Some(path)) => write_content(content, path, capture, cx),
+            Ok(Some(path)) => write_content(content, path, cx),
             Ok(None) => {}
             Err(error) => app::show_error(error),
         });
@@ -66,7 +65,7 @@ pub fn save_content(content: PinContent, capture: Option<Screenshot>, cx: &mut A
     .detach();
 }
 
-pub fn quick_save_content(content: PinContent, capture: Option<Screenshot>, cx: &mut App) {
+pub fn quick_save_content(content: PinContent, cx: &mut App) {
     match platform::get_quick_save_dir() {
         Ok(directory) => {
             let path = storage::create_unique_path(
@@ -75,19 +74,14 @@ pub fn quick_save_content(content: PinContent, capture: Option<Screenshot>, cx: 
                 storage::get_timestamp_id() / 1_000_000_000,
                 content.get_default_extension(),
             );
-            write_content(content, path, capture, cx);
+            write_content(content, path, cx);
         }
         Err(error) => app::show_error(error),
     }
 }
 
-fn write_content(content: PinContent, path: PathBuf, capture: Option<Screenshot>, cx: &mut App) {
-    let saved = content.clone();
-    run_in_background(
-        move || content::write_path(&saved, &path),
-        move |(), cx| history::remember(content.image, capture, cx),
-        cx,
-    );
+fn write_content(content: PinContent, path: PathBuf, cx: &mut App) {
+    run_in_background(move || content::write_path(&content, &path), |(), _| {}, cx);
 }
 
 fn run_in_background<T: Send + 'static>(

@@ -17,12 +17,12 @@ Open `target/release/Snipsy.app`. Grant it Screen Recording in System Settings �
 
 To install, run `scripts/install.sh` (pass `debug` for a debug build). It builds, bundles, quits the installed copy, replaces `/Applications/Snipsy.app`, and launches it. Enable Launch at login in Preferences → General.
 
-Snipsy runs in the background with a menu-bar item. Settings (`config.toml`), history, and pin backups live in `~/Library/Application Support/Snipsy`. Debug builds use `Snipsy Debug` instead, so `cargo run` starts its own instance next to the installed one.
+Snipsy runs in the background with a menu-bar item. Settings (`config.toml`) and pin backups live in `~/Library/Application Support/Snipsy`. Debug builds use `Snipsy Debug` instead, so `cargo run` starts its own instance next to the installed one.
 
 ## Command line
 
 ```
-snipsy [snip | record | paste [--plain TEXT... | --files FILE...] | history | clear-history
+snipsy [snip | record | paste [--plain TEXT... | --files FILE...]
         | whiteboard [--color COLOR] | toggle-pins | toggle-click-through
         | preferences | quit]
 ```
@@ -54,7 +54,6 @@ While capturing:
 | Select the whole display | `⌘A`, or `Space` before selecting |
 | Show or hide the toolbars | `Space` after selecting |
 | Restore the last region | `R` before selecting |
-| Previous / next capture | `,` / `.` |
 | Toggle cursor capture | `` ` `` |
 | Copy the magnified color (`⇧` for RGB) | `C` |
 | Move the pointer before selecting | `W` `A` `S` `D` |
@@ -105,8 +104,8 @@ When it stops, the recording opens in an editor. Drag the timeline handles to tr
 - `editor.rs`, `geometry.rs`, `raster.rs`: annotation model, undo, hit testing, and CPU rendering for exports. No UI types.
 - `capture/`: the capture overlay. `layout.rs` holds the placement math, `paint.rs` draws annotations on the GPU, `text.rs` handles text editing and IME, `recognition.rs` selects text and codes recognized by Vision, `toolbar.rs` renders the toolbars, `video.rs` is the recording editor.
 - `pin/`: pin windows and their backups.
-- `app/`: startup, command dispatch, CLI and single-instance IPC, hotkeys, tray, history, recording, and persistence.
-- `ui/`: shared widgets and the History and Preferences windows.
+- `app/`: startup, command dispatch, CLI and single-instance IPC, hotkeys, tray, recording, and persistence.
+- `ui/`: shared widgets and the Preferences window.
 - `platform/macos.rs`: ScreenCaptureKit capture and recording, Vision text and barcode recognition, AVFoundation playback and export, overlay windows, and native dialogs. This is the boundary to port for other platforms.
 - `lens.rs`: Google Lens handoff.
 

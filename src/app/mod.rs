@@ -2,7 +2,6 @@ pub mod cli;
 pub mod config;
 pub mod content;
 pub mod export;
-pub mod history;
 pub mod hotkeys;
 pub mod recording;
 pub mod storage;
@@ -48,7 +47,6 @@ pub fn run(command: Option<Command>, data_dir: &Path, listener: UnixListener) {
         });
         let (sender, commands) = async_channel::unbounded();
         cx.set_global(recording::Recording::Idle);
-        history::init(&data_dir, cx);
         capture::init(cx);
         let errors = [
             config::init(&data_dir, cx),
@@ -130,26 +128,10 @@ fn dispatch(command: Command, cx: &mut App) {
             files: Some(files), ..
         } => return pin::open_paths(files, cx),
         Command::Paste { .. } => pin::paste(cx),
-        Command::History => show_window(
-            "history",
-            "History",
-            size(px(760.), px(520.)),
-            false,
-            cx,
-            |window, cx| cx.new(|cx| ui::history::HistoryView::new(window, cx)),
-        ),
-        Command::ClearHistory => return history::clear(cx),
         Command::Whiteboard { color } => return capture::start_whiteboard(color, cx),
         Command::TogglePins => return pin::toggle_hidden(cx),
         Command::ToggleClickThrough => return pin::toggle_click_through(cx),
-        Command::Preferences => show_window(
-            "preferences",
-            "Preferences",
-            size(px(900.), px(600.)),
-            true,
-            cx,
-            |window, cx| cx.new(|cx| ui::preferences::PreferencesView::new(window, cx)),
-        ),
+        Command::Preferences => show_preferences(cx),
         Command::Quit => return recording::quit(cx),
     };
     if let Err(error) = result {
@@ -157,19 +139,13 @@ fn dispatch(command: Command, cx: &mut App) {
     }
 }
 
-fn show_window<V: Render>(
-    key: &'static str,
-    title: &'static str,
-    size: Size<Pixels>,
-    translucent: bool,
-    cx: &mut App,
-    build: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
-) -> Result<()> {
+fn show_preferences(cx: &mut App) -> Result<()> {
+    const KEY: &str = "preferences";
     if let Some((_, handle)) = cx
         .global::<AppState>()
         .windows
         .iter()
-        .find(|(existing, _)| *existing == key)
+        .find(|(existing, _)| *existing == KEY)
         && handle
             .update(cx, |_, window, _| {
                 platform::make_key_window(window);
@@ -181,21 +157,23 @@ fn show_window<V: Render>(
         return Ok(());
     }
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(px(900.), px(600.)),
+            cx,
+        ))),
         titlebar: Some(TitlebarOptions {
-            title: Some(title.into()),
-            appears_transparent: translucent,
-            traffic_light_position: translucent.then(|| point(px(18.), px(20.))),
+            title: Some("Preferences".into()),
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(18.), px(20.))),
         }),
-        window_background: if translucent {
-            WindowBackgroundAppearance::Blurred
-        } else {
-            WindowBackgroundAppearance::Opaque
-        },
+        window_background: WindowBackgroundAppearance::Blurred,
         window_min_size: Some(gpui_kit::size(px(280.), px(220.))),
         ..Default::default()
     };
-    open_window(key, options, cx, build)?;
+    open_window(KEY, options, cx, |window, cx| {
+        cx.new(|cx| ui::preferences::PreferencesView::new(window, cx))
+    })?;
     return Ok(());
 }
 
