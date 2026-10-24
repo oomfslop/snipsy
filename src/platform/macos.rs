@@ -341,8 +341,14 @@ pub fn make_key_window(window: &gpui_kit::Window) {
     native.makeMainWindow();
 }
 
+/// Shrinks the window so its layer drops the desktop-sized drawables it keeps pooled while hidden.
 pub fn hide_overlay(window: &gpui_kit::Window) {
-    get_native_window(window).orderOut(None);
+    let native = get_native_window(window);
+    native.orderOut(None);
+    native.setFrame_display(
+        NSRect::new(native.frame().origin, NSSize::new(1.0, 1.0)),
+        false,
+    );
     let mtm = MainThreadMarker::new().expect("window hides on the main thread");
     NSApplication::sharedApplication(mtm).deactivate();
 }

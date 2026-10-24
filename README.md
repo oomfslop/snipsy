@@ -6,9 +6,10 @@ Capture a frozen screen region or click a window, annotate it, then copy, save, 
 
 ## Build
 
-Requires Rust and Xcode with its Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`).
+Requires Rust and Xcode with its Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`). `gpui-pre-macos` is patched (`patches/`) to stop drawing into hidden windows. Fetch and patch it into `vendor/` before the first build, and again whenever `patches/` changes:
 
 ```sh
+./scripts/prepare-vendor.sh
 cargo build --release
 python3 scripts/bundle_macos.py release
 ```

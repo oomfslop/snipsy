@@ -152,6 +152,8 @@ fn show_overlay(
     let cached = cx.global::<Captures>().cache.clone().filter(|view| {
         view.update(cx, |capture, window, cx| {
             platform::configure_overlay(window, bounds, false);
+            // GPUI drops resize callbacks that arrive while the app is borrowed.
+            window.bounds_changed(cx);
             capture.reset(
                 bounds,
                 mode.clone(),

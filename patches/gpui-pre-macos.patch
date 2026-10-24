@@ -1,0 +1,32 @@
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -836,10 +836,11 @@
+     fn start_display_link(&mut self) {
+         self.stop_display_link();
+         unsafe {
+-            if !self
+-                .native_window
+-                .occlusionState()
+-                .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
++            if !self.native_window.isVisible()
++                || !self
++                    .native_window
++                    .occlusionState()
++                    .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
+             {
+                 return;
+             }
+@@ -3344,6 +3345,13 @@
+     let window_state = unsafe { get_window_state(&*view) };
+     let mut lock = window_state.lock();
+ 
++    // Occlusion updates arrive asynchronously after orderOut, and presenting to an
++    // ordered-out window blocks in nextDrawable for a second once its drawables run out.
++    if !unsafe { lock.native_window.isVisible() } {
++        lock.stop_display_link();
++        return;
++    }
++
+     if let Some(mut callback) = lock.request_frame_callback.take() {
+         let (signal_at, signal_source) = lock
+             .frame_source
