@@ -4,7 +4,7 @@ use glam::{Vec2, vec2};
 pub const MARGIN: f32 = 8.0;
 pub const GAP: f32 = 4.0;
 const HANDLE_HIT_RADIUS: f32 = 4.0;
-const MIN_SELECTION: f32 = 2.0;
+pub const MIN_SELECTION: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResizeHandle {

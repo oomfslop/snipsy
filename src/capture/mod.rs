@@ -861,8 +861,8 @@ impl CaptureView {
         }
         match mode {
             DragMode::New => {
-                self.selection = Some(Rect::from_corners(start, point))
-                    .filter(|rect| layout::get_is_valid_selection(*rect));
+                let rect = Rect::from_corners(start, point);
+                self.selection = (rect.size.max_element() >= layout::MIN_SELECTION).then_some(rect);
             }
             DragMode::Move => {
                 let origin = drag.origin.unwrap();
@@ -1665,7 +1665,10 @@ impl Render for CaptureView {
                             return;
                         };
                         window.paint_quad(outline(
-                            ui::to_bounds(border),
+                            ui::to_bounds(Rect {
+                                size: border.size.max(Vec2::ONE),
+                                ..border
+                            }),
                             accent,
                             BorderStyle::Solid,
                         ));
@@ -1721,7 +1724,13 @@ impl Render for CaptureView {
             })
             .children(self.render_recognized_codes(cx))
             .when_some(
-                selection.filter(|_| self.show_toolbar),
+                selection.filter(|_| {
+                    self.show_toolbar
+                        && !matches!(
+                            self.get_drag_mode(),
+                            Some(DragMode::New | DragMode::Resize(_))
+                        )
+                }),
                 |root, selection| root.children(self.render_toolbars(selection, cx)),
             )
             .when(self.get_shows_magnifier(), |root| {

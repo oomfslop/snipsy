@@ -371,7 +371,6 @@ impl CaptureView {
 
     fn render_action_bar(&self, bar: Rect, cx: &mut Context<Self>) -> impl IntoElement {
         let measured = self.toolbar_size.clone();
-        let entity = cx.entity_id();
         let family = get_tool_family(self.editor.tool);
         let pin_editor = matches!(self.mode, Mode::PinEditor(_));
         let items = toolbar_layout::get_visible_items(&cx.global::<Config>().toolbar, |item| {
@@ -431,10 +430,10 @@ impl CaptureView {
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(
                 canvas(
-                    move |bounds, _, cx| {
+                    move |bounds, window, _| {
                         let size = vec2(bounds.size.width.into(), bounds.size.height.into());
                         if measured.replace(Some(size)) != Some(size) {
-                            cx.notify(entity);
+                            window.request_animation_frame();
                         }
                     },
                     |_, _, _, _| {},
