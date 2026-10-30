@@ -171,6 +171,15 @@ fn show_overlay(
             cx.new(|cx| CaptureView::new(bounds, mode, screenshot, pointer, window, cx))
         })?,
     };
+    view.update(cx, |capture, _, _| {
+        capture.screens = platform::get_screen_bounds()
+            .into_iter()
+            .map(|screen| Rect {
+                pos: screen.pos - bounds.pos,
+                size: screen.size,
+            })
+            .collect();
+    })?;
     let captures = cx.global_mut::<Captures>();
     captures.active = Some(view.clone());
     captures.cache = Some(view.clone());
@@ -319,6 +328,7 @@ struct CaptureView {
     cursorless: Option<Arc<RgbaImage>>,
     cursor: Option<Arc<CursorSnapshot>>,
     windows: Vec<Rect>,
+    screens: Vec<Rect>,
     background: Option<Arc<RenderImage>>,
     raster_preview: RasterPreview,
     recognition: recognition::TextRecognition,
@@ -376,6 +386,7 @@ impl CaptureView {
             cursorless: None,
             cursor: None,
             windows: Vec::new(),
+            screens: Vec::new(),
             background: None,
             raster_preview: RasterPreview::default(),
             recognition: Default::default(),
@@ -622,6 +633,15 @@ impl CaptureView {
             .copied();
     }
 
+    fn get_screen_at(&self, point: Vec2) -> Rect {
+        return self
+            .screens
+            .iter()
+            .find(|screen| screen.contains(point))
+            .copied()
+            .unwrap_or_else(|| self.get_canvas());
+    }
+
     fn get_cursor(&self) -> CursorStyle {
         if self.drag.is_none() && self.get_hovered_link().is_some() {
             return CursorStyle::PointingHand;
@@ -852,9 +872,9 @@ impl CaptureView {
         {
             point = point.clamp(selection.pos, selection.end());
         }
-        let canvas = self.get_canvas();
+        let screen = self.get_screen_at(start);
         if matches!(mode, DragMode::New) {
-            point = point.clamp(canvas.pos, canvas.end());
+            point = point.clamp(screen.pos, screen.end());
         }
         if event.modifiers.shift && mode == DragMode::Draw {
             point = constrain_point(self.editor.tool, start, point);
@@ -869,7 +889,7 @@ impl CaptureView {
                 self.selection = Some(layout::create_moved_selection(
                     origin,
                     point - start,
-                    canvas,
+                    screen.union(origin),
                 ));
             }
             DragMode::Resize(handle) => {
@@ -882,7 +902,7 @@ impl CaptureView {
                 self.selection = Some(layout::create_resized_selection(
                     origin,
                     handle,
-                    (center + point - start).clamp(canvas.pos, canvas.end()),
+                    (center + point - start).clamp(screen.pos, screen.end()),
                 ));
             }
             DragMode::MoveAnnotation(index) => {
@@ -1320,19 +1340,20 @@ impl CaptureView {
             for point in &mut self.editor.layers[index].points {
                 *point += direction * step;
             }
-        } else if modifiers.platform || modifiers.shift {
-            self.selection = Some(layout::create_keyboard_resized_selection(
-                selection,
-                key,
-                modifiers.platform,
-                self.get_canvas(),
-            ));
         } else {
-            self.selection = Some(layout::create_moved_selection(
-                selection,
-                direction,
-                self.get_canvas(),
-            ));
+            let bounds = self
+                .get_screen_at(selection.pos + selection.size / 2.0)
+                .union(selection);
+            self.selection = Some(if modifiers.platform || modifiers.shift {
+                layout::create_keyboard_resized_selection(
+                    selection,
+                    key,
+                    modifiers.platform,
+                    bounds,
+                )
+            } else {
+                layout::create_moved_selection(selection, direction, bounds)
+            });
         }
         cx.notify();
     }

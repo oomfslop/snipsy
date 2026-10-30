@@ -283,12 +283,18 @@ fn get_rect(frame: CGRect) -> Rect {
     };
 }
 
-pub fn get_desktop_bounds() -> Result<Rect> {
+pub fn get_screen_bounds() -> Vec<Rect> {
     let mtm = MainThreadMarker::new().expect("capture starts on the main thread");
     let height = get_primary_screen_height(mtm);
     return NSScreen::screens(mtm)
         .iter()
         .map(|screen| get_rect(screen.frame()).flip_vertically(height))
+        .collect();
+}
+
+pub fn get_desktop_bounds() -> Result<Rect> {
+    return get_screen_bounds()
+        .into_iter()
         .reduce(Rect::union)
         .context("No display available");
 }
