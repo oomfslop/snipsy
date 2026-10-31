@@ -37,6 +37,7 @@ pub struct PreferencesView {
     recording: Option<HotkeyKind>,
     error: Option<(HotkeyKind, SharedString)>,
     drop_index: Option<usize>,
+    launches_at_login: bool,
 }
 
 impl PreferencesView {
@@ -44,11 +45,19 @@ impl PreferencesView {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         cx.observe_global::<Config>(|_, cx| cx.notify()).detach();
+        cx.observe_window_activation(window, |preferences, window, cx| {
+            if window.is_window_active() {
+                preferences.launches_at_login = platform::get_launches_at_login();
+                cx.notify();
+            }
+        })
+        .detach();
         return Self {
             focus,
             recording: None,
             error: None,
             drop_index: None,
+            launches_at_login: platform::get_launches_at_login(),
         };
     }
 
@@ -120,10 +129,20 @@ impl Render for PreferencesView {
         let general = SettingGroup::new().item(SettingItem::new(
             "Launch at login",
             SettingField::switch(
-                |_| platform::get_launches_at_login(),
-                |enabled, _| {
-                    if let Err(error) = platform::set_launches_at_login(enabled) {
-                        app::show_error(error);
+                {
+                    let view = view.clone();
+                    move |cx| view.read(cx).launches_at_login
+                },
+                {
+                    let view = view.clone();
+                    move |enabled, cx| {
+                        if let Err(error) = platform::set_launches_at_login(enabled) {
+                            app::show_error(error);
+                        }
+                        view.update(cx, |preferences, cx| {
+                            preferences.launches_at_login = platform::get_launches_at_login();
+                            cx.notify();
+                        });
                     }
                 },
             ),
