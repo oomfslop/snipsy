@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      SIGNING_P12: ${{ secrets.SIGNING_P12 }}
+      SIGNING_P12_PASSWORD: ${{ secrets.SIGNING_P12_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Metal toolchain
+        run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - run: ./scripts/prepare-vendor.sh
+      - run: cargo test
+      - run: cargo build --release
+      - name: Import signing identity
+        if: env.SIGNING_P12 != ''
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p "" "$keychain"
+          security set-keychain-settings "$keychain"
+          security unlock-keychain -p "" "$keychain"
+          echo "$SIGNING_P12" | base64 --decode > "$RUNNER_TEMP/identity.p12"
+          security import "$RUNNER_TEMP/identity.p12" -k "$keychain" -P "$SIGNING_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+      - name: Bundle
+        if: env.SIGNING_P12 != ''
+        run: |
+          python3 scripts/bundle_macos.py release
+          # upload-artifact drops file permissions, zip keeps the executable bit
+          ditto -c -k --keepParent target/release/Snipsy.app Snipsy.zip
+      - uses: actions/upload-artifact@v4
+        if: env.SIGNING_P12 != ''
+        with:
+          name: Snipsy
+          path: Snipsy.zip
