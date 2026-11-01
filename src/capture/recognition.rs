@@ -405,15 +405,15 @@ impl CaptureView {
         let Some(result) = self.get_recognized_text() else {
             return Vec::new();
         };
-        let screen = self.bounds.size;
         return result
             .codes
             .iter()
             .enumerate()
             .map(|(index, code)| {
                 let bounds = get_padded_rect(code.bounds);
+                let screen = self.get_layout_screen(bounds);
                 let below = bounds.end().y + layout::GAP;
-                let y = if below + CODE_CHIP_HEIGHT <= screen.y - layout::MARGIN {
+                let y = if below + CODE_CHIP_HEIGHT <= screen.end().y - layout::MARGIN {
                     below
                 } else {
                     bounds.pos.y - layout::GAP - CODE_CHIP_HEIGHT
@@ -421,8 +421,8 @@ impl CaptureView {
                 let x = bounds
                     .pos
                     .x
-                    .min(screen.x - CODE_CHIP_WIDTH - layout::MARGIN)
-                    .max(layout::MARGIN);
+                    .min(screen.end().x - CODE_CHIP_WIDTH - layout::MARGIN)
+                    .max(screen.pos.x + layout::MARGIN);
                 let payload = code.payload.clone();
                 let is_link = payload.starts_with("https://") || payload.starts_with("http://");
                 ui::panel(cx)

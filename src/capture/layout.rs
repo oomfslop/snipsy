@@ -133,17 +133,19 @@ pub fn get_dim_rects(selection: Option<Rect>, bounds: Rect) -> Vec<Rect> {
     ];
 }
 
-pub fn create_action_bar_rect(selection: Rect, size: Vec2, screen: Vec2) -> Rect {
-    let size = size.min((screen - 2.0 * MARGIN).max(Vec2::ONE));
-    let x = (selection.end().x - size.x).clamp(MARGIN, (screen.x - size.x - MARGIN).max(MARGIN));
+pub fn create_action_bar_rect(selection: Rect, size: Vec2, screen: Rect) -> Rect {
+    let start = screen.pos + MARGIN;
+    let end = screen.end() - MARGIN;
+    let size = size.min((end - start).max(Vec2::ONE));
+    let x = (selection.end().x - size.x).clamp(start.x, (end.x - size.x).max(start.x));
     let below = selection.end().y + GAP;
     let above = selection.pos.y - size.y - GAP;
-    let y = if below + size.y <= screen.y - MARGIN {
+    let y = if below + size.y <= end.y {
         below
-    } else if above >= MARGIN {
+    } else if above >= start.y {
         above
     } else {
-        (selection.end().y - size.y - GAP).clamp(MARGIN, (screen.y - size.y - MARGIN).max(MARGIN))
+        (selection.end().y - size.y - GAP).clamp(start.y, (end.y - size.y).max(start.y))
     };
     return Rect {
         pos: vec2(x, y),
@@ -151,48 +153,46 @@ pub fn create_action_bar_rect(selection: Rect, size: Vec2, screen: Vec2) -> Rect
     };
 }
 
-pub fn create_centered_rect(target: Rect, size: Vec2, screen: Vec2) -> Rect {
-    let pos = (target.pos + (target.size - size) / 2.0).clamp(
-        Vec2::splat(MARGIN),
-        (screen - size - MARGIN).max(Vec2::splat(MARGIN)),
-    );
+pub fn create_centered_rect(target: Rect, size: Vec2, screen: Rect) -> Rect {
+    let start = screen.pos + MARGIN;
+    let pos = (target.pos + (target.size - size) / 2.0)
+        .clamp(start, (screen.end() - size - MARGIN).max(start));
     return Rect { pos, size };
 }
 
-pub fn get_options_bar_y(bar: Rect, screen: Vec2) -> f32 {
-    if bar.end().y + GAP + bar.size.y <= screen.y - MARGIN {
+pub fn get_options_bar_y(bar: Rect, screen: Rect) -> f32 {
+    if bar.end().y + GAP + bar.size.y <= screen.end().y - MARGIN {
         return bar.end().y + GAP;
     }
-    return (bar.pos.y - bar.size.y - GAP).max(MARGIN);
+    return (bar.pos.y - bar.size.y - GAP).max(screen.pos.y + MARGIN);
 }
 
-pub fn create_layers_panel_rect(selection: Rect, bar: Rect, size: Vec2, screen: Vec2) -> Rect {
-    let size = size.min((screen - 2.0 * MARGIN).max(Vec2::ZERO));
+pub fn create_layers_panel_rect(selection: Rect, bar: Rect, size: Vec2, screen: Rect) -> Rect {
+    let start = screen.pos + MARGIN;
+    let end = screen.end() - MARGIN;
+    let size = size.min((end - start).max(Vec2::ZERO));
     let right = selection.end().x.max(bar.end().x) + GAP;
     let left = selection.pos.x.min(bar.pos.x) - size.x - GAP;
     let below = selection.end().y + GAP;
     let above = selection.pos.y.min(bar.pos.y - bar.size.y - GAP) - size.y - GAP;
     let beside_bar = bar.pos.x - size.x - GAP;
-    let pos = if right + size.x <= screen.x - MARGIN {
+    let pos = if right + size.x <= end.x {
         vec2(right, selection.pos.y)
-    } else if left >= MARGIN {
+    } else if left >= start.x {
         vec2(left, selection.pos.y)
-    } else if below + size.y <= screen.y - MARGIN && beside_bar >= MARGIN {
+    } else if below + size.y <= end.y && beside_bar >= start.x {
         vec2(beside_bar, below)
-    } else if above >= MARGIN {
+    } else if above >= start.y {
         vec2(selection.pos.x, above)
-    } else if beside_bar >= MARGIN {
+    } else if beside_bar >= start.x {
         vec2(beside_bar, bar.pos.y)
-    } else if bar.end().x + GAP + size.x + MARGIN <= screen.x {
+    } else if bar.end().x + GAP + size.x <= end.x {
         vec2(bar.end().x + GAP, bar.pos.y)
     } else {
         vec2(selection.pos.x, bar.pos.y - size.y - GAP)
     };
     return Rect {
-        pos: pos.clamp(
-            Vec2::splat(MARGIN),
-            (screen - size - MARGIN).max(Vec2::splat(MARGIN)),
-        ),
+        pos: pos.clamp(start, (end - size).max(start)),
         size,
     };
 }

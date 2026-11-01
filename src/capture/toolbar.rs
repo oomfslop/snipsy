@@ -240,13 +240,14 @@ impl CaptureView {
                 screenshot.image.width() as f32 / self.get_canvas().size.x
             });
         let size = (rect.size * scale).round();
+        let screen = self.get_layout_screen(rect);
         return ui::panel(cx)
             .absolute()
             .left(px(rect.pos.x.clamp(
-                layout::MARGIN,
-                (self.bounds.size.x - 120.0).max(layout::MARGIN),
+                screen.pos.x + layout::MARGIN,
+                (screen.end().x - 120.0).max(screen.pos.x + layout::MARGIN),
             )))
-            .top(px((rect.pos.y - 26.0).max(layout::MARGIN)))
+            .top(px((rect.pos.y - 26.0).max(screen.pos.y + layout::MARGIN)))
             .px_1p5()
             .text_xs()
             .child(format!("{} × {}", size.x, size.y));
@@ -257,7 +258,11 @@ impl CaptureView {
         selection: Rect,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let prompt = layout::create_centered_rect(selection, vec2(260.0, 124.0), self.bounds.size);
+        let prompt = layout::create_centered_rect(
+            selection,
+            vec2(260.0, 124.0),
+            self.get_layout_screen(selection),
+        );
         let (title, detail) = if matches!(self.mode, Mode::Video) {
             (
                 "Discard recording?",
@@ -319,7 +324,7 @@ impl CaptureView {
         selection: Rect,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let screen = self.bounds.size;
+        let screen = self.get_layout_screen(selection);
         let has_action_bar = !cx.global::<Config>().toolbar.is_empty();
         let measured = self.toolbar_size.get();
         if has_action_bar && measured.is_none() {
@@ -330,7 +335,7 @@ impl CaptureView {
             return vec![
                 div()
                     .invisible()
-                    .child(self.render_action_bar(probe, cx))
+                    .child(self.render_action_bar(probe, screen, cx))
                     .into_any_element(),
             ];
         }
@@ -350,16 +355,19 @@ impl CaptureView {
         });
         let mut elements = Vec::new();
         if has_action_bar {
-            elements.push(self.render_action_bar(bar, cx).into_any_element());
+            elements.push(self.render_action_bar(bar, screen, cx).into_any_element());
         }
         let tool = self.editor.get_current_tool();
         if self.show_record_options && matches!(self.mode, Mode::Capture) {
-            elements.push(self.render_record_options(bar, cx).into_any_element());
+            elements.push(
+                self.render_record_options(bar, screen, cx)
+                    .into_any_element(),
+            );
         } else if tool != Tool::Select
             && (tool != Tool::Eraser || self.get_supports_tool(Tool::SmartEraser))
         {
             elements.push(
-                self.render_tool_options(tool, bar, layers_panel, cx)
+                self.render_tool_options(tool, bar, screen, layers_panel, cx)
                     .into_any_element(),
             );
         }
@@ -369,7 +377,12 @@ impl CaptureView {
         return elements;
     }
 
-    fn render_action_bar(&self, bar: Rect, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_action_bar(
+        &self,
+        bar: Rect,
+        screen: Rect,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let measured = self.toolbar_size.clone();
         let family = get_tool_family(self.editor.tool);
         let pin_editor = matches!(self.mode, Mode::PinEditor(_));
@@ -423,7 +436,7 @@ impl CaptureView {
             .absolute()
             .left(px(bar.pos.x))
             .top(px(bar.pos.y))
-            .max_w(px(self.bounds.size.x - 2.0 * layout::MARGIN))
+            .max_w(px(screen.size.x - 2.0 * layout::MARGIN))
             .cursor(CursorStyle::Arrow)
             .overflow_x_scroll()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -444,7 +457,12 @@ impl CaptureView {
             .child(toolbar);
     }
 
-    fn render_record_options(&self, bar: Rect, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_record_options(
+        &self,
+        bar: Rect,
+        screen: Rect,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let settings = cx.global::<Config>().recording;
         let option = |id: ElementId, label: String, next: RecordingSettings, cx: &Context<Self>| {
             Button::new(id)
@@ -544,13 +562,13 @@ impl CaptureView {
                         capture.perform_action(EditorAction::Record, window, cx);
                     })),
             );
-        let screen = self.bounds.size;
         return create_options_bar(
             "record-options",
             toolbar,
             bar.pos.x,
             layout::get_options_bar_y(bar, screen),
-            screen.x - layout::MARGIN,
+            screen,
+            screen.end().x - layout::MARGIN,
             cx,
         );
     }
@@ -559,12 +577,12 @@ impl CaptureView {
         &self,
         tool: Tool,
         bar: Rect,
+        screen: Rect,
         layers_panel: Option<Rect>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let screen = self.bounds.size;
         let y = layout::get_options_bar_y(bar, screen);
-        let mut right = screen.x - layout::MARGIN;
+        let mut right = screen.end().x - layout::MARGIN;
         if let Some(panel) = layers_panel
             && panel.pos.x > bar.pos.x
             && y < panel.end().y
@@ -739,7 +757,7 @@ impl CaptureView {
         } else {
             toolbar
         };
-        return create_options_bar("tool-options", toolbar, bar.pos.x, y, right, cx);
+        return create_options_bar("tool-options", toolbar, bar.pos.x, y, screen, right, cx);
     }
 
     fn render_size_control(&self, tool: Tool, cx: &mut Context<Self>) -> impl IntoElement {
@@ -969,33 +987,23 @@ impl Render for LayerDragPreview {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::TOOLS;
-
-    #[test]
-    fn tool_shortcuts_are_unique() {
-        for (index, tool) in TOOLS.iter().enumerate() {
-            assert!(!TOOLS[index + 1..].iter().any(|other| other.key == tool.key));
-        }
-    }
-}
-
 fn create_options_bar(
     id: &'static str,
     toolbar: gpui_kit::component::toolbar::Toolbar,
     left: f32,
     y: f32,
+    screen: Rect,
     right: f32,
     cx: &App,
 ) -> impl IntoElement {
+    let start = screen.pos.x + layout::MARGIN;
     return div()
         .absolute()
-        .left(px(layout::MARGIN))
+        .left(px(start))
         .top(px(y))
-        .w(px((right - layout::MARGIN).max(32.0)))
+        .w(px((right - start).max(32.0)))
         .flex()
-        .child(div().w(px(left - layout::MARGIN)))
+        .child(div().w(px(left - start)))
         .child(
             ui::create_toolbar_panel(cx)
                 .id(id)
@@ -1007,4 +1015,16 @@ fn create_options_bar(
                 .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 .child(toolbar),
         );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TOOLS;
+
+    #[test]
+    fn tool_shortcuts_are_unique() {
+        for (index, tool) in TOOLS.iter().enumerate() {
+            assert!(!TOOLS[index + 1..].iter().any(|other| other.key == tool.key));
+        }
+    }
 }

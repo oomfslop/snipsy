@@ -721,6 +721,19 @@ impl CaptureView {
             .unwrap_or_else(|| self.get_canvas());
     }
 
+    fn get_layout_screen(&self, target: Rect) -> Rect {
+        let center = target.pos + target.size / 2.0;
+        return self
+            .screens
+            .iter()
+            .find(|screen| screen.contains(center))
+            .copied()
+            .unwrap_or(Rect {
+                pos: Vec2::ZERO,
+                size: self.bounds.size,
+            });
+    }
+
     fn get_cursor(&self) -> CursorStyle {
         if self.drag.is_none() && self.get_hovered_link().is_some() {
             return CursorStyle::PointingHand;
