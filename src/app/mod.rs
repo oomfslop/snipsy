@@ -32,7 +32,7 @@ actions!(
 pub fn run(command: Option<Command>, data_dir: &Path, listener: UnixListener) {
     let data_dir = data_dir.to_path_buf();
     let application = gpui_kit::application().with_assets(ui::Assets);
-    application.on_reopen(capture::start);
+    application.on_reopen(|cx| capture::start(cli::SnipOptions::default(), cx));
     application.run(move |cx| {
         gpui_kit::init(cx);
         ui::init_theme(cx);
@@ -119,7 +119,8 @@ fn init_actions(cx: &mut App) {
 
 fn dispatch(command: Command, cx: &mut App) {
     let result = match command {
-        Command::Snip => return capture::start(cx),
+        Command::Snip(options) => options.validate().map(|()| capture::start(options, cx)),
+        Command::CustomSnip => show_custom_snip(ui::custom_snip::Target::Capture, cx),
         Command::Record => return recording::toggle(cx),
         Command::Paste {
             plain: Some(words), ..
@@ -173,6 +174,37 @@ fn show_preferences(cx: &mut App) -> Result<()> {
     };
     open_window(KEY, options, cx, |window, cx| {
         cx.new(|cx| ui::preferences::PreferencesView::new(window, cx))
+    })?;
+    return Ok(());
+}
+
+pub fn show_custom_snip(target: ui::custom_snip::Target, cx: &mut App) -> Result<()> {
+    const KEY: &str = "custom-snip";
+    if let Some((_, handle)) = cx
+        .global::<AppState>()
+        .windows
+        .iter()
+        .find(|(existing, _)| *existing == KEY)
+        .copied()
+    {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+    }
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(px(480.), px(230.)),
+            cx,
+        ))),
+        titlebar: Some(TitlebarOptions {
+            title: Some("Custom Snip".into()),
+            ..Default::default()
+        }),
+        is_resizable: false,
+        is_minimizable: false,
+        ..Default::default()
+    };
+    open_window(KEY, options, cx, |window, cx| {
+        cx.new(|cx| ui::custom_snip::CustomSnipView::new(target, window, cx))
     })?;
     return Ok(());
 }

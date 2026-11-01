@@ -97,7 +97,7 @@ impl Global for Recording {}
 
 pub fn toggle(cx: &mut App) {
     match cx.global::<Recording>() {
-        Recording::Idle => capture::start(cx),
+        Recording::Idle => capture::start(Default::default(), cx),
         Recording::Active { .. } => stop(None, cx),
         Recording::Starting(_) | Recording::Stopping => {}
     }

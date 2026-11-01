@@ -25,16 +25,19 @@ To install, run `scripts/install.sh` - it builds, bundles, quits the installed c
 ## Command line
 
 ```
-snipsy [snip | record | paste [--plain TEXT... | --files FILE...]
+snipsy [snip [--position X,Y] [--size WxH] [--delay SECONDS] | custom-snip
+        | record | paste [--plain TEXT... | --files FILE...]
         | whiteboard [--color COLOR] | toggle-pins | toggle-click-through
         | preferences | quit]
 ```
+
+`snip --position` and `--size` are in pixels from the desktop's top-left. Given both, the region is selected right away; given one, a fixed-size or fixed-corner selection follows the pointer and a click places it. `custom-snip` opens the same options in a dialog.
 
 Commands are forwarded to the running instance and start it when needed. `COLOR` accepts names, `#rgb[a]`, `#rrggbb[aa]`, and `r g b` (0–255 or 0.0–1.0); `--color transparent` makes a transparent whiteboard.
 
 ## Shortcuts
 
-Global shortcuts and the capture toolbar layout are configurable in Preferences.
+Global shortcuts and the capture toolbar layout are configurable in Preferences, including custom snip shortcuts with a fixed region or delay.
 
 | Action | Shortcut |
 | --- | --- |

@@ -1,12 +1,14 @@
 use crate::{
     app::{
         self,
+        cli::SnipOptions,
         config::Config,
         hotkeys::{self, HotkeyKind},
         toolbar_layout::{self, DEFAULT_ITEMS, ToolbarItem},
     },
     capture::toolbar::get_item_spec,
-    platform, ui,
+    platform,
+    ui::{self, custom_snip},
 };
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use gpui_kit::{
@@ -158,6 +160,35 @@ impl Render for PreferencesView {
                     }),
                 )
             }));
+        let custom_snips = SettingGroup::new()
+            .title("Custom snips")
+            .description("Snip a fixed region, or after a delay.")
+            .items(cx.global::<Config>().hotkeys.custom.iter().enumerate().map(
+                |(index, custom)| {
+                    let view = view.clone();
+                    SettingItem::new(
+                        format_snip_options(custom.snip),
+                        SettingField::render(move |_, window, cx| {
+                            render_custom_snip_field(&view, index, window, cx)
+                        }),
+                    )
+                },
+            ))
+            .item(SettingItem::render(|_, _, _| {
+                h_flex().w_full().justify_end().child(
+                    Button::new("add-custom-snip")
+                        .small()
+                        .icon(IconName::Plus)
+                        .label("Add custom snip…")
+                        .on_click(|_, _, cx| {
+                            if let Err(error) =
+                                app::show_custom_snip(custom_snip::Target::Shortcut(None), cx)
+                            {
+                                app::show_error(error);
+                            }
+                        }),
+                )
+            }));
         let toolbar = SettingGroup::new().item(
             SettingItem::render(move |_, window, cx| render_toolbar_editor(&view, window, cx))
                 .keywords(["toolbar", "buttons", "tools"])
@@ -209,7 +240,8 @@ impl Render for PreferencesView {
                         SettingPage::new("Shortcuts")
                             .icon(IconName::Keyboard)
                             .header_style(&header)
-                            .group(shortcuts),
+                            .group(shortcuts)
+                            .group(custom_snips),
                     )
                     .page(
                         SettingPage::new("Toolbar")
@@ -248,7 +280,7 @@ fn render_hotkey_field(
             h_flex()
                 .gap_1()
                 .child(
-                    Button::new(("hotkey", kind as usize))
+                    Button::new(SharedString::from(format!("hotkey-{kind:?}")))
                         .secondary()
                         .small()
                         .min_w(px(140.))
@@ -262,7 +294,7 @@ fn render_hotkey_field(
                         })),
                 )
                 .child(
-                    Button::new(("clear-hotkey", kind as usize))
+                    Button::new(SharedString::from(format!("clear-hotkey-{kind:?}")))
                         .ghost()
                         .small()
                         .icon(IconName::Close)
@@ -280,6 +312,66 @@ fn render_hotkey_field(
         .when_some(error, |field, error| {
             field.child(div().text_xs().text_color(cx.theme().danger).child(error))
         });
+}
+
+fn render_custom_snip_field(
+    view: &Entity<PreferencesView>,
+    index: usize,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement + use<> {
+    let kind = HotkeyKind::CustomSnip(index);
+    return h_flex()
+        .items_start()
+        .gap_1()
+        .child(render_hotkey_field(view, kind, window, cx))
+        .child(
+            Button::new(("edit-custom-snip", index))
+                .ghost()
+                .small()
+                .icon(IconName::Pencil)
+                .tooltip("Edit")
+                .on_click(move |_, _, cx| {
+                    if let Err(error) =
+                        app::show_custom_snip(custom_snip::Target::Shortcut(Some(index)), cx)
+                    {
+                        app::show_error(error);
+                    }
+                }),
+        )
+        .child(
+            Button::new(("remove-custom-snip", index))
+                .ghost()
+                .small()
+                .icon(IconName::Trash)
+                .tooltip("Remove")
+                .on_click(window.listener_for(view, move |state, _, _, cx| {
+                    state.recording = None;
+                    state.error = hotkeys::update_settings(cx, |settings| {
+                        if index < settings.custom.len() {
+                            settings.custom.remove(index);
+                        }
+                    })
+                    .err()
+                    .map(|error| (kind, format!("{error:#}").into()));
+                    cx.notify();
+                })),
+        );
+}
+
+fn format_snip_options(options: SnipOptions) -> String {
+    let parts = [
+        options.size.map(|size| format!("{} × {}", size.x, size.y)),
+        options
+            .position
+            .map(|position| format!("from {}, {}", position.x, position.y)),
+        options.delay.map(|delay| format!("{delay} s delay")),
+    ];
+    let description = parts.into_iter().flatten().collect::<Vec<_>>().join(" · ");
+    if description.is_empty() {
+        return "Snip".into();
+    }
+    return description;
 }
 
 fn render_toolbar_editor(

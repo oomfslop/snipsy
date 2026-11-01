@@ -1,4 +1,5 @@
 use crate::app::{
+    cli::SnipOptions,
     hotkeys::HotkeySettings,
     recording::RecordingSettings,
     storage,
@@ -16,6 +17,7 @@ pub struct Config {
     pub pin_frame: bool,
     pub hotkeys: HotkeySettings,
     pub recording: RecordingSettings,
+    pub custom_snip: SnipOptions,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -27,6 +29,7 @@ impl Default for Config {
             pin_frame: true,
             hotkeys: HotkeySettings::default(),
             recording: RecordingSettings::default(),
+            custom_snip: SnipOptions::default(),
             path: PathBuf::new(),
         };
     }
@@ -39,6 +42,7 @@ fn load(path: &Path) -> Result<Config> {
     toolbar_layout::validate(&config.toolbar)?;
     config.hotkeys.validate()?;
     config.recording.validate()?;
+    config.custom_snip.validate()?;
     return Ok(config);
 }
 

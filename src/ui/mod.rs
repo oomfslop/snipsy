@@ -1,3 +1,4 @@
+pub mod custom_snip;
 pub mod magnifier;
 pub mod preferences;
 
@@ -35,6 +36,7 @@ gpui_kit::assets::icon_assets!(
         Italic,
         Underline,
         Trash,
+        Pencil,
         Keyboard,
         PanelTop,
         GripVertical,

@@ -283,13 +283,21 @@ fn get_rect(frame: CGRect) -> Rect {
     };
 }
 
-pub fn get_screen_bounds() -> Vec<Rect> {
-    let mtm = MainThreadMarker::new().expect("capture starts on the main thread");
+fn get_screen_rects(get_frame: impl Fn(&NSScreen) -> NSRect) -> Vec<Rect> {
+    let mtm = MainThreadMarker::new().expect("screens are read on the main thread");
     let height = get_primary_screen_height(mtm);
     return NSScreen::screens(mtm)
         .iter()
-        .map(|screen| get_rect(screen.frame()).flip_vertically(height))
+        .map(|screen| get_rect(get_frame(&screen)).flip_vertically(height))
         .collect();
+}
+
+pub fn get_screen_bounds() -> Vec<Rect> {
+    return get_screen_rects(|screen| screen.frame());
+}
+
+pub fn get_visible_screen_bounds() -> Vec<Rect> {
+    return get_screen_rects(|screen| screen.visibleFrame());
 }
 
 pub fn get_desktop_bounds() -> Result<Rect> {
@@ -938,7 +946,7 @@ pub fn get_window_id(window: &gpui_kit::Window) -> u32 {
 
 pub fn capture_screen(
     source: &CaptureSource,
-    overlay: u32,
+    excluded: Vec<u32>,
     bounds: Rect,
     windows: Vec<Rect>,
     sender: Sender<Result<Screenshot>>,
@@ -946,9 +954,10 @@ pub fn capture_screen(
     let cached = source.0.lock().expect("capture source poisoned").clone();
     let source = source.clone();
     if let Some(content) = cached.filter(|content| {
-        content.get_display_bounds() == Some(bounds) && content.get_window(overlay).is_some()
+        content.get_display_bounds() == Some(bounds)
+            && excluded.iter().all(|id| content.get_window(*id).is_some())
     }) {
-        capture_displays(&content, overlay, bounds, windows, sender);
+        capture_displays(&content, &excluded, bounds, windows, sender);
         load_shareable_content(move |result| {
             if let Ok(content) = result {
                 *source.0.lock().expect("capture source poisoned") = Some(content);
@@ -959,7 +968,7 @@ pub fn capture_screen(
     load_shareable_content(move |result| match result {
         Ok(content) => {
             *source.0.lock().expect("capture source poisoned") = Some(content.clone());
-            capture_displays(&content, overlay, bounds, windows.clone(), sender.clone());
+            capture_displays(&content, &excluded, bounds, windows.clone(), sender.clone());
         }
         Err(error) => {
             let _ = sender.try_send(Err(error));
@@ -969,7 +978,7 @@ pub fn capture_screen(
 
 fn capture_displays(
     content: &ShareableContent,
-    overlay: u32,
+    excluded: &[u32],
     bounds: Rect,
     windows: Vec<Rect>,
     sender: Sender<Result<Screenshot>>,
@@ -979,10 +988,12 @@ fn capture_displays(
             content.get_display_bounds() == Some(bounds),
             "Display configuration changed; capture again"
         );
-        let overlay = content
-            .get_window(overlay)
-            .context("Could not exclude the capture overlay from the screenshot")?;
-        let excluded = NSArray::from_retained_slice(&[overlay]);
+        let excluded = excluded
+            .iter()
+            .map(|id| content.get_window(*id))
+            .collect::<Option<Vec<_>>>()
+            .context("Could not exclude Snipsy windows from the screenshot")?;
+        let excluded = NSArray::from_retained_slice(&excluded);
         // SAFETY: SCShareableContent getters are plain property reads on a valid snapshot.
         let captures = unsafe { content.0.displays() }
             .iter()

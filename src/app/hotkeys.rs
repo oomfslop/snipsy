@@ -1,5 +1,5 @@
 use crate::app::{
-    cli::Command,
+    cli::{Command, SnipOptions},
     config::{self, Config},
 };
 use anyhow::{Result, ensure};
@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct HotkeySettings {
     #[serde(default)]
     pub capture: Option<HotKey>,
@@ -21,6 +21,16 @@ pub struct HotkeySettings {
     pub click_through: Option<HotKey>,
     #[serde(default)]
     pub toggle_pins: Option<HotKey>,
+    #[serde(default)]
+    pub custom: Vec<CustomSnipHotkey>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CustomSnipHotkey {
+    #[serde(default)]
+    pub hotkey: Option<HotKey>,
+    #[serde(flatten)]
+    pub snip: SnipOptions,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,6 +39,7 @@ pub enum HotkeyKind {
     Paste,
     ClickThrough,
     TogglePins,
+    CustomSnip(usize),
 }
 
 impl HotkeyKind {
@@ -45,53 +56,66 @@ impl HotkeyKind {
             Self::Paste => "Pin clipboard",
             Self::ClickThrough => "Toggle click-through",
             Self::TogglePins => "Show or hide pins",
-        };
-    }
-
-    fn get_command(self) -> Command {
-        return match self {
-            Self::Capture => Command::Snip,
-            Self::Paste => Command::PASTE_CLIPBOARD,
-            Self::ClickThrough => Command::ToggleClickThrough,
-            Self::TogglePins => Command::TogglePins,
+            Self::CustomSnip(_) => "Custom snip",
         };
     }
 }
 
 impl HotkeySettings {
-    pub fn get(self, kind: HotkeyKind) -> Option<HotKey> {
+    pub fn get(&self, kind: HotkeyKind) -> Option<HotKey> {
         return match kind {
             HotkeyKind::Capture => self.capture,
             HotkeyKind::Paste => self.paste,
             HotkeyKind::ClickThrough => self.click_through,
             HotkeyKind::TogglePins => self.toggle_pins,
+            HotkeyKind::CustomSnip(index) => self.custom.get(index)?.hotkey,
         };
     }
 
-    fn get_mut(&mut self, kind: HotkeyKind) -> &mut Option<HotKey> {
+    fn get_mut(&mut self, kind: HotkeyKind) -> Option<&mut Option<HotKey>> {
         return match kind {
-            HotkeyKind::Capture => &mut self.capture,
-            HotkeyKind::Paste => &mut self.paste,
-            HotkeyKind::ClickThrough => &mut self.click_through,
-            HotkeyKind::TogglePins => &mut self.toggle_pins,
+            HotkeyKind::Capture => Some(&mut self.capture),
+            HotkeyKind::Paste => Some(&mut self.paste),
+            HotkeyKind::ClickThrough => Some(&mut self.click_through),
+            HotkeyKind::TogglePins => Some(&mut self.toggle_pins),
+            HotkeyKind::CustomSnip(index) => Some(&mut self.custom.get_mut(index)?.hotkey),
         };
     }
 
-    fn get_bindings(self) -> Vec<(HotKey, Command)> {
+    fn get_command(&self, kind: HotkeyKind) -> Option<Command> {
+        return Some(match kind {
+            HotkeyKind::Capture => Command::SNIP,
+            HotkeyKind::Paste => Command::PASTE_CLIPBOARD,
+            HotkeyKind::ClickThrough => Command::ToggleClickThrough,
+            HotkeyKind::TogglePins => Command::TogglePins,
+            HotkeyKind::CustomSnip(index) => Command::Snip(self.custom.get(index)?.snip),
+        });
+    }
+
+    fn get_bindings(&self) -> Vec<(HotKey, Command)> {
         return HotkeyKind::ALL
             .into_iter()
-            .filter_map(|kind| Some((self.get(kind)?, kind.get_command())))
+            .chain((0..self.custom.len()).map(HotkeyKind::CustomSnip))
+            .filter_map(|kind| Some((self.get(kind)?, self.get_command(kind)?)))
             .collect();
     }
 
-    pub fn validate(self) -> Result<()> {
-        let hotkeys = HotkeyKind::ALL.map(|kind| self.get(kind));
+    pub fn validate(&self) -> Result<()> {
+        let hotkeys = self
+            .get_bindings()
+            .into_iter()
+            .map(|(hotkey, _)| hotkey)
+            .collect::<Vec<_>>();
         ensure!(
-            !hotkeys.iter().enumerate().any(|(index, hotkey)| {
-                hotkey.is_some() && hotkeys[index + 1..].contains(hotkey)
-            }),
+            !hotkeys
+                .iter()
+                .enumerate()
+                .any(|(index, hotkey)| hotkeys[index + 1..].contains(hotkey)),
             "Global shortcuts must be unique"
         );
+        for custom in &self.custom {
+            custom.snip.validate()?;
+        }
         return Ok(());
     }
 }
@@ -121,35 +145,43 @@ pub fn init(sender: async_channel::Sender<Command>, cx: &mut App) -> Result<()> 
         registered: Vec::new(),
         commands,
     };
-    let registered = hotkeys.apply(cx.global::<Config>().hotkeys);
+    let registered = hotkeys.apply(&cx.global::<Config>().hotkeys);
     cx.set_global(hotkeys);
     return registered;
 }
 
-pub fn get_settings(cx: &App) -> Option<HotkeySettings> {
+pub fn get_settings(cx: &App) -> Option<&HotkeySettings> {
     return cx
         .has_global::<Hotkeys>()
-        .then(|| cx.global::<Config>().hotkeys);
+        .then(|| &cx.global::<Config>().hotkeys);
 }
 
 pub fn set_hotkey(kind: HotkeyKind, hotkey: Option<HotKey>, cx: &mut App) -> Result<()> {
+    return update_settings(cx, |settings| {
+        if let Some(slot) = settings.get_mut(kind) {
+            *slot = hotkey;
+        }
+    });
+}
+
+pub fn update_settings(cx: &mut App, change: impl FnOnce(&mut HotkeySettings)) -> Result<()> {
     ensure!(
         cx.has_global::<Hotkeys>(),
         "Global shortcuts are unavailable"
     );
-    let previous = cx.global::<Config>().hotkeys;
-    let mut settings = previous;
-    *settings.get_mut(kind) = hotkey;
+    let previous = cx.global::<Config>().hotkeys.clone();
+    let mut settings = previous.clone();
+    change(&mut settings);
     if settings == previous {
         return Ok(());
     }
     settings.validate()?;
     let result = cx
         .global_mut::<Hotkeys>()
-        .apply(settings)
+        .apply(&settings)
         .and_then(|()| config::update(cx, |config| config.hotkeys = settings));
     if let Err(error) = result {
-        return Err(match cx.global_mut::<Hotkeys>().apply(previous) {
+        return Err(match cx.global_mut::<Hotkeys>().apply(&previous) {
             Ok(()) => error,
             Err(rollback) => error.context(format!("{rollback:#}")),
         });
@@ -158,7 +190,7 @@ pub fn set_hotkey(kind: HotkeyKind, hotkey: Option<HotKey>, cx: &mut App) -> Res
 }
 
 impl Hotkeys {
-    fn apply(&mut self, settings: HotkeySettings) -> Result<()> {
+    fn apply(&mut self, settings: &HotkeySettings) -> Result<()> {
         let bindings = settings.get_bindings();
         let removed = self
             .registered

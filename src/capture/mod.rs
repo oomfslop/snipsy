@@ -1,3 +1,4 @@
+mod countdown;
 pub mod layout;
 mod paint;
 mod recognition;
@@ -9,7 +10,9 @@ pub use video::{VIDEO_EDITOR_WINDOW, open_video_editor};
 
 use crate::{
     app::{
-        self, AppState, config,
+        self, AppState,
+        cli::SnipOptions,
+        config,
         content::PinContent,
         export,
         recording::{self, RecordingSettings},
@@ -32,7 +35,7 @@ use gpui_kit::{
 };
 use image::RgbaImage;
 use layout::ResizeHandle;
-use std::{cell::Cell, rc::Rc, sync::Arc};
+use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 use text::TextCursor;
 
 #[derive(Default)]
@@ -50,30 +53,50 @@ pub fn init(cx: &mut App) {
     cx.set_global(Captures::default());
 }
 
-pub fn start(cx: &mut App) {
+pub fn start(options: SnipOptions, cx: &mut App) {
+    match options.delay.filter(|delay| *delay > 0.0) {
+        Some(delay) => countdown::run(Duration::from_secs_f32(delay), cx, move |countdown, cx| {
+            begin_capture(options, countdown, cx)
+        }),
+        None => begin_capture(options, None, cx),
+    }
+}
+
+fn begin_capture(options: SnipOptions, countdown: Option<AnyWindowHandle>, cx: &mut App) {
+    let cursor = platform::get_cursor_snapshot().map(Arc::new);
+    let scale = platform::get_desktop_scale();
+    let Some(view) = open_capture_overlay(cx) else {
+        if let Some(countdown) = countdown {
+            let _ = countdown.update(cx, |_, window, _| window.remove_window());
+        }
+        return;
+    };
+    let _ = view.update(cx, |view, window, cx| {
+        view.cursor = cursor;
+        view.countdown = countdown;
+        view.set_fixed_region(
+            options.position.map(|position| position.as_vec2() / scale),
+            options.size.map(|size| size.as_vec2() / scale),
+        );
+        view.request_capture(window, cx);
+    });
+    present_overlay(view, cx);
+}
+
+fn open_capture_overlay(cx: &mut App) -> Option<View<CaptureView>> {
     if let Some(view) = cx.global::<Captures>().active.clone() {
         if view
             .update(cx, |capture, window, cx| capture.activate(window, cx))
             .is_ok()
         {
-            return;
+            return None;
         }
         cx.global_mut::<Captures>().active = None;
     }
-    let bounds = match platform::get_desktop_bounds() {
-        Ok(bounds) => bounds,
-        Err(error) => return app::show_error(error),
-    };
-    let cursor = platform::get_cursor_snapshot().map(Arc::new);
-    let view = match show_overlay(bounds, Mode::Capture, None, cx) {
-        Ok(view) => view,
-        Err(error) => return app::show_error(error),
-    };
-    let _ = view.update(cx, |view, window, cx| {
-        view.cursor = cursor;
-        view.request_capture(window, cx);
-    });
-    present_overlay(view, cx);
+    return platform::get_desktop_bounds()
+        .and_then(|bounds| show_overlay(bounds, Mode::Capture, None, cx))
+        .map_err(app::show_error)
+        .ok();
 }
 
 fn present_overlay(view: View<CaptureView>, cx: &mut App) {
@@ -333,6 +356,9 @@ struct CaptureView {
     raster_preview: RasterPreview,
     recognition: recognition::TextRecognition,
     selection: Option<Rect>,
+    fixed_position: Option<Vec2>,
+    fixed_size: Option<Vec2>,
+    countdown: Option<AnyWindowHandle>,
     editor: Editor,
     pointer: Vec2,
     drag: Option<Drag>,
@@ -391,6 +417,9 @@ impl CaptureView {
             raster_preview: RasterPreview::default(),
             recognition: Default::default(),
             selection: None,
+            fixed_position: None,
+            fixed_size: None,
+            countdown: None,
             editor,
             pointer: (pointer - bounds.pos).clamp(Vec2::ZERO, bounds.size),
             drag: None,
@@ -467,6 +496,7 @@ impl CaptureView {
         {
             cx.drop_image(image, Some(window));
         }
+        self.close_countdown(cx);
         *self = Self::new(bounds, mode, screenshot, pointer, window, cx);
         cx.notify();
     }
@@ -520,12 +550,25 @@ impl CaptureView {
         self.hidden = true;
     }
 
+    fn close_countdown(&mut self, cx: &mut App) {
+        if let Some(countdown) = self.countdown.take() {
+            let _ = countdown.update(cx, |_, window, _| window.remove_window());
+        }
+    }
+
     fn request_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.windows = platform::get_capture_windows(self.bounds);
         let (sender, receiver) = async_channel::bounded(1);
+        let excluded = std::iter::once(platform::get_window_id(window))
+            .chain(self.countdown.and_then(|countdown| {
+                countdown
+                    .update(cx, |_, window, _| platform::get_window_id(window))
+                    .ok()
+            }))
+            .collect();
         platform::capture_screen(
             &cx.global::<Captures>().source,
-            platform::get_window_id(window),
+            excluded,
             self.bounds,
             self.windows.clone(),
             sender,
@@ -570,7 +613,10 @@ impl CaptureView {
         self.capture_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = capture.await;
             let _ = this.update_in(cx, |capture, window, cx| match result {
-                Ok(loaded) => capture.complete_capture(loaded, window, cx),
+                Ok(loaded) => {
+                    capture.close_countdown(cx);
+                    capture.complete_capture(loaded, window, cx)
+                }
                 Err(error) => {
                     capture.dismiss(window, cx);
                     app::show_error(error);
@@ -622,9 +668,42 @@ impl CaptureView {
         return self.drag.as_ref().map(|drag| drag.mode);
     }
 
-    fn get_hovered_window(&self) -> Option<Rect> {
+    fn set_fixed_region(&mut self, position: Option<Vec2>, size: Option<Vec2>) {
+        let canvas = self.get_canvas();
+        let position = position.map(|position| canvas.pos + position);
+        if let (Some(position), Some(size)) = (position, size) {
+            let clamp = |point: Vec2| point.clamp(canvas.pos, canvas.end());
+            self.selection = Some(Rect::from_corners(clamp(position), clamp(position + size)))
+                .filter(|selection| layout::get_is_valid_selection(*selection));
+            return;
+        }
+        self.fixed_position = position;
+        self.fixed_size = size;
+    }
+
+    fn get_fixed_selection(&self) -> Option<Rect> {
+        if let Some(size) = self.fixed_size {
+            let screen = self.get_screen_at(self.pointer);
+            let size = size.min(screen.size);
+            return Some(Rect {
+                pos: (self.pointer - size / 2.0).clamp(screen.pos, screen.end() - size),
+                size,
+            });
+        }
+        let position = self.fixed_position?;
+        let screen = self.get_screen_at(position);
+        return Some(Rect::from_corners(
+            position,
+            self.pointer.clamp(screen.pos, screen.end()),
+        ));
+    }
+
+    fn get_hovered_region(&self) -> Option<Rect> {
         if self.selection.is_some() || self.drag.is_some() {
             return None;
+        }
+        if let Some(fixed) = self.get_fixed_selection() {
+            return Some(fixed);
         }
         return self
             .windows
@@ -741,8 +820,13 @@ impl CaptureView {
             if !self.get_canvas().contains(pointer) {
                 return;
             }
+            if let Some(fixed) = self.get_fixed_selection() {
+                self.selection = Some(fixed).filter(|fixed| layout::get_is_valid_selection(*fixed));
+                self.editor.selected = None;
+                return;
+            }
             let mut drag = Drag::new(DragMode::New, self.pointer);
-            drag.origin = self.get_hovered_window();
+            drag.origin = self.get_hovered_region();
             self.drag = Some(drag);
             self.selection = None;
             self.editor.selected = None;
@@ -853,12 +937,12 @@ impl CaptureView {
 
     fn update_drag(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         let cursor = self.get_cursor();
-        let hovered = self.get_hovered_window();
+        let hovered = self.get_hovered_region();
         let previous = self.pointer;
         self.pointer = self.get_pointer(event.position);
         let Some(drag) = &self.drag else {
             if cursor != self.get_cursor()
-                || hovered != self.get_hovered_window()
+                || hovered != self.get_hovered_region()
                 || (self.get_shows_magnifier() && previous != self.pointer)
             {
                 cx.notify();
@@ -1531,7 +1615,7 @@ impl Render for CaptureView {
         let selection = self.selection;
         let screen = self.bounds.size;
         let image_bounds = self.get_canvas();
-        let border = selection.or(self.get_hovered_window()).or_else(|| {
+        let border = selection.or(self.get_hovered_region()).or_else(|| {
             self.drag
                 .as_ref()
                 .filter(|drag| drag.mode == DragMode::New)
@@ -2421,9 +2505,9 @@ mod tests {
                 capture.windows = vec![terminal];
                 capture.pointer = vec2(30.0, 30.0);
                 assert!(capture.screenshot.is_none());
-                assert_eq!(capture.get_hovered_window(), Some(terminal));
+                assert_eq!(capture.get_hovered_region(), Some(terminal));
                 capture.pointer = vec2(150.0, 80.0);
-                assert_eq!(capture.get_hovered_window(), None);
+                assert_eq!(capture.get_hovered_region(), None);
             })
             .unwrap();
     }

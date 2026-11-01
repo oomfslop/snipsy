@@ -1,6 +1,8 @@
 use crate::app::content::parse_color;
-use anyhow::{Result, bail};
-use clap::{Parser, Subcommand};
+use anyhow::{Result, bail, ensure};
+use clap::{Args, Parser, Subcommand};
+use glam::UVec2;
+use serde::{Deserialize, Serialize};
 use std::{
     ffi::{OsStr, OsString},
     io::{ErrorKind, Read, Write},
@@ -22,10 +24,43 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
+#[derive(Args, Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SnipOptions {
+    /// Fix the selection's top-left corner, in pixels from the desktop's top-left
+    #[arg(long, value_name = "X,Y", value_parser = parse_pair)]
+    pub position: Option<UVec2>,
+    /// Fix the selection size, in pixels
+    #[arg(long, value_name = "WxH", value_parser = parse_pair)]
+    pub size: Option<UVec2>,
+    /// Wait before taking the screenshot
+    #[arg(long, value_name = "SECONDS")]
+    pub delay: Option<f32>,
+}
+
+impl SnipOptions {
+    pub const MAX_DELAY: f32 = 60.0;
+
+    pub fn validate(self) -> Result<()> {
+        ensure!(
+            self.size.is_none_or(|size| size.min_element() > 0),
+            "Snip size must be positive"
+        );
+        ensure!(
+            self.delay
+                .is_none_or(|delay| (0.0..=Self::MAX_DELAY).contains(&delay)),
+            "Snip delay must be between 0 and {} seconds",
+            Self::MAX_DELAY
+        );
+        return Ok(());
+    }
+}
+
 #[derive(Subcommand, Clone, Debug, PartialEq)]
 pub enum Command {
     /// Select a region to capture, annotate, or record
-    Snip,
+    Snip(SnipOptions),
+    /// Choose a fixed region or delay, then snip
+    CustomSnip,
     /// Start or stop a screen recording
     Record,
     /// Pin clipboard content, text, or files
@@ -49,6 +84,11 @@ pub enum Command {
 }
 
 impl Command {
+    pub const SNIP: Self = Self::Snip(SnipOptions {
+        position: None,
+        size: None,
+        delay: None,
+    });
     pub const PASTE_CLIPBOARD: Self = Self::Paste {
         plain: None,
         files: None,
@@ -65,6 +105,13 @@ impl Command {
         }
         return self;
     }
+}
+
+fn parse_pair(value: &str) -> Result<UVec2, String> {
+    return value
+        .split_once([',', 'x'])
+        .and_then(|(x, y)| Some(UVec2::new(x.trim().parse().ok()?, y.trim().parse().ok()?)))
+        .ok_or_else(|| format!("expected two numbers like 800x600 or 10,20: {value}"));
 }
 
 fn parse_color_argument(value: &str) -> Result<[u8; 4], String> {
@@ -189,7 +236,7 @@ mod tests {
 
         assert_eq!(
             read_instance_command(receiver).unwrap(),
-            Some(Command::Snip)
+            Some(Command::SNIP)
         );
     }
 
@@ -228,7 +275,7 @@ mod tests {
             let listeners = results.into_iter().flatten().collect::<Vec<_>>();
             assert_eq!(listeners.len(), 1);
             let (stream, _) = listeners[0].accept().unwrap();
-            assert_eq!(read_instance_command(stream).unwrap(), Some(Command::Snip));
+            assert_eq!(read_instance_command(stream).unwrap(), Some(Command::SNIP));
         }
     }
 
@@ -241,7 +288,7 @@ mod tests {
     #[test]
     fn commands_parse_text_files_and_colors() {
         assert_eq!(parse(&[]), None);
-        assert_eq!(parse(&["snip"]), Some(Command::Snip));
+        assert_eq!(parse(&["snip"]), Some(Command::SNIP));
         assert_eq!(parse(&["paste"]), Some(Command::PASTE_CLIPBOARD));
         assert_eq!(
             parse(&["paste", "--plain", "hello", "world"]),

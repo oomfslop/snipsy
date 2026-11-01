@@ -21,7 +21,8 @@ pub fn init(sender: async_channel::Sender<Command>, cx: &mut App) -> Result<()> 
     let create_item = |label| MenuItem::new(label, true, None);
     let recording_item = create_item(RECORD_LABEL);
     let items = [
-        (create_item("New Screenshot"), Command::Snip),
+        (create_item("New Screenshot"), Command::SNIP),
+        (create_item("Custom Snip…"), Command::CustomSnip),
         (recording_item.clone(), Command::Record),
         (create_item("Pin Clipboard"), Command::PASTE_CLIPBOARD),
         (
