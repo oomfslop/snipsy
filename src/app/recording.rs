@@ -233,7 +233,7 @@ fn open_overlays(region: Rect, cx: &mut App) -> Result<Vec<View<RegionOverlay>>>
     let desktop = platform::get_desktop_bounds()?;
     let mut overlays = Vec::new();
     for strip in layout::get_dim_rects(Some(region), desktop) {
-        if strip.size.min_element() <= 0.0 {
+        if strip.size.min_element() < 1.0 {
             continue;
         }
         let local = Rect {
