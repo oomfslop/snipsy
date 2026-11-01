@@ -1206,15 +1206,10 @@ pub struct RecordedVideo {
 
 fn create_recorder(
     content: &ShareableContent,
-    overlay: u32,
     bounds: Rect,
     settings: RecordingSettings,
     errors: Sender<String>,
 ) -> Result<ScreenRecorder> {
-    let overlay = content
-        .get_window(overlay)
-        .context("Could not exclude the recording overlay")?;
-    let excluded = NSArray::from_retained_slice(&[overlay]);
     // SAFETY: SCShareableContent getters are valid for the content's lifetime.
     let (display, region) = unsafe { content.0.displays() }
         .iter()
@@ -1223,7 +1218,7 @@ fn create_recorder(
                 .map(|region| (display, region))
         })
         .context("Select an area within one display")?;
-    let filter = create_display_filter(&display, &excluded);
+    let filter = create_display_filter(&display, &NSArray::new());
     let (width, height) = get_recording_size(region.size, unsafe { filter.pointPixelScale() })?;
     let directory = tempfile::Builder::new()
         .prefix("snipsy-recording-")
@@ -1400,7 +1395,6 @@ fn create_recorder(
 pub fn start_screen_recording(
     bounds: Rect,
     settings: RecordingSettings,
-    overlay: u32,
     sender: Sender<Result<ScreenRecorder>>,
     errors: Sender<String>,
 ) {
@@ -1409,9 +1403,9 @@ pub fn start_screen_recording(
         return;
     }
     load_shareable_content(move |result| {
-        let recorder = match result.and_then(|content| {
-            create_recorder(&content, overlay, bounds, settings, errors.clone())
-        }) {
+        let recorder = match result
+            .and_then(|content| create_recorder(&content, bounds, settings, errors.clone()))
+        {
             Ok(recorder) => recorder,
             Err(error) => {
                 let _ = sender.try_send(Err(error));

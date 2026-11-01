@@ -85,10 +85,10 @@ impl RecordingSettings {
 pub enum Recording {
     #[default]
     Idle,
-    Starting(View<RegionOverlay>),
+    Starting(Vec<View<RegionOverlay>>),
     Active {
         recorder: ScreenRecorder,
-        overlay: View<RegionOverlay>,
+        overlays: Vec<View<RegionOverlay>>,
     },
     Stopping,
 }
@@ -108,20 +108,16 @@ pub fn start(bounds: Rect, cx: &mut App) {
         app::show_error(anyhow!("A screen recording is already active"));
         return;
     }
-    let overlay = match open_overlay(bounds, cx) {
-        Ok(overlay) => overlay,
+    let overlays = match open_overlays(bounds, cx) {
+        Ok(overlays) => overlays,
         Err(error) => return app::show_error(error),
     };
-    let overlay_id = overlay
-        .update(cx, |_, window, _| platform::get_window_id(window))
-        .unwrap_or_default();
-    cx.set_global(Recording::Starting(overlay));
+    cx.set_global(Recording::Starting(overlays));
     let (sender, receiver) = async_channel::bounded(1);
     let (error_sender, errors) = async_channel::bounded(1);
     platform::start_screen_recording(
         bounds,
         cx.global::<Config>().recording,
-        overlay_id,
         sender,
         error_sender,
     );
@@ -131,17 +127,17 @@ pub fn start(bounds: Rect, cx: &mut App) {
             .await
             .unwrap_or_else(|error| Err(error.into()));
         cx.update(|cx| {
-            let Recording::Starting(overlay) = std::mem::take(cx.global_mut::<Recording>()) else {
+            let Recording::Starting(overlays) = std::mem::take(cx.global_mut::<Recording>()) else {
                 unreachable!("recording state changed while starting");
             };
             let recorder = match result {
                 Ok(recorder) => recorder,
                 Err(error) => {
-                    close_overlay(overlay, cx);
+                    close_overlays(overlays, cx);
                     return app::show_error(error);
                 }
             };
-            cx.set_global(Recording::Active { recorder, overlay });
+            cx.set_global(Recording::Active { recorder, overlays });
             tray::set_recording(true, cx);
             cx.spawn(async move |cx| {
                 if let Ok(error) = errors.recv().await {
@@ -159,12 +155,12 @@ pub fn start(bounds: Rect, cx: &mut App) {
 }
 
 fn stop(error: Option<anyhow::Error>, cx: &mut App) {
-    let Recording::Active { recorder, overlay } =
+    let Recording::Active { recorder, overlays } =
         std::mem::replace(cx.global_mut::<Recording>(), Recording::Stopping)
     else {
         unreachable!("only an active recording can stop");
     };
-    close_overlay(overlay, cx);
+    close_overlays(overlays, cx);
     tray::set_recording(false, cx);
     let (sender, receiver) = async_channel::bounded(1);
     platform::stop_screen_recording(recorder, sender);
@@ -217,9 +213,7 @@ impl Render for RegionOverlay {
         return canvas(
             |_, _, _| (),
             move |bounds, _, window, _| {
-                for rect in layout::get_dim_rects(Some(region), ui::to_rect(bounds)) {
-                    window.paint_quad(fill(ui::to_bounds(rect), rgba(0x00000066)));
-                }
+                window.paint_quad(fill(bounds, rgba(0x00000066)));
                 window.paint_quad(outline(
                     ui::to_bounds(Rect {
                         pos: region.pos - 1.0,
@@ -234,22 +228,42 @@ impl Render for RegionOverlay {
     }
 }
 
-fn open_overlay(region: Rect, cx: &mut App) -> Result<View<RegionOverlay>> {
+/// A window over the recorded area lags the system cursor while the stream captures it.
+fn open_overlays(region: Rect, cx: &mut App) -> Result<Vec<View<RegionOverlay>>> {
     let desktop = platform::get_desktop_bounds()?;
-    let region = Rect {
-        pos: region.pos - desktop.pos,
-        size: region.size,
-    };
-    let overlay = ui::open_overlay(desktop, false, cx, |_, cx| {
-        cx.new(|_| RegionOverlay { region })
-    })?;
-    overlay.update(cx, |_, window, _| {
-        platform::set_window_click_through(window, true);
-        platform::set_window_visible(window, true);
-    })?;
-    return Ok(overlay);
+    let mut overlays = Vec::new();
+    for strip in layout::get_dim_rects(Some(region), desktop) {
+        if strip.size.min_element() <= 0.0 {
+            continue;
+        }
+        let local = Rect {
+            pos: region.pos - strip.pos,
+            size: region.size,
+        };
+        let overlay = ui::open_overlay(strip, false, cx, |_, cx| {
+            cx.new(|_| RegionOverlay { region: local })
+        })
+        .and_then(|overlay| {
+            overlay.update(cx, |_, window, _| {
+                platform::set_window_click_through(window, true);
+                platform::set_window_visible(window, true);
+            })?;
+            return Ok(overlay);
+        });
+        let overlay = match overlay {
+            Ok(overlay) => overlay,
+            Err(error) => {
+                close_overlays(overlays, cx);
+                return Err(error);
+            }
+        };
+        overlays.push(overlay);
+    }
+    return Ok(overlays);
 }
 
-fn close_overlay(overlay: View<RegionOverlay>, cx: &mut App) {
-    let _ = overlay.update(cx, |_, window, _| window.remove_window());
+fn close_overlays(overlays: Vec<View<RegionOverlay>>, cx: &mut App) {
+    for overlay in overlays {
+        let _ = overlay.update(cx, |_, window, _| window.remove_window());
+    }
 }

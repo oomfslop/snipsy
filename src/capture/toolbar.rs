@@ -544,17 +544,15 @@ impl CaptureView {
                         capture.perform_action(EditorAction::Record, window, cx);
                     })),
             );
-        return ui::create_toolbar_panel(cx)
-            .id("record-options")
-            .absolute()
-            .left(px(bar.pos.x))
-            .top(px(layout::get_options_bar_y(bar, self.bounds.size)))
-            .max_w(px(self.bounds.size.x - bar.pos.x - layout::MARGIN))
-            .cursor(CursorStyle::Arrow)
-            .overflow_x_scroll()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .child(toolbar);
+        let screen = self.bounds.size;
+        return create_options_bar(
+            "record-options",
+            toolbar,
+            bar.pos.x,
+            layout::get_options_bar_y(bar, screen),
+            screen.x - layout::MARGIN,
+            cx,
+        );
     }
 
     fn render_tool_options(
@@ -566,13 +564,13 @@ impl CaptureView {
     ) -> impl IntoElement {
         let screen = self.bounds.size;
         let y = layout::get_options_bar_y(bar, screen);
-        let mut max_width = screen.x - bar.pos.x - layout::MARGIN;
+        let mut right = screen.x - layout::MARGIN;
         if let Some(panel) = layers_panel
             && panel.pos.x > bar.pos.x
             && y < panel.end().y
             && y + bar.size.y > panel.pos.y
         {
-            max_width = max_width.min(panel.pos.x - bar.pos.x - layout::GAP);
+            right = right.min(panel.pos.x - layout::GAP);
         }
         let current = self.editor.get_current_annotation();
         let filled = current.map_or(self.editor.filled, |annotation| annotation.filled);
@@ -741,17 +739,7 @@ impl CaptureView {
         } else {
             toolbar
         };
-        return ui::create_toolbar_panel(cx)
-            .id("tool-options")
-            .absolute()
-            .left(px(bar.pos.x))
-            .top(px(y))
-            .max_w(px(max_width.max(32.0)))
-            .cursor(CursorStyle::Arrow)
-            .overflow_x_scroll()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .child(toolbar);
+        return create_options_bar("tool-options", toolbar, bar.pos.x, y, right, cx);
     }
 
     fn render_size_control(&self, tool: Tool, cx: &mut Context<Self>) -> impl IntoElement {
@@ -991,4 +979,32 @@ mod tests {
             assert!(!TOOLS[index + 1..].iter().any(|other| other.key == tool.key));
         }
     }
+}
+
+fn create_options_bar(
+    id: &'static str,
+    toolbar: gpui_kit::component::toolbar::Toolbar,
+    left: f32,
+    y: f32,
+    right: f32,
+    cx: &App,
+) -> impl IntoElement {
+    return div()
+        .absolute()
+        .left(px(layout::MARGIN))
+        .top(px(y))
+        .w(px((right - layout::MARGIN).max(32.0)))
+        .flex()
+        .child(div().w(px(left - layout::MARGIN)))
+        .child(
+            ui::create_toolbar_panel(cx)
+                .id(id)
+                .flex_shrink_0()
+                .max_w_full()
+                .cursor(CursorStyle::Arrow)
+                .overflow_x_scroll()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .child(toolbar),
+        );
 }
