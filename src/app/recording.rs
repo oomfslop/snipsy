@@ -228,14 +228,23 @@ impl Render for RegionOverlay {
     }
 }
 
-/// A window over the recorded area lags the system cursor while the stream captures it.
+/// A window over the recorded area lags the system cursor while the stream captures it, and
+/// macOS only shows a window on the display holding most of it, so strips are split per display.
 fn open_overlays(region: Rect, cx: &mut App) -> Result<Vec<View<RegionOverlay>>> {
     let desktop = platform::get_desktop_bounds()?;
+    let strips = layout::get_dim_rects(Some(region), desktop);
+    let screens = platform::get_screen_bounds();
     let mut overlays = Vec::new();
-    for strip in layout::get_dim_rects(Some(region), desktop) {
-        if strip.size.min_element() < 1.0 {
+    for (strip, screen) in strips
+        .iter()
+        .flat_map(|strip| screens.iter().map(move |screen| (strip, screen)))
+    {
+        let start = strip.pos.max(screen.pos);
+        let end = strip.end().min(screen.end());
+        if (end - start).min_element() < 1.0 {
             continue;
         }
+        let strip = Rect::from_corners(start, end);
         let local = Rect {
             pos: region.pos - strip.pos,
             size: region.size,
