@@ -44,8 +44,8 @@ use objc2_core_graphics::{
     CGDisplayCopyColorSpace, CGError, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
     CGPreflightScreenCaptureAccess, CGRectMakeWithDictionaryRepresentation,
     CGRequestScreenCaptureAccess, CGWarpMouseCursorPosition, CGWindowListCopyWindowInfo,
-    CGWindowListOption, kCGColorSpaceSRGB, kCGDisplayStreamYCbCrMatrix_ITU_R_709_2, kCGWindowAlpha,
-    kCGWindowBounds, kCGWindowLayer,
+    CGWindowListOption, kCGColorSpaceSRGB, kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
+    kCGDockWindowLevel, kCGNormalWindowLevel, kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer,
 };
 use objc2_core_image::{CIImage, CIVector, kCIFormatRGBA8, kCIInputCenterKey, kCIInputScaleKey};
 use objc2_core_media::{CMSampleBuffer, CMTime, CMTimeRange, kCMTimeZero};
@@ -651,7 +651,9 @@ pub fn get_capture_windows(bounds: Rect) -> Vec<Rect> {
                         .ok()?,
                 )
             };
-            if layer != 0 || alpha <= 0.0 {
+            if !(kCGNormalWindowLevel as i64..kCGDockWindowLevel as i64).contains(&layer)
+                || alpha <= 0.0
+            {
                 return None;
             }
             let mut rect = CGRect::ZERO;
