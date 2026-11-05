@@ -107,7 +107,14 @@ fn present_overlay(view: View<CaptureView>, cx: &mut App) {
             platform::draw_hidden_window(&native);
         }
         cx.update(|cx| {
-            let _ = view.update(cx, |capture, window, cx| capture.activate(window, cx));
+            let _ = view.update(cx, |capture, window, cx| {
+                // Launcher panels like Raycast hide when they lose focus, which would race the screenshot.
+                if capture.screenshot.is_some() {
+                    capture.activate(window, cx);
+                } else {
+                    platform::set_window_visible(window, true);
+                }
+            });
         });
     })
     .detach();
