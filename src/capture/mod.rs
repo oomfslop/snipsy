@@ -1512,21 +1512,18 @@ impl CaptureView {
             let _ = this.update(cx, |capture, cx| {
                 let preview = &mut capture.raster_preview;
                 preview.task = None;
-                if capture.selection == Some(selection) {
-                    preview.scene = scene;
-                    preview.selection = Some(selection);
-                    let image = match result {
-                        Ok(image) => Some(image),
-                        Err(error) => {
-                            capture.error = Some(format!("{error:#}").into());
-                            None
-                        }
-                    };
-                    if let Some(previous) =
-                        std::mem::replace(&mut capture.raster_preview.image, image)
-                    {
-                        cx.drop_image(previous, None);
+                preview.scene = scene;
+                preview.selection = Some(selection);
+                let image = match result {
+                    Ok(image) => Some(image),
+                    Err(error) => {
+                        capture.error = Some(format!("{error:#}").into());
+                        None
                     }
+                };
+                if let Some(previous) = std::mem::replace(&mut capture.raster_preview.image, image)
+                {
+                    cx.drop_image(previous, None);
                 }
                 cx.notify();
             });
@@ -1654,7 +1651,7 @@ impl Render for CaptureView {
             .raster_preview
             .image
             .clone()
-            .filter(|_| self.raster_preview.selection == selection)
+            .zip(self.raster_preview.selection)
             .zip(selection);
         let recognition = self.get_recognition_overlay();
         return div()
@@ -1709,14 +1706,23 @@ impl Render for CaptureView {
                         .h(px(image_bounds.size.y)),
                 )
             })
-            .when_some(raster_preview, |root, (image, selection)| {
+            .when_some(raster_preview, |root, ((image, rendered), selection)| {
                 root.child(
-                    img(image)
+                    div()
                         .absolute()
                         .left(px(selection.pos.x))
                         .top(px(selection.pos.y))
                         .w(px(selection.size.x))
-                        .h(px(selection.size.y)),
+                        .h(px(selection.size.y))
+                        .overflow_hidden()
+                        .child(
+                            img(image)
+                                .absolute()
+                                .left(px(rendered.pos.x - selection.pos.x))
+                                .top(px(rendered.pos.y - selection.pos.y))
+                                .w(px(rendered.size.x))
+                                .h(px(rendered.size.y)),
+                        ),
                 )
             })
             .child(
