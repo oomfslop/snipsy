@@ -34,7 +34,7 @@ use gpui_kit::{
     *,
 };
 use image::RgbaImage;
-use layout::ResizeHandle;
+use layout::{AnnotationHandle, ResizeHandle};
 use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 use text::TextCursor;
 
@@ -291,6 +291,7 @@ enum DragMode {
     Resize(ResizeHandle),
     Draw,
     MoveAnnotation(usize),
+    EditAnnotation(usize, AnnotationHandle),
     SelectText(usize, usize),
     SelectRecognizedText(recognition::TextPosition, recognition::TextPosition),
     Erase,
@@ -752,6 +753,7 @@ impl CaptureView {
         };
         return get_cursor_style(
             self.get_drag_mode(),
+            self.get_hovered_annotation_handle(),
             tool,
             self.pointer,
             self.selection,
@@ -783,6 +785,12 @@ impl CaptureView {
             Tool::SmartEraser => !matches!(self.mode, Mode::Video),
             _ => true,
         };
+    }
+
+    fn get_hovered_annotation_handle(&self) -> Option<AnnotationHandle> {
+        self.selection?;
+        let index = self.editor.selected?;
+        return layout::get_annotation_handle(self.pointer, &self.editor.layers[index]);
     }
 
     fn get_annotation_at(&self, point: Vec2, window: &Window) -> Option<usize> {
@@ -834,6 +842,13 @@ impl CaptureView {
             self.editor.commit_draft();
         }
         let pointer = self.pointer;
+        if let Some(handle) = self.get_hovered_annotation_handle() {
+            let index = self.editor.selected.unwrap();
+            let mut drag = Drag::new(DragMode::EditAnnotation(index, handle), pointer);
+            drag.annotation_origin = self.editor.layers[index].points.clone();
+            self.drag = Some(drag);
+            return;
+        }
         let Some(selection) = self.selection.filter(|selection| {
             selection.contains(pointer) || layout::get_resize_handle(pointer, *selection).is_some()
         }) else {
@@ -1024,6 +1039,21 @@ impl CaptureView {
                 }
                 self.editor.layers[index].points = points;
             }
+            DragMode::EditAnnotation(index, handle) => {
+                let Some(selection) = self.selection else {
+                    return;
+                };
+                let points = layout::create_edited_points(
+                    &drag.annotation_origin,
+                    handle,
+                    point - start,
+                    selection,
+                );
+                if points != self.editor.layers[index].points {
+                    self.record_drag_change();
+                    self.editor.layers[index].points = points;
+                }
+            }
             DragMode::Draw => {
                 if let Some(draft) = &mut self.editor.draft {
                     if matches!(draft.tool, Tool::Pen | Tool::Highlighter) {
@@ -1071,6 +1101,15 @@ impl CaptureView {
             && self.open_recognized_link(window, cx)
         {
             return;
+        }
+        if let DragMode::EditAnnotation(index, _) = drag.mode {
+            let points = &self.editor.layers[index].points;
+            if points.len() == 2 && points[0].distance(points[1]) < 1.0 {
+                self.editor.layers[index].points = drag.annotation_origin;
+                if drag.recorded_change {
+                    self.editor.undo.pop();
+                }
+            }
         }
         if drag.mode == DragMode::New && self.selection.is_none() {
             self.selection = drag.origin;
@@ -1584,6 +1623,7 @@ fn get_tool_family(tool: Tool) -> Tool {
 
 fn get_cursor_style(
     drag: Option<DragMode>,
+    annotation_handle: Option<AnnotationHandle>,
     tool: Tool,
     pointer: Vec2,
     selection: Option<Rect>,
@@ -1591,12 +1631,23 @@ fn get_cursor_style(
 ) -> CursorStyle {
     let handle = match drag {
         Some(DragMode::New | DragMode::Draw | DragMode::Erase) => return CursorStyle::Crosshair,
-        Some(DragMode::Move | DragMode::MoveAnnotation(_)) => return CursorStyle::ClosedHand,
+        Some(
+            DragMode::Move
+            | DragMode::MoveAnnotation(_)
+            | DragMode::EditAnnotation(_, AnnotationHandle::Point(_)),
+        ) => return CursorStyle::ClosedHand,
         Some(DragMode::SelectText(_, _) | DragMode::SelectRecognizedText(_, _)) => {
             return CursorStyle::IBeam;
         }
-        Some(DragMode::Resize(handle)) => Some(handle),
-        None => selection.and_then(|selection| layout::get_resize_handle(pointer, selection)),
+        Some(
+            DragMode::Resize(handle)
+            | DragMode::EditAnnotation(_, AnnotationHandle::Resize(handle)),
+        ) => Some(handle),
+        None => match annotation_handle {
+            Some(AnnotationHandle::Resize(handle)) => Some(handle),
+            Some(AnnotationHandle::Point(_)) => return CursorStyle::OpenHand,
+            None => selection.and_then(|selection| layout::get_resize_handle(pointer, selection)),
+        },
     };
     if let Some(handle) = handle {
         return match handle {
@@ -1654,6 +1705,10 @@ impl Render for CaptureView {
             .zip(self.raster_preview.selection)
             .zip(selection);
         let recognition = self.get_recognition_overlay();
+        let annotation_handles: Vec<_> = selection
+            .and(self.editor.selected)
+            .map(|index| layout::get_annotation_handles(&self.editor.layers[index]))
+            .unwrap_or_default();
         return div()
             .id("capture")
             .size_full()
@@ -1806,7 +1861,11 @@ impl Render for CaptureView {
                         if selection.is_none() {
                             return;
                         }
-                        for (_, center) in layout::get_resize_handle_centers(border) {
+                        let centers = layout::get_resize_handle_centers(border)
+                            .into_iter()
+                            .map(|(_, center)| center)
+                            .chain(annotation_handles.iter().map(|(_, center)| *center));
+                        for center in centers {
                             let radius = 3.5;
                             let mut quad = fill(
                                 ui::to_bounds(Rect {
@@ -2431,7 +2490,7 @@ mod tests {
                     capture.editor.commit_draft();
                     capture.begin_drag(
                         &MouseDownEvent {
-                            position: point(px(20.0), px(20.0)),
+                            position: point(px(35.0), px(20.0)),
                             click_count: 1,
                             ..Default::default()
                         },
@@ -2467,7 +2526,7 @@ mod tests {
             pos: Vec2::ZERO,
             size: vec2(200.0, 200.0),
         };
-        let cursor = |drag, tool| get_cursor_style(drag, tool, rect.pos, Some(rect), canvas);
+        let cursor = |drag, tool| get_cursor_style(drag, None, tool, rect.pos, Some(rect), canvas);
         assert_eq!(
             cursor(Some(DragMode::Move), Tool::Select),
             CursorStyle::ClosedHand
@@ -2489,11 +2548,11 @@ mod tests {
             CursorStyle::ResizeUpLeftDownRight
         );
         assert_eq!(
-            get_cursor_style(None, Tool::Pen, vec2(150.0, 150.0), Some(rect), canvas),
+            get_cursor_style(None, None, Tool::Pen, vec2(150.0, 150.0), Some(rect), canvas),
             CursorStyle::Crosshair
         );
         assert_eq!(
-            get_cursor_style(None, Tool::Pen, vec2(250.0, 150.0), Some(rect), canvas),
+            get_cursor_style(None, None, Tool::Pen, vec2(250.0, 150.0), Some(rect), canvas),
             CursorStyle::Arrow
         );
     }

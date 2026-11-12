@@ -1,9 +1,13 @@
-use crate::geometry::Rect;
+use crate::{
+    editor::{Annotation, Tool},
+    geometry::Rect,
+};
 use glam::{Vec2, vec2};
 
 pub const MARGIN: f32 = 8.0;
 pub const GAP: f32 = 4.0;
 const HANDLE_HIT_RADIUS: f32 = 4.0;
+const ANNOTATION_HANDLE_HIT_RADIUS: f32 = 6.0;
 pub const MIN_SELECTION: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,6 +20,64 @@ pub enum ResizeHandle {
     Bottom,
     BottomLeft,
     Left,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnnotationHandle {
+    Resize(ResizeHandle),
+    Point(usize),
+}
+
+pub fn get_annotation_handles(annotation: &Annotation) -> Vec<(AnnotationHandle, Vec2)> {
+    return match annotation.tool {
+        Tool::Rectangle | Tool::Ellipse | Tool::Mosaic => get_resize_handle_centers(
+            Rect::from_corners(annotation.points[0], *annotation.points.last().unwrap()),
+        )
+        .map(|(handle, center)| (AnnotationHandle::Resize(handle), center))
+        .to_vec(),
+        Tool::Arrow | Tool::Line => annotation
+            .points
+            .iter()
+            .enumerate()
+            .map(|(index, point)| (AnnotationHandle::Point(index), *point))
+            .collect(),
+        _ => Vec::new(),
+    };
+}
+
+pub fn get_annotation_handle(point: Vec2, annotation: &Annotation) -> Option<AnnotationHandle> {
+    return get_annotation_handles(annotation)
+        .into_iter()
+        .map(|(handle, center)| (handle, center.distance(point)))
+        .filter(|(_, distance)| *distance <= ANNOTATION_HANDLE_HIT_RADIUS)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(handle, _)| handle);
+}
+
+pub fn create_edited_points(
+    origin: &[Vec2],
+    handle: AnnotationHandle,
+    delta: Vec2,
+    bounds: Rect,
+) -> Vec<Vec2> {
+    let clamp = |point: Vec2| point.clamp(bounds.pos, bounds.end());
+    return match handle {
+        AnnotationHandle::Resize(handle) => {
+            let rect = Rect::from_corners(origin[0], *origin.last().unwrap());
+            let center = get_resize_handle_centers(rect)
+                .into_iter()
+                .find(|(candidate, _)| *candidate == handle)
+                .unwrap()
+                .1;
+            let rect = create_resized_selection(rect, handle, clamp(center + delta));
+            vec![rect.pos, rect.end()]
+        }
+        AnnotationHandle::Point(index) => {
+            let mut points = origin.to_vec();
+            points[index] = clamp(points[index] + delta);
+            points
+        }
+    };
 }
 
 pub fn get_resize_handle_centers(selection: Rect) -> [(ResizeHandle, Vec2); 8] {

@@ -622,10 +622,14 @@ impl Editor {
 
     pub fn adjust_size(&mut self, step: f32) {
         let width = self.get_current_width();
-        if self.get_current_tool() == Tool::Text {
-            self.set_text_size(width + step * 2.0);
-        } else {
-            self.set_width(width + step);
+        match self.get_current_tool() {
+            Tool::Text => self.set_text_size(width + step * 2.0),
+            Tool::Mosaic => self.set_intensity(
+                self.get_current_annotation()
+                    .map_or(self.intensity, |annotation| annotation.intensity)
+                    + step,
+            ),
+            _ => self.set_width(width + step),
         }
     }
 
