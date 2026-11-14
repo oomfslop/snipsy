@@ -284,6 +284,8 @@ enum Mode {
     Video,
 }
 
+const CLICK_SLOP: f32 = 3.0;
+
 #[derive(Clone, Copy, PartialEq)]
 enum DragMode {
     New,
@@ -302,6 +304,7 @@ struct Drag {
     start: Vec2,
     origin: Option<Rect>,
     annotation_origin: Vec<Vec2>,
+    click_target: Option<usize>,
     recorded_change: bool,
 }
 
@@ -312,6 +315,7 @@ impl Drag {
             start,
             origin: None,
             annotation_origin: Vec::new(),
+            click_target: None,
             recorded_change: false,
         };
     }
@@ -891,17 +895,10 @@ impl CaptureView {
             self.begin_text_selection(event, window, cx);
             return;
         }
-        let grabs_same_family = !matches!(tool, Tool::Text | Tool::Eraser)
-            && hit.is_some_and(|index| {
-                tool == Tool::Select
-                    || get_tool_family(self.editor.layers[index].tool) == get_tool_family(tool)
-            });
-        if let (true, Some(index)) = (grabs_same_family, hit) {
-            if tool == Tool::Select {
-                self.editor.select_layer(index);
-            } else {
-                self.editor.selected = Some(index);
-            }
+        if tool == Tool::Select
+            && let Some(index) = hit
+        {
+            self.editor.select_layer(index);
             let mut drag = Drag::new(DragMode::MoveAnnotation(index), self.pointer);
             drag.annotation_origin = self.editor.layers[index].points.clone();
             self.drag = Some(drag);
@@ -945,7 +942,13 @@ impl CaptureView {
                 if tool == Tool::Text {
                     self.text = TextCursor::default();
                 } else {
-                    self.drag = Some(Drag::new(DragMode::Draw, self.pointer));
+                    let mut drag = Drag::new(DragMode::Draw, self.pointer);
+                    drag.click_target = hit.filter(|index| {
+                        let annotation = &self.editor.layers[*index];
+                        get_tool_family(annotation.tool) == get_tool_family(tool)
+                            && !layout::get_annotation_handles(annotation).is_empty()
+                    });
+                    self.drag = Some(drag);
                 }
             }
         }
@@ -1117,7 +1120,12 @@ impl CaptureView {
         self.selection = self
             .selection
             .filter(|selection| layout::get_is_valid_selection(*selection));
-        if drag.mode == DragMode::Draw && self.editor.tool == Tool::Line {
+        if let Some(index) = drag.click_target
+            && drag.start.distance(self.pointer) < CLICK_SLOP
+        {
+            self.editor.draft = None;
+            self.editor.selected = Some(index);
+        } else if drag.mode == DragMode::Draw && self.editor.tool == Tool::Line {
             let dragged = drag.start.distance(self.pointer) >= 1.0;
             if !dragged
                 && let Some(draft) = &mut self.editor.draft
